@@ -22,6 +22,8 @@ const { McpClient, McpManager } = require('../src/services/mcp');
 const { BrowserManager, createBrowserTools } = require('../src/services/browser');
 const { ComputerManager } = require('../src/services/computer');
 const extAgents = require('../src/services/externalAgents');
+const { PermissionEngine } = require('../src/security/permissions');
+const visionReader = require('../src/services/visionReader');
 const store = require('../src/db/store');
 
 const FIXTURE = path.join(__dirname, 'fixtures', 'mcp-echo-server.js');
@@ -280,4 +282,102 @@ test('ExternalAgent: WorkBuddy 桥接读到真实回答时返回内容而非"请
   assert.strictEqual(out.detection, 'sentinel');
   assert.strictEqual(out.inputVia, 'uia-value');
   assert.match(out.summary, /本周合并 3 个 PR/, '必须回传对方真实产出的文本');
+});
+
+/* --------------------------------------------- P2-9 真实端到端：穿透外部 Agent 运行时的闭环 */
+
+/**
+ * 最重要的一条 e2e：通过 runExternalAgent（外部 Agent 真正被调用的入口）走完
+ * P0-4 整条链路——WorkBuddy 窗口无 UIA 文本 → 截图 → 视觉模型读屏 → 拿回真实回答。
+ * 这条链路此前从未在「外部 Agent 运行时」这一层被验证过。
+ */
+test('ExternalAgent: WorkBuddy 窗口无 UIA 文本时经外部 Agent 入口走视觉读屏拿回真实答案', async () => {
+  const answer = '视觉读到的答案：本周合并 3 个 PR，修复 5 个缺陷。';
+  const vision = {
+    get available() { return true; },
+    unavailableReason() { return 'n/a'; },
+    model: 'vision-unit-1',
+    source: 'configured',
+    label: 'Fake Vision',
+    hash: (d) => visionReader.imageHash(d),
+    calls: 0,
+    async analyze(dataUrl, opts) {
+      assert.ok(dataUrl && dataUrl.startsWith('data:image'), '必须真的把截图喂给视觉模型');
+      this.calls++;
+      return { ok: true, state: 'done', answer, confidence: 0.9, imageHash: 'h' + this.calls, model: this.model, calls: this.calls };
+    }
+  };
+  const fakeComputer = {
+    listWindows: async () => ({ ok: true, windows: [{ pid: 7, title: 'WorkBuddy — 工作台' }] }),
+    focusWindow: async () => ({ ok: true }),
+    setControlValue: async () => ({ ok: true }), // 把任务提交进窗口（UIA 输入）
+    pressKeys: async () => ({ ok: true }),
+    screenshotWindow: async () => ({ ok: true, data_url: 'data:image/png;base64,iVBORw0KGgo=' }),
+    screenshot: async () => ({ ok: true, data_url: 'data:image/png;base64,iVBORw0KGgo=' })
+    // 故意不提供 getWindowText —— 模拟窗口不暴露 UI 自动化文本
+  };
+  const out = JSON.parse(await extAgents.runExternalAgent(
+    { adapter_type: 'workbuddy', config: {} }, '整理周报',
+    { computerManager: fakeComputer, visionReader: vision, sleep: async () => {} }
+  ));
+  assert.strictEqual(out.status, 'completed', '视觉降级后必须真的完成，而不是假装失败');
+  assert.strictEqual(out.readVia, 'vision', '读屏方式必须是 vision');
+  assert.match(out.summary, /本周合并 3 个 PR/, '必须回传视觉模型读到的真实文本');
+  assert.strictEqual(out.visionCalls, 1, '至少调用一次视觉模型');
+  assert.strictEqual(out.visionModel, 'vision-unit-1');
+});
+
+test('ExternalAgent: 没配视觉模型时，UIA 不可读应诚实报 VISION_MODEL_REQUIRED 而非伪造完成', async () => {
+  const fakeComputer = {
+    listWindows: async () => ({ ok: true, windows: [{ pid: 7, title: 'WorkBuddy — 工作台' }] }),
+    focusWindow: async () => ({ ok: true }),
+    setControlValue: async () => ({ ok: true }),
+    pressKeys: async () => ({ ok: true }),
+    screenshotWindow: async () => ({ ok: true, data_url: 'data:image/png;base64,iVBORw0KGgo=' }),
+    screenshot: async () => ({ ok: true, data_url: 'data:image/png;base64,iVBORw0KGgo=' })
+  };
+  const out = JSON.parse(await extAgents.runExternalAgent(
+    { adapter_type: 'workbuddy', config: {} }, '整理周报',
+    { computerManager: fakeComputer, visionReader: null, sleep: async () => {} }
+  ));
+  assert.strictEqual(out.status, 'failed');
+  assert.strictEqual(out.code, 'VISION_MODEL_REQUIRED');
+});
+
+/** P0-2: 权限闸门同时存在于外部 Agent 运行时（不仅是 Agent Runtime）。 */
+test('ExternalAgent: 权限不足时直接 PERMISSION_DENIED，绝不默默放行', async () => {
+  const engine = new PermissionEngine();
+  engine.grant('network', 'deny', { persist: false }); // HTTP 适配器需要 network 作用域
+  const out = JSON.parse(await extAgents.runExternalAgent(
+    { adapter_type: 'http', config: { endpoint: 'http://127.0.0.1:9/x' } }, 'task',
+    { store, permissionEngine: engine, requestPermission: null }
+  ));
+  assert.strictEqual(out.status, 'failed');
+  assert.strictEqual(out.code, 'PERMISSION_DENIED');
+  assert.strictEqual(out.deniedScope, 'network');
+});
+
+/** P0-3: 用户在任务开始前就按了 Stop，外部 Agent 应立即 cancelled 而不发任何请求。 */
+test('ExternalAgent: 任务开始前 signal 已 abort 时返回 cancelled', async () => {
+  const ac = new AbortController();
+  ac.abort();
+  const out = JSON.parse(await extAgents.runExternalAgent(
+    { adapter_type: 'http', config: { endpoint: 'http://127.0.0.1:9/x' } }, 'task',
+    { store, signal: ac.signal }
+  ));
+  assert.strictEqual(out.status, 'cancelled');
+  assert.match(out.errors[0], /停止/);
+});
+
+/** P1-5: Codex 必须在「当前项目根目录」下运行，而不是应用自己的 cwd。 */
+test('ExternalAgent: resolveCodexCwd 优先用项目根目录、可被 adapter.cwd 覆盖', async () => {
+  const { resolveCodexCwd } = require('../src/services/externalAgents');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'adp-cwd-'));
+  // 1) ctx.projectRoot 生效
+  assert.strictEqual(resolveCodexCwd({}, { projectRoot: dir }), dir);
+  // 2) adapter.cwd 优先级更高
+  const override = fs.mkdtempSync(path.join(os.tmpdir(), 'adp-cwd-o-'));
+  assert.strictEqual(resolveCodexCwd({ cwd: override }, { projectRoot: dir }), override);
+  // 3) 两者都缺时回退到 process.cwd
+  assert.strictEqual(resolveCodexCwd({}, {}), process.cwd());
 });

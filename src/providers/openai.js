@@ -9,7 +9,7 @@
  *  - the Responses adapter probes /responses (NOT /chat/completions) — the two
  *    endpoints have independent availability on most gateways.
  */
-const { authHeaders, baseUrlOf, postJson, getJson, streamSSE, interpretError, NODE_TIMEOUT } = require('./http');
+const { authHeaders, baseUrlOf, postJson, getJson, streamSSE, interpretError, throwIfAborted, releaseResponse, NODE_TIMEOUT } = require('./http');
 const { partsOf, dataUrl } = require('./content');
 
 /**
@@ -66,35 +66,66 @@ function toOpenAITools(tools) {
 
 // ---------------- chat/completions ----------------
 function createOpenAIChat(conn) {
+  /**
+   * P1-71: never hard-code a probe model. Use what the user configured; if the
+   * connection has nothing yet, ask the gateway for its model list and probe
+   * with the first entry. If even that fails we report it instead of pretending
+   * `gpt-4o-mini` exists on someone's private endpoint.
+   */
+  async function probeModel(opts = {}) {
+    const m = opts.model || (conn.models && conn.models[0]) || conn.default_model || conn.model;
+    if (m) return m;
+    try {
+      const list = await listModels(opts);
+      if (Array.isArray(list) && list.length) return list[0];
+    } catch { /* fall through to the explicit error below */ }
+    return null;
+  }
+
   async function testConnection(opts = {}) {
     const t0 = Date.now();
     const url = baseUrlOf(conn) + '/chat/completions';
-    const model = opts.model || (conn.models && conn.models[0]) || conn.default_model || 'gpt-4o-mini';
+    const model = await probeModel(opts);
+    if (!model) {
+      return {
+        ok: false, status: 0, endpoint: '/chat/completions', model: null, latency: Date.now() - t0,
+        message: '未指定模型：请先点击「获取模型」并选择一个模型，再测试连接'
+      };
+    }
     const body = { model, messages: [{ role: 'user', content: 'hi' }], max_tokens: 1, stream: false };
     try {
-      const resp = await postJson(url, body, conn, 15000);
+      const resp = await postJson(url, body, conn, { timeoutMs: opts.timeoutMs || 15000, signal: opts.signal });
       const latency = Date.now() - t0;
+      const txt = resp.ok ? null : await resp.text();
+      releaseResponse(resp);
       if (resp.ok) return { ok: true, status: resp.status, message: '连接成功', latency, endpoint: '/chat/completions', model };
-      const txt = await resp.text();
       return { ok: false, status: resp.status, message: interpretError(resp.status, txt), latency, endpoint: '/chat/completions', model };
     } catch (e) {
       return { ok: false, status: 0, message: `无法连接: ${e.message}`, latency: Date.now() - t0, endpoint: '/chat/completions', model };
     }
   }
 
-  async function listModels() {
+  async function listModels(opts = {}) {
     const url = baseUrlOf(conn) + '/models';
-    const resp = await getJson(url, conn, 15000);
+    const resp = await getJson(url, conn, { timeoutMs: opts.timeoutMs || 15000, signal: opts.signal });
     if (!resp.ok) {
+      releaseResponse(resp);
       let msg = `获取模型失败 (${resp.status})`;
       if (resp.status === 401 || resp.status === 403) msg = 'API Key 无效';
       if (resp.status === 404) msg = '该接口不支持 /models';
       throw new Error(msg);
     }
     const json = await resp.json();
+    releaseResponse(resp);
     const list = Array.isArray(json) ? json : json.data;
     if (!Array.isArray(list)) throw new Error('返回数据格式不支持');
     return list.map(m => m.id || m.name).filter(Boolean);
+  }
+
+  /** P1-7: uniform detailed shape; OpenAI-compatible gateways return real ids. */
+  async function listModelsDetailed(opts = {}) {
+    const models = await listModels(opts);
+    return { models, source: 'remote' };
   }
 
   async function streamResponse(opts) {
@@ -111,15 +142,21 @@ function createOpenAIChat(conn) {
     const tls = toOpenAITools(tools);
     if (tls.length) body.tools = tls;
 
-    const resp = await postJson(url, body, conn, NODE_TIMEOUT);
-    if (!resp.ok) { const txt = await resp.text(); throw new Error(interpretError(resp.status, txt)); }
+    throwIfAborted(signal);
+    // The signal is handed to fetch() itself — aborting kills the socket even if
+    // the server never sends another chunk (P0-1).
+    const resp = await postJson(url, body, conn, { timeoutMs: opts.timeoutMs || NODE_TIMEOUT, signal });
+    if (!resp.ok) {
+      const txt = await resp.text();
+      releaseResponse(resp);
+      throw new Error(interpretError(resp.status, txt));
+    }
 
     let full = '';
     let acc = [];
     let usage = null;
     let respModel = null;
     for await (const chunk of streamSSE(resp)) {
-      if (signal && signal.aborted) throw new Error('aborted');
       if (chunk.model && !respModel) respModel = chunk.model;
       const delta = chunk.choices?.[0]?.delta;
       if (delta?.content) { full += delta.content; if (onChunk) onChunk(delta.content); }
@@ -139,7 +176,7 @@ function createOpenAIChat(conn) {
     return { content: full, toolCalls: toolCalls.length ? toolCalls : null, usage, model, responseModel: respModel || model };
   }
 
-  return { protocol: 'openai-chat', endpoint: '/chat/completions', supportsVision: true, testConnection, listModels, streamResponse };
+  return { protocol: 'openai-chat', endpoint: '/chat/completions', supportsVision: true, testConnection, listModels, listModelsDetailed, streamResponse };
 }
 
 // ---------------- /v1/responses ----------------
@@ -149,16 +186,36 @@ function createOpenAIResponses(conn) {
    * /chat/completions and still 404 on /responses, so testing the wrong path
    * reports a healthy connection that then fails on the first real message.
    */
+  async function listModels(opts = {}) { return createOpenAIChat(conn).listModels(opts); }
+  async function listModelsDetailed(opts = {}) { return createOpenAIChat(conn).listModelsDetailed(opts); }
+
+  async function probeModel(opts = {}) {
+    const m = opts.model || (conn.models && conn.models[0]) || conn.default_model || conn.model;
+    if (m) return m;
+    try {
+      const list = await listModels(opts);
+      if (Array.isArray(list) && list.length) return list[0];
+    } catch { /* reported below */ }
+    return null;
+  }
+
   async function testConnection(opts = {}) {
     const t0 = Date.now();
     const url = baseUrlOf(conn) + '/responses';
-    const model = opts.model || (conn.models && conn.models[0]) || conn.default_model || 'gpt-4o-mini';
+    const model = await probeModel(opts);
+    if (!model) {
+      return {
+        ok: false, status: 0, endpoint: '/responses', model: null, latency: Date.now() - t0,
+        message: '未指定模型：请先点击「获取模型」并选择一个模型，再测试连接'
+      };
+    }
     const body = { model, input: [{ role: 'user', content: 'hi' }], max_output_tokens: 16, stream: false };
     try {
-      const resp = await postJson(url, body, conn, 15000);
+      const resp = await postJson(url, body, conn, { timeoutMs: opts.timeoutMs || 15000, signal: opts.signal });
       const latency = Date.now() - t0;
+      const txt = resp.ok ? null : await resp.text();
+      releaseResponse(resp);
       if (resp.ok) return { ok: true, status: resp.status, message: '连接成功（/responses）', latency, endpoint: '/responses', model };
-      const txt = await resp.text();
       let message = interpretError(resp.status, txt);
       if (resp.status === 404) message = '该服务不支持 /responses 接口（请改用 OpenAI Chat 协议）';
       return { ok: false, status: resp.status, message, latency, endpoint: '/responses', model };
@@ -166,7 +223,6 @@ function createOpenAIResponses(conn) {
       return { ok: false, status: 0, message: `无法连接: ${e.message}`, latency: Date.now() - t0, endpoint: '/responses', model };
     }
   }
-  async function listModels() { return createOpenAIChat(conn).listModels(); }
 
   function responsesContent(content, role) {
     const parts = partsOf(content);
@@ -206,8 +262,13 @@ function createOpenAIResponses(conn) {
       stream: true,
       tools: (tools || []).map(t => ({ type: 'function', name: t.name, description: t.description, parameters: t.parameters || { type: 'object', properties: {} } }))
     };
-    const resp = await postJson(url, body, conn, NODE_TIMEOUT);
-    if (!resp.ok) { const txt = await resp.text(); throw new Error(interpretError(resp.status, txt)); }
+    throwIfAborted(signal);
+    const resp = await postJson(url, body, conn, { timeoutMs: opts.timeoutMs || NODE_TIMEOUT, signal });
+    if (!resp.ok) {
+      const txt = await resp.text();
+      releaseResponse(resp);
+      throw new Error(interpretError(resp.status, txt));
+    }
 
     let full = '';
     let calls = {};      // item_id -> {id,name,arguments}
@@ -216,7 +277,6 @@ function createOpenAIResponses(conn) {
     let usage = null;
     let respModel = null;
     for await (const ev of streamSSE(resp)) {
-      if (signal && signal.aborted) throw new Error('aborted');
       const type = ev.type;
       if (ev.response?.model && !respModel) respModel = ev.response.model;
       if (type === 'response.output_text.delta') { full += ev.delta; if (onChunk) onChunk(ev.delta); }
@@ -237,7 +297,7 @@ function createOpenAIResponses(conn) {
     return { content: full, toolCalls: toolCalls.length ? toolCalls : null, usage, model, responseModel: respModel || model };
   }
 
-  return { protocol: 'openai-responses', endpoint: '/responses', supportsVision: true, testConnection, listModels, streamResponse };
+  return { protocol: 'openai-responses', endpoint: '/responses', supportsVision: true, testConnection, listModels, listModelsDetailed, streamResponse };
 }
 
 module.exports = { createOpenAIChat, createOpenAIResponses, toChatMessages, toOpenAITools, wireModel };

@@ -9,13 +9,69 @@ const extAgents = require('../services/externalAgents');
 
 function parseArgs(s) { try { return JSON.parse(s || '{}'); } catch { return {}; } }
 
+/**
+ * The one object every external adapter receives.
+ *
+ * P0-2 / P0-3 / P1-5: the old call site passed only `{store, computerManager}`,
+ * so an external agent had no abort signal (Stop did nothing), no permission
+ * engine (nothing was gated) and no project root (Codex ran in the app's cwd).
+ * Building it in a single place means adding a field can't be forgotten by one
+ * of the three adapters.
+ */
+function buildExternalContext(deps, subDef, parentRunCtx, extra = {}) {
+  return {
+    // identity
+    projectId: parentRunCtx.projectId || deps.project?.id || null,
+    projectRoot: parentRunCtx.projectRoot || deps.projectRoot || null,
+    conversationId: parentRunCtx.conversationId || null,
+    taskId: parentRunCtx.taskId || null,
+    parentAgentId: parentRunCtx.agentId || null,
+    parentAgentName: parentRunCtx.agentName || null,
+    adapterId: subDef.id || null,
+    adapterName: subDef.name || null,
+    // control
+    signal: parentRunCtx.abortSignal || deps.abortSignal || null,
+    timeoutMs: parentRunCtx.toolTimeoutMs,
+    // capabilities
+    store: deps.store,
+    computerManager: deps.computerManager,
+    permissionEngine: parentRunCtx.permissionEngine || deps.permissionEngine || null,
+    requestPermission: deps.requestPermission || null,
+    // observability
+    emit: deps.emit || (() => {}),
+    onState: (state, detail) => {
+      if (!deps.emit) return;
+      deps.emit('external_agent_state', {
+        conversationId: parentRunCtx.conversationId,
+        taskId: parentRunCtx.taskId,
+        agentId: subDef.id, name: subDef.name, state, detail
+      });
+    },
+    onChunk: (text) => {
+      if (!deps.emit) return;
+      deps.emit('external_agent_output', {
+        conversationId: parentRunCtx.conversationId,
+        taskId: parentRunCtx.taskId,
+        agentId: subDef.id, name: subDef.name, chunk: text
+      });
+    },
+    ...extra
+  };
+}
+
 async function runSubAgent(deps, subDef, argsStr, parentRunCtx) {
   const taskText = parseArgs(argsStr).task || argsStr || '（未提供任务）';
 
   // External agents (Codex / WorkBuddy Desktop Bridge) run outside the local loop
   if (subDef.type === 'external') {
-    const res = await extAgents.runExternalAgent(subDef, taskText, { store: deps.store, computerManager: deps.computerManager });
-    return res;
+    const ctx = buildExternalContext(deps, subDef, parentRunCtx, {
+      sleep: deps.sleep, now: deps.now,
+      bridgeOptions: deps.bridgeOptions,
+      // P0-4: an adapter may pin its own vision model, so resolve per adapter
+      // and fall back to whatever the host injected.
+      visionReader: (deps.visionReaderFor && deps.visionReaderFor(subDef)) || deps.visionReader || null
+    });
+    return extAgents.runExternalAgent(subDef, taskText, ctx);
   }
 
   const store = deps.store;
@@ -41,6 +97,10 @@ async function runSubAgent(deps, subDef, argsStr, parentRunCtx) {
     project: deps.project,
     projectRoot: deps.projectRoot,
     permissionEngine: subPE,
+    // P0-3: Stop on the main chat must cancel delegated work too. Without this
+    // the sub-agent opened its own AbortController and kept running after the
+    // parent turn had already returned `cancelled`.
+    abortSignal: parentRunCtx.abortSignal,
     buildProvider: deps.buildProvider,
     getTool: deps.getTool,
     resolveModel: deps.resolveModel,
@@ -51,6 +111,10 @@ async function runSubAgent(deps, subDef, argsStr, parentRunCtx) {
     sendChatTask: deps.sendChatTask,
     chatDepth: parentRunCtx.chatDepth || 0,
     maxChatDelegationDepth: parentRunCtx.maxChatDelegationDepth ?? 2,
+    // P1-6: a sub-agent delegating to a chat must inherit the parent's chain,
+    // otherwise A→(sub)→A looks like a fresh delegation.
+    delegationPath: Array.isArray(parentRunCtx.delegationPath) ? parentRunCtx.delegationPath.slice() : [],
+    isChatBusy: deps.isChatBusy,
     // The parent already answered the permission prompt; asking again here would
     // pop a second dialog for the same scope. A scope the parent DENIED never
     // reaches this point (strictest() short-circuits it to 'deny').
@@ -78,4 +142,4 @@ async function runSubAgent(deps, subDef, argsStr, parentRunCtx) {
   return JSON.stringify(resultObj);
 }
 
-module.exports = { runSubAgent };
+module.exports = { runSubAgent, buildExternalContext };

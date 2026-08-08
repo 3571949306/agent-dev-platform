@@ -1,7 +1,7 @@
-# Test Report — Agent Dev Platform v2.1.0
+# Test Report — Agent Dev Platform v2.2.0
 
 > **来源**：`npm test`（`scripts/run-tests.js`，`ELECTRON_RUN_AS_NODE=1` 以匹配 better-sqlite3 的 Electron ABI 125）。
-> **结论**：本机最后一次完整运行 **164 用例 / 164 通过 / 0 失败 / 0 跳过**，耗时 ~5.6s。
+> **结论**：本机最后一次完整运行 **207 用例 / 207 通过 / 0 失败 / 0 跳过**，耗时 ~8.0s。
 > 本文件不含任何编造结果，所有断言均来源于真实执行。
 
 ---
@@ -16,14 +16,14 @@ npm test
 最终输出摘要：
 
 ```
-# tests 164
+# tests 207
 # suites 0
-# pass 164
+# pass 207
 # fail 0
 # cancelled 0
 # skipped 0
 # todo 0
-# duration_ms 5649.1245
+# duration_ms 8038.5436
 ```
 
 ## 2. 测试覆盖
@@ -32,18 +32,20 @@ npm test
 | --- | ---: | --- |
 | `test/pathguard.test.js` | 9 | 相对/绝对路径、`..` 逃逸、混合分隔符、兄弟目录前缀、同名文件、null 字节 |
 | `test/patch.test.js` | 9 | Diff 生成 / 往返 / 多 hunk / 上下文不匹配精确行号 / 越界拦截 / 失败可重试 |
-| `test/permissions.test.js` | 11 | deny / ask / once / always / 范围（task / project）/ reset / 非法 scope |
-| `test/providers.test.js` | 13 | 协议路由 / authHeaders / baseUrlOf / interpretError / toChatMessages / 流式 SSE / Mock 脚本 + abort / guessCapabilities |
-| `test/db.test.js` | 12 | WAL / 重复 init / 项目 CRUD / 密钥不落明文 + 不泄露 / secret.mask / Agent 关联 / 消息配对 / 任务流转 / 设置 / 记忆去重 / 可选参数绑定 / v1 迁移 |
+| `test/permissions.test.js` | 10 | deny / ask / once / always / 范围（task / project）/ reset / 非法 scope |
+| `test/providers.test.js` | 16 | 协议路由 / authHeaders / baseUrlOf / interpretError / toChatMessages / 流式 SSE / Mock 脚本 + abort / guessCapabilities / **P1-7 完整模型 id + source 标签** |
+| `test/db.test.js` | 13 | WAL / 重复 init / 项目 CRUD / 密钥不落明文 + 不泄露 / secret.mask / Agent 关联 / 消息配对 / 任务流转 / 设置 / 记忆去重 / 可选参数绑定 / v1 迁移 |
 | `test/agentloop.test.js` | 10 | 端到端：读 → 补丁 → 终端 → 完成 / 权限拒绝 / 读放行 / 防死循环 / 未知工具 / maxSteps / 连续失败中止 / Stop 真取消 / system prompt 注入 / 历史压缩 |
-| `test/services.test.js` | 21 | MCP（std-io 真实 JSON-RPC 客户端/服务器、超时、错误恢复）/ Browser / Computer / External Agents（含 P0-2 诚实失败契约：不可读窗口 → failed、可读+UIA → completed 带回真实回答） |
+| `test/providerabort.test.js` | 10 | **P0-1**：`linkSignals` 合并超时+外部 abort / `request()` 真传 `signal` 给 fetch / 各 Provider 超时被中断 / 外部信号中断 / 释放响应 / 超时与取消区分 |
+| `test/services.test.js` | 26 | MCP（std-io 真实 JSON-RPC）/ Browser / Computer / External Agents（诚实失败契约 + **P2-9 穿透运行时：视觉读屏闭环 / VISION_MODEL_REQUIRED / 权限闸门 PERMISSION_DENIED / Stop 前取消 / Codex cwd**） |
 | `test/modelrouting.test.js` | 12 | P0-1：Agent 指定模型真正下发，不被 `models[0]` 覆盖；`model_calls` 记录请求/实际/来源/回退 |
 | `test/runtimerouting.test.js` | 7 | P0-1：运行时解析模型路径与回退边界 |
 | `test/desktopbridge.test.js` | 19 | P0-2 Test Harness：状态机全分支（找不到窗口/聚焦失败/sentinel/稳定/busy 消失/超时/不可读/Stop 取消/UIA→剪贴板→SendKeys 降级与三路全失败/提交失败/短回答失败/截图带回/标题精确匹配） |
+| `test/desktopvision.test.js` | 19 | **P0-4**：`DesktopVisionReader` 真实 harness（去重/诚实失败/中途取消/超预算/低置信度/无截图回退/UIA 可读时不触发视觉；降级拿回真实答案且 `readVia=vision`） |
 | `test/capabilities.test.js` | 18 | P1-5：逐能力独立探测（text/streaming/tools/vision），真请求体断言、传输错误记 unknown、工具探测真发 schema、模型真调工具、视觉探测真发 base64、orchestrator 独立不污染、onProgress 顺序、classify 五类 |
-| `test/chats.test.js` | 16 | P1-4：4 个跨聊工具 + `agent_messages` 落库 + 深度防递归 + 主 Agent 自动启用 + 跨项目/自委派/无 Agent 拒绝 |
+| `test/chats.test.js` | 22 | P1-4 + **P1-6**：4 个跨聊工具 / `agent_messages` 落库 / 深度防递归 / A→B→A 循环检测（带可读链）/ `isChatBusy` 并发重入 / 路径透传 |
 | `test/mcpprotocol.test.js` | 8 | MCP 协议版本协商：首选/未来版本通过、未知版本拒绝、`checkProtocol` 单元、集成连接记录协商版本、未知版本直接抛错 |
-| **合计** | **164** | |
+| **合计** | **207** | |
 
 ## 3. 真实端到端测试（P1 服务）
 
@@ -89,6 +91,11 @@ npm test
 | HTTP 端点不可达 | `{status:'failed', errors:[ECONNREFUSED ...]}` |
 | WorkBuddy Bridge 未找到窗口 | `{status:'failed', errors:[/未找到 WorkBuddy 窗口/]}` |
 | WorkBuddy Bridge 命中窗口 | `focusWindow` + `pressKeys('整理周报~')` + `screenshot` 全部被正确调用，状态 completed |
+| **P0-4 视觉降级（穿透外部 Agent 运行时）** | 窗口无 UIA 文本 → 截图 → 视觉模型读屏 → `status:'completed'`、`readVia:'vision'`、回传视觉读到的真实文本、调用 1 次视觉模型并回写 `visionModel` |
+| **P0-4 无视觉模型时诚实失败** | 无 `visionReader` 且 UIA 不可读 → `status:'failed'`、`code:'VISION_MODEL_REQUIRED'`（不伪造完成） |
+| **P0-2 权限闸门（穿透外部 Agent 运行时）** | `PermissionEngine` 拒绝 `network` → `status:'failed'`、`code:'PERMISSION_DENIED'`、`deniedScope:'network'` |
+| **P0-3 Stop 前取消** | 进入前 signal 已 abort → `status:'cancelled'`、`errors` 含「停止」 |
+| **P1-5 Codex cwd** | `resolveCodexCwd`：`ctx.projectRoot` 生效、`adapter.cwd` 优先级更高、两者皆缺回退 `process.cwd` |
 
 ## 4. 集成层用例（agentloop）
 
@@ -162,7 +169,7 @@ git clone https://github.com/3571949306/agent-dev-platform
 cd agent-dev-platform
 npm install
 npm run rebuild              # 重新按 Electron ABI 编译 better-sqlite3
-npm test                     # 应当看到 164/164 PASS
+npm test                     # 应当看到 207/207 PASS
 npm run smoke                # 应当看到 SMOKE_OK（含 SMOKE_DIAG 诊断页校验）
 ```
 
@@ -184,3 +191,18 @@ npm run smoke                # 应当看到 SMOKE_OK（含 SMOKE_DIAG 诊断页�
 | 10 | Computer SendKeys 路径对 `+ ^ % ~ ( ) { } [ ]` 未转义（潜在注入/丢失） | `desktopBridge.js` 回退路径包 `{}` | input 链路 |
 
 > 以上均为在 v2.0.0 既有骨架上补全真实闭环，未删除任何旧功能；测试由 83 增至 164，全部真实执行通过。
+
+## 11. v2.2.0 稳定性闭环与真实环境修复
+
+| # | 问题 | 修复位置 | 验证 |
+| --- | --- | --- | --- |
+| 1 | Stop 只等整段流读完、底层 socket 不被真正中断 | `src/providers/http.js` 重写 `request()` + `linkSignals(timeoutMs, externalSignal)` 合并信号；各 Provider 透传 `signal` | providerabort 10 用例 |
+| 2 | 外部 Agent 权限只在一处校验，另一入口可绕过 | `runExternalAgent` 入口复用 `PermissionEngine` + `ensureScopes` | services P0-2 用例 |
+| 3 | 外部 Agent 运行中 Stop 不杀进程 / HTTP 不被中断 | 合并信号交给 `fetch`；`killTree` 按进程组回收 Codex 子进程 | services P0-3 用例 |
+| 4 | WorkBuddy 窗口无 UIA 文本时无法读屏、只能空耗或假完成 | 新增 `visionReader.js` + `DesktopVisionReader`；`desktopBridge.visionRead` 截图→视觉模型→拿回答案；帧哈希去重；无模型报 `VISION_MODEL_REQUIRED` | desktopvision 19 用例 + services P0-4 用例 |
+| 5 | Codex 在应用自身 cwd 运行，而非当前项目目录 | `resolveCodexCwd(cfg, ctx)`：`adapter.cwd > ctx.projectRoot > process.cwd` | services P1-5 用例 |
+| 6 | 跨聊天 A→B→A 仅按深度计数，depth=2 被放行成环 | `delegationPath` 全链去重检测 + 可读链；`isChatBusy` 防并发重入 | chats 22 用例（P1-6） |
+| 7 | Anthropic 模型列表含截断 id（`claude-opus-4-`）被 404；来源不明 | 改为完整合法 id；优先请求真实 `/v1/models`，失败回退内置；`connections:models` 返回 `source`（remote/preset） | providers 16 用例（P1-7） |
+| 8 | 句柄 `connections:models` 未把来源标签透出给 UI | `handlers.js` 调 `listModelsDetailed`，返回 `{models, source, note}` | providers / 代码审查 |
+
+> v2.2.0 在 v2.1.0 之上补齐稳定性闭环，未推倒重做、未新增无关大功能；测试由 164 增至 207，全部真实执行通过。

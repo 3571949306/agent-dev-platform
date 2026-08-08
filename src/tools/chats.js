@@ -12,13 +12,46 @@
  *   send_message_to_chat  — hand a task to chat X and get its answer back
  *   get_chat_status       — poll a delegation that was sent async
  *
- * Recursion guard: every delegation carries a depth. `maxChatDelegationDepth`
- * (default 2) stops A→B→C→A loops from eating the machine. A chat also refuses
- * to delegate to itself.
+ * Recursion guard (P1-6, v2.2.0). v2.1.0 only counted depth and blocked
+ * self-delegation, which is not a cycle detector:
+ *
+ *   A→B→A  was ALLOWED at depth 2. Chat A then ran a second turn *while its
+ *   first turn was still waiting on B*, writing interleaved messages into its
+ *   own conversation and re-triggering the same delegation. The depth cap only
+ *   decided how many times that happened before it stopped — it never called
+ *   the loop a loop, so the user saw "深度超限" instead of "你们互相在踢皮球".
+ *
+ * Now every delegation carries the full `delegationPath` of conversation ids.
+ * Revisiting ANY conversation already on the path is a CHAT_DELEGATION_LOOP,
+ * reported with the actual chain. Depth remains as a second, independent cap
+ * for long non-cyclic chains (A→B→C→D).
  */
 
 function ok(data) { return { ok: true, data }; }
-function fail(code, message, retryable = false) { return { ok: false, error: { code, message, retryable } }; }
+function fail(code, message, retryable = false, extra) { return { ok: false, error: { code, message, retryable, ...(extra || {}) } }; }
+
+/**
+ * The chain of conversations that led to the current turn, current one last.
+ * Kept de-duplicated and ordered so the error message reads like a trace.
+ */
+function currentPath(ctx) {
+  const raw = Array.isArray(ctx.delegationPath) ? ctx.delegationPath.filter(Boolean) : [];
+  const path = [];
+  for (const id of raw) if (!path.includes(id)) path.push(id);
+  if (ctx.conversationId && !path.includes(ctx.conversationId)) path.push(ctx.conversationId);
+  return path;
+}
+
+/** Render a path as "标题A → 标题B → 标题A" for a human-readable error. */
+function renderPath(store, ids, extraId) {
+  const label = (id) => {
+    try {
+      const c = store.conversations.get(id);
+      return (c && c.title) ? `${c.title}` : id;
+    } catch { return id; }
+  };
+  return [...ids, ...(extraId ? [extraId] : [])].map(label).join(' → ');
+}
 
 /** Compact one conversation into something a model can reason about. */
 function describeChat(store, conv, { currentId } = {}) {
@@ -126,6 +159,24 @@ const tools = [
       }
       if (!conv.agent_id) return fail('NO_AGENT', `对话「${conv.title || target}」没有绑定 Agent，无法执行任务`);
 
+      // P1-6: a real cycle check, before the depth cap. A→B→A is a loop even
+      // though its depth (2) is within the default limit.
+      const path = currentPath(ctx);
+      if (path.includes(target)) {
+        return fail('CHAT_DELEGATION_LOOP',
+          `检测到跨对话循环委派：${renderPath(ctx.store, path, target)}。` +
+          `对话「${conv.title || target}」已经在本次委派链上，再派回去会让双方互相等待。请自己完成这一步，或改派链条之外的对话。`,
+          false,
+          { path: [...path, target] });
+      }
+
+      // A conversation that is mid-turn cannot take a second task: its messages
+      // would interleave and its Stop button would only cancel one of them.
+      if (typeof ctx.isChatBusy === 'function' && ctx.isChatBusy(target)) {
+        return fail('CHAT_BUSY',
+          `对话「${conv.title || target}」正在执行别的任务，稍后再试或改派其它对话。`, true);
+      }
+
       const depth = Number(ctx.chatDepth || 0);
       const max = Number(ctx.maxChatDelegationDepth ?? 2);
       if (depth >= max) {
@@ -133,6 +184,7 @@ const tools = [
           `跨对话委派深度已达上限 ${max}（当前 ${depth}）。请自己完成这一步，或让用户手动在目标对话中发起。`);
       }
 
+      const nextPath = [...path, target];
       const messageId = ctx.store.agentMessages.send({
         projectId: ctx.projectId,
         taskId: ctx.taskId,
@@ -148,17 +200,19 @@ const tools = [
       const wait = args.wait !== false;
       if (!wait) {
         // Fire and forget; the delegate updates the row when it finishes.
-        Promise.resolve(ctx.sendChatTask({ toConversationId: target, message: args.message, depth: depth + 1, messageId }))
-          .catch(() => { /* status is recorded by the runner */ });
+        Promise.resolve(ctx.sendChatTask({
+          toConversationId: target, message: args.message, depth: depth + 1, messageId, delegationPath: nextPath
+        })).catch(() => { /* status is recorded by the runner */ });
         return ok({
           message_id: messageId, delivered_to: target, waiting: false,
+          delegation_path: nextPath,
           note: '任务已投递，稍后用 get_chat_status 查询结果。'
         });
       }
 
       try {
         const reply = await ctx.sendChatTask({
-          toConversationId: target, message: args.message, depth: depth + 1, messageId
+          toConversationId: target, message: args.message, depth: depth + 1, messageId, delegationPath: nextPath
         });
         const content = typeof reply === 'string' ? reply : (reply && reply.content) || '';
         ctx.store.agentMessages.update(messageId, { status: 'completed', content: args.message, payload: { reply: content } });
@@ -167,7 +221,8 @@ const tools = [
           delivered_to: target,
           target_chat: conv.title || target,
           reply: String(content).slice(0, 6000),
-          depth: depth + 1
+          depth: depth + 1,
+          delegation_path: nextPath
         });
       } catch (e) {
         ctx.store.agentMessages.update(messageId, { status: 'failed', payload: { error: e.message } });
@@ -217,4 +272,4 @@ const tools = [
   }
 ];
 
-module.exports = { tools, describeChat };
+module.exports = { tools, describeChat, currentPath, renderPath };

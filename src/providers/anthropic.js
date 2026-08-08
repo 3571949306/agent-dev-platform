@@ -3,8 +3,27 @@
  * Anthropic Messages API: /v1/messages
  * Handles system, content blocks, streaming, tool_use / tool_result, images.
  */
-const { baseUrlOf, streamSSE, NODE_TIMEOUT } = require('./http');
+const { baseUrlOf, streamSSE, request, releaseResponse, throwIfAborted, interpretError, NODE_TIMEOUT } = require('./http');
 const { partsOf, plainText } = require('./content');
+
+/**
+ * P1-7: curated fallback list.
+ *
+ * The previous list shipped truncated ids like `claude-opus-4-` which are not
+ * valid model names and fail with 404 the moment they are actually used. These
+ * are real, complete ids. They are only used when the live /v1/models endpoint
+ * is unavailable, and in that case the source is reported as `preset` — we do
+ * NOT pretend a hard-coded list came from the server.
+ */
+const PRESET_MODELS = [
+  'claude-opus-4-1-20250805',
+  'claude-opus-4-20250514',
+  'claude-sonnet-4-20250514',
+  'claude-3-7-sonnet-latest',
+  'claude-3-5-sonnet-latest',
+  'claude-3-5-haiku-latest',
+  'claude-3-opus-latest'
+];
 
 function headers(conn) {
   const h = { 'Content-Type': 'application/json', 'anthropic-version': '2023-06-01' };
@@ -50,22 +69,70 @@ function toAnthropicMessages(messages) {
 }
 
 function createAnthropic(conn) {
+  /**
+   * Anthropic *does* have GET /v1/models on the official API. Try it first and
+   * only fall back to the curated preset when the endpoint is unavailable
+   * (self-hosted gateways, older proxies, no key). The caller is told which of
+   * the two it got via `source`.
+   */
+  async function listModelsDetailed(opts = {}) {
+    const url = baseUrlOf(conn) + '/models?limit=100';
+    try {
+      const resp = await request(url, { method: 'GET', headers: headers(conn) }, null,
+        { timeoutMs: opts.timeoutMs || 15000, signal: opts.signal });
+      if (resp.ok) {
+        const json = await resp.json();
+        releaseResponse(resp);
+        const list = (Array.isArray(json) ? json : json.data || []).map(m => m.id || m.name).filter(Boolean);
+        if (list.length) return { models: list, source: 'remote' };
+      } else {
+        releaseResponse(resp);
+      }
+    } catch { /* fall through to preset */ }
+    return {
+      models: PRESET_MODELS.slice(),
+      source: 'preset',
+      note: '未能从 Anthropic 获取模型列表，以下为内置推荐模型，可能不是你账号的完整可用列表'
+    };
+  }
+
+  async function listModels(opts = {}) {
+    return (await listModelsDetailed(opts)).models;
+  }
+
+  /** P1-71: no hard-coded probe model. */
+  async function probeModel(opts = {}) {
+    const m = (opts && opts.model) || conn.default_model || conn.model || (conn.models && conn.models[0]);
+    if (m) return m;
+    const d = await listModelsDetailed(opts);
+    return (d.models && d.models[0]) || null;
+  }
+
   async function testConnection(opts = {}) {
     const t0 = Date.now();
     const url = baseUrlOf(conn) + '/messages';
-    const model = wireModel(opts, conn, 'claude-3-5-sonnet-latest');   // probe only
+    const model = await probeModel(opts);
+    if (!model) {
+      return {
+        ok: false, status: 0, endpoint: '/messages', model: null, latency: Date.now() - t0,
+        message: '未指定模型：请先点击「获取模型」并选择一个模型，再测试连接'
+      };
+    }
     const body = { model, max_tokens: 1, messages: [{ role: 'user', content: 'hi' }] };
     try {
-      const ctrl = new AbortController();
-      const timer = setTimeout(() => ctrl.abort(), 15000);
-      const resp = await fetch(url, { method: 'POST', headers: headers(conn), body: JSON.stringify(body), signal: ctrl.signal });
-      clearTimeout(timer);
-      return { ok: resp.ok, status: resp.status, message: resp.ok ? '连接成功' : `连接失败 (${resp.status})`, latency: Date.now() - t0, endpoint: '/messages', model };
+      const resp = await request(url, { method: 'POST', headers: headers(conn), body: JSON.stringify(body) }, null,
+        { timeoutMs: opts.timeoutMs || 15000, signal: opts.signal });
+      const txt = resp.ok ? null : await resp.text().catch(() => '');
+      releaseResponse(resp);
+      return {
+        ok: resp.ok,
+        status: resp.status,
+        message: resp.ok ? '连接成功' : interpretError(resp.status, txt),
+        latency: Date.now() - t0,
+        endpoint: '/messages',
+        model
+      };
     } catch (e) { return { ok: false, status: 0, message: `无法连接: ${e.message}`, latency: Date.now() - t0, endpoint: '/messages', model }; }
-  }
-  async function listModels() {
-    // Anthropic has no public models endpoint; return common models
-    return ['claude-opus-4-', 'claude-sonnet-4-', 'claude-3-5-sonnet-latest', 'claude-3-5-haiku-latest', 'claude-3-opus-latest'];
   }
   async function streamResponse(opts) {
     const { system, messages, tools, temperature, maxTokens, signal, onChunk, onToolCall } = opts;
@@ -82,20 +149,22 @@ function createAnthropic(conn) {
     if (tools && tools.length) {
       body.tools = tools.map(t => ({ name: t.name, description: t.description, input_schema: t.parameters || { type: 'object', properties: {} } }));
     }
-    const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), NODE_TIMEOUT);
-    let resp;
-    try {
-      resp = await fetch(url, { method: 'POST', headers: headers(conn), body: JSON.stringify(body), signal: ctrl.signal });
-    } finally { clearTimeout(timer); }
-    if (!resp.ok) { const txt = await resp.text(); throw new Error(`Anthropic 返回 ${resp.status}: ${txt.slice(0, 300)}`); }
+    throwIfAborted(signal);
+    // P0-1: the caller's signal goes straight to fetch(), so Stop tears down the
+    // connection instead of waiting for the next SSE event.
+    const resp = await request(url, { method: 'POST', headers: headers(conn), body: JSON.stringify(body) }, null,
+      { timeoutMs: opts.timeoutMs || NODE_TIMEOUT, signal });
+    if (!resp.ok) {
+      const txt = await resp.text();
+      releaseResponse(resp);
+      throw new Error(`Anthropic 返回 ${resp.status}: ${txt.slice(0, 300)}`);
+    }
 
     let full = '';
     const toolUses = {};   // index -> {id,name,input_text}
     let usage = null;
     let respModel = null;
     for await (const ev of streamSSE(resp)) {
-      if (signal && signal.aborted) throw new Error('aborted');
       if (ev.type === 'message_start' && ev.message?.model && !respModel) respModel = ev.message.model;
       if (ev.type === 'content_block_start') {
         const b = ev.content_block;
@@ -112,7 +181,7 @@ function createAnthropic(conn) {
     if (toolCalls.length && onToolCall) onToolCall(toolCalls);
     return { content: full, toolCalls: toolCalls.length ? toolCalls : null, usage, model, responseModel: respModel || model };
   }
-  return { protocol: 'anthropic', endpoint: '/messages', supportsVision: true, testConnection, listModels, streamResponse };
+  return { protocol: 'anthropic', endpoint: '/messages', supportsVision: true, testConnection, listModels, listModelsDetailed, streamResponse };
 }
 
 module.exports = { createAnthropic, toAnthropicMessages };

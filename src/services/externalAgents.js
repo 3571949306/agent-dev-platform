@@ -16,7 +16,9 @@
 const { spawn } = require('child_process');
 const fs = require('fs');
 const providers = require('../providers');
+const { linkSignals } = require('../providers/http');
 const { DesktopAgentBridge } = require('./desktopBridge');
+const { externalAgentScopes, ensureScopes } = require('../security/agentScopes');
 // NOTE: do NOT require('../agent/subagent') here — subagent.js requires this
 // module, so a top-level require creates a cycle and yields `undefined`
 // bindings at load time. External adapters never recurse into sub-agents.
@@ -44,6 +46,49 @@ function recordStatus(store, adapter, status, error) {
   } catch { /* telemetry must never break a run */ }
 }
 
+/**
+ * P0-3: kill the whole process tree, not just the launcher.
+ *
+ * `child.kill()` sends a signal to the process we spawned. Codex CLI (like npm,
+ * python -m, or any shim) immediately spawns children of its own, and those
+ * survive — the user presses Stop, the UI says cancelled, and a compiler keeps
+ * chewing through their CPU. On Windows only `taskkill /T` walks the tree; on
+ * POSIX we spawn detached so the pid doubles as a process-group id.
+ */
+function killTree(child, signal = 'SIGTERM') {
+  if (!child || child.pid == null) return;
+  if (process.platform === 'win32') {
+    try {
+      spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' })
+        .on('error', () => { try { child.kill(); } catch { /* gone */ } });
+    } catch { try { child.kill(); } catch { /* gone */ } }
+    return;
+  }
+  try {
+    process.kill(-child.pid, signal);          // negative pid == the group
+  } catch {
+    try { child.kill(signal); } catch { /* gone */ }
+  }
+  // Escalate if the tree ignores SIGTERM.
+  const t = setTimeout(() => {
+    try { process.kill(-child.pid, 'SIGKILL'); } catch { /* gone */ }
+  }, 3000);
+  if (typeof t.unref === 'function') t.unref();
+}
+
+/**
+ * P1-5: which directory Codex actually runs in.
+ * cfg.cwd (explicit per-adapter override) > current project root > app cwd.
+ */
+function resolveCodexCwd(cfg, ctx) {
+  const candidates = [cfg.cwd, ctx && ctx.projectRoot, process.cwd()];
+  for (const c of candidates) {
+    if (!c) continue;
+    try { if (fs.existsSync(c) && fs.statSync(c).isDirectory()) return c; } catch { /* try next */ }
+  }
+  return process.cwd();
+}
+
 // -------------------------------------------------------------------- Codex
 async function runCodex(adapter, taskText, store, ctx = {}) {
   const cfg = adapter.config || {};
@@ -51,9 +96,16 @@ async function runCodex(adapter, taskText, store, ctx = {}) {
 
   // Option A: official CLI
   if (cfg.cliPath && fs.existsSync(cfg.cliPath)) {
+    const cwd = resolveCodexCwd(cfg, ctx);
+    const cwdSource = cfg.cwd ? 'adapter.cwd' : (ctx.projectRoot ? 'projectRoot' : 'process.cwd');
     return new Promise((resolve) => {
       const args = Array.isArray(cfg.args) && cfg.args.length ? [...cfg.args, taskText] : ['exec', '--', taskText];
-      const child = spawn(cfg.cliPath, args, { windowsHide: true, cwd: cfg.cwd || undefined });
+      const child = spawn(cfg.cliPath, args, {
+        windowsHide: true,
+        cwd,
+        // POSIX: become a process-group leader so killTree() can take the group down.
+        detached: process.platform !== 'win32'
+      });
       let out = '', errOut = '', settled = false;
       const done = (v) => {
         if (settled) return;
@@ -62,27 +114,29 @@ async function runCodex(adapter, taskText, store, ctx = {}) {
         if (ctx.signal) ctx.signal.removeEventListener?.('abort', onAbort);
         resolve(v);
       };
-      const kill = () => { try { child.kill(); } catch { /* already gone */ } };
       const timer = setTimeout(() => {
-        kill();
+        killTree(child, 'SIGKILL');
         done(structured('timeout', out.slice(0, 2000), {
-          errors: [`Codex CLI 超过 ${Math.round(timeoutMs / 1000)} 秒未结束，已终止`], exitCode: null
+          errors: [`Codex CLI 超过 ${Math.round(timeoutMs / 1000)} 秒未结束，已终止`], exitCode: null, cwd, cwdSource, pid: child.pid
         }));
       }, timeoutMs);
-      const onAbort = () => { kill(); done(structured('cancelled', out.slice(0, 2000), { errors: ['用户已停止'] })); };
+      const onAbort = () => {
+        killTree(child, 'SIGKILL');
+        done(structured('cancelled', out.slice(0, 2000), { errors: ['用户已停止'], cwd, cwdSource, pid: child.pid, killedTree: true }));
+      };
       if (ctx.signal) {
-        if (ctx.signal.aborted) { kill(); return done(structured('cancelled', '', { errors: ['用户已停止'] })); }
+        if (ctx.signal.aborted) { killTree(child, 'SIGKILL'); return done(structured('cancelled', '', { errors: ['用户已停止'], cwd, cwdSource, killedTree: true })); }
         ctx.signal.addEventListener('abort', onAbort, { once: true });
       }
 
       child.stdout.on('data', d => { out += d.toString(); if (ctx.onChunk) ctx.onChunk(d.toString()); });
       child.stderr.on('data', d => { errOut += d.toString(); });
       // An unhandled 'error' event on a ChildProcess throws and kills the app.
-      child.on('error', e => done(structured('failed', '', { errors: ['Codex CLI 启动失败: ' + e.message] })));
+      child.on('error', e => done(structured('failed', '', { errors: ['Codex CLI 启动失败: ' + e.message], cwd, cwdSource })));
       child.on('close', code => done(structured(
         code === 0 ? 'completed' : 'failed',
         (out || errOut).slice(0, 4000),
-        { exitCode: code, errors: code === 0 ? [] : [`Codex CLI 退出码 ${code}${errOut ? '：' + errOut.slice(0, 300) : ''}`] }
+        { exitCode: code, cwd, cwdSource, pid: child.pid, errors: code === 0 ? [] : [`Codex CLI 退出码 ${code}${errOut ? '：' + errOut.slice(0, 300) : ''}`] }
       )));
     });
   }
@@ -125,13 +179,18 @@ async function runWorkBuddyBridge(adapter, taskText, computerManager, ctx = {}) 
     signal: ctx.signal,
     sleep: ctx.sleep,
     now: ctx.now,
+    // P0-4: without this the bridge can only read UI-automation text and gives
+    // up on any window that exposes none.
+    visionReader: ctx.visionReader || null,
     onState: (state, detail) => { if (ctx.onState) ctx.onState(state, detail); }
   });
   const res = await bridge.run(taskText);
   return structured(res.status, res.summary, {
-    window: res.window, inputVia: res.inputVia, detection: res.detection,
+    window: res.window, inputVia: res.inputVia, readVia: res.readVia, detection: res.detection,
     polls: res.polls, elapsedMs: res.elapsedMs, screenshot: res.screenshot || null,
-    trace: res.trace, errors: res.errors || [], attempts: res.attempts
+    trace: res.trace, errors: res.errors || [], attempts: res.attempts,
+    code: res.code, visionCalls: res.visionCalls, visionModel: res.visionModel,
+    visionModelSource: res.visionModelSource, confidence: res.confidence
   });
 }
 
@@ -139,15 +198,15 @@ async function runWorkBuddyBridge(adapter, taskText, computerManager, ctx = {}) 
 async function runHttpAgent(adapter, taskText, ctx = {}) {
   const cfg = adapter.config || {};
   const timeoutMs = Number(cfg.timeoutMs) || 120000;
-  const ac = new AbortController();
-  const timer = setTimeout(() => ac.abort(), timeoutMs);
-  if (ctx.signal) ctx.signal.addEventListener('abort', () => ac.abort(), { once: true });
+  // Same abort contract as the model providers: one merged signal handed to
+  // fetch(), so Stop kills the socket even while the body is still streaming.
+  const link = linkSignals(timeoutMs, ctx.signal);
   try {
     const resp = await fetch(cfg.endpoint || adapter.endpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...(cfg.headers || {}) },
       body: JSON.stringify({ task: taskText, ...(cfg.payload || {}) }),
-      signal: ac.signal
+      signal: link.signal
     });
     const txt = await resp.text();
     return structured(resp.ok ? 'completed' : 'failed', txt.slice(0, 4000), {
@@ -155,17 +214,55 @@ async function runHttpAgent(adapter, taskText, ctx = {}) {
       errors: resp.ok ? [] : [`HTTP ${resp.status}`]
     });
   } catch (e) {
-    const cancelled = ctx.signal && ctx.signal.aborted;
-    return structured(cancelled ? 'cancelled' : 'failed', '', { errors: [e.message] });
-  } finally { clearTimeout(timer); }
+    if (link.timedOut) return structured('timeout', '', { errors: [`HTTP Agent 超过 ${Math.round(timeoutMs / 1000)} 秒未响应`] });
+    const cancelled = (ctx.signal && ctx.signal.aborted) || link.externallyAborted;
+    return structured(cancelled ? 'cancelled' : 'failed', '', { errors: [cancelled ? '用户已停止' : e.message] });
+  } finally { link.dispose(); }
 }
 
 /**
  * @param adapter external agent record (type='external')
  * @param taskText the task string
- * @param ctx { store, computerManager, signal, onState, onChunk, sleep, now }
+ * @param ctx ExternalAgentContext — see agent/subagent.js buildExternalContext():
+ *   { projectId, projectRoot, conversationId, taskId, parentAgentId, signal,
+ *     store, computerManager, permissionEngine, requestPermission,
+ *     emit, onState, onChunk, sleep, now, visionReader }
  */
 async function runExternalAgent(adapter, taskText, ctx = {}) {
+  const scopes = externalAgentScopes(adapter);
+
+  // Stop pressed before we even started.
+  if (ctx.signal && ctx.signal.aborted) {
+    return structured('cancelled', '', { errors: ['用户已停止'], requiredScopes: scopes });
+  }
+
+  // P0-2: the permission gate lives here as well as in the Agent Runtime.
+  // runExternalAgent is also reachable from the IPC layer (the Agents page "run
+  // now" button), and a gate that only exists on one of two paths is not a gate.
+  if (ctx.permissionEngine) {
+    const gate = await ensureScopes(
+      ctx.permissionEngine,
+      scopes,
+      { taskId: ctx.taskId, projectId: ctx.projectId },
+      ctx.requestPermission
+        ? ({ scope }) => ctx.requestPermission({
+            scope, tool: `external:${adapter.adapter_type}`, agent: adapter.name,
+            external: true, conversationId: ctx.conversationId, taskId: ctx.taskId
+          })
+        : null
+    );
+    if (!gate.ok) {
+      const raw = structured('failed', '', {
+        code: 'PERMISSION_DENIED',
+        requiredScopes: scopes,
+        deniedScope: gate.scope,
+        errors: [`外部 Agent「${adapter.name}」需要权限 ${gate.scope}，${gate.reason === 'user_denied' ? '用户已拒绝' : '当前策略不允许'}`]
+      });
+      recordStatus(ctx.store, adapter, 'failed', `权限不足：${gate.scope}`);
+      return raw;
+    }
+  }
+
   let raw;
   switch (adapter.adapter_type) {
     case 'codex': raw = await runCodex(adapter, taskText, ctx.store, ctx); break;
@@ -183,4 +280,7 @@ async function runExternalAgent(adapter, taskText, ctx = {}) {
   return raw;
 }
 
-module.exports = { runExternalAgent, runCodex, runWorkBuddyBridge, runHttpAgent, TERMINAL_STATES };
+module.exports = {
+  runExternalAgent, runCodex, runWorkBuddyBridge, runHttpAgent,
+  killTree, resolveCodexCwd, TERMINAL_STATES
+};

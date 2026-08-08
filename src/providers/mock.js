@@ -8,9 +8,24 @@
  *  - if conn.mockToolCall and tools present → emit one tool_call to the first tool, no text
  *  - else → stream a canned assistant text in chunks
  */
+const { AbortError } = require('./http');
+
 function createMock(conn) {
   async function testConnection() { return { ok: true, status: 200, message: 'Mock 连接成功（本地测试）', latency: 1 }; }
   async function listModels() { return ['mock-fast', 'mock-reason']; }
+  /** P1-7: uniform detailed shape; mock ids are hard-coded, never from a server. */
+  async function listModelsDetailed() {
+    return { models: ['mock-fast', 'mock-reason'], source: 'preset', note: '内置测试模型，不可用于真实调用' };
+  }
+
+  /** Resolve only when the signal fires — used by conn.mockHang to emulate a stalled server. */
+  function waitForAbort(signal) {
+    return new Promise((_, reject) => {
+      if (!signal) return; // hangs forever on purpose
+      if (signal.aborted) return reject(new AbortError('aborted'));
+      signal.addEventListener('abort', () => reject(new AbortError('aborted')), { once: true });
+    });
+  }
 
   // Scripted mode: conn.mockScript = [{ toolCalls:[{name,arguments}] } | { text:'...' }]
   // consumed one entry per loop step, so the full Agent Loop can be tested offline.
@@ -20,11 +35,18 @@ function createMock(conn) {
 
   async function streamResponse(opts) {
     const { messages, tools, onChunk, onToolCall, signal } = opts;
-    if (signal && signal.aborted) throw new Error('aborted');
+    if (signal && signal.aborted) throw new AbortError('aborted');
     // Record what the runtime asked for so model-routing tests can assert on it.
     const model = opts.model || conn.default_model || conn.model || (conn.models && conn.models[0]) || 'mock-fast';
     calls.push({ model, requested: opts.model || null, messages, tools, system: opts.system });
     if (typeof conn.onModelCall === 'function') conn.onModelCall({ model, requested: opts.model || null, messages });
+
+    // Emulate a server that accepted the request and then went silent: the only
+    // way out is a real abort. Used to prove Stop does not depend on chunks.
+    if (conn.mockHang) {
+      if (typeof conn.onMockHang === 'function') conn.onMockHang();
+      await waitForAbort(signal);
+    }
 
     if (Array.isArray(conn.mockScript)) {
       const step = conn.mockScript[scriptIndex] || { text: '（脚本已结束）' };
@@ -61,7 +83,7 @@ function createMock(conn) {
     }
     return { content: text, toolCalls: null, usage: { total_tokens: text.length }, model, responseModel: model };
   }
-  return { protocol: 'mock', endpoint: 'mock://chat', supportsVision: true, testConnection, listModels, streamResponse, calls };
+  return { protocol: 'mock', endpoint: 'mock://chat', supportsVision: true, testConnection, listModels, listModelsDetailed, streamResponse, calls };
 }
 
 module.exports = { createMock };

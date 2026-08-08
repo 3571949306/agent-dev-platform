@@ -20,6 +20,7 @@ const { McpManager } = require('../services/mcp');
 const { createBrowserTools } = require('../services/browser');
 const { createComputerTools } = require('../services/computer');
 const extAgents = require('../services/externalAgents');
+const { pickVisionModel } = require('../services/visionReader');
 
 const mcpManager = new McpManager();
 const browser = createBrowserTools();
@@ -117,6 +118,26 @@ function visionSupportFor(agent) {
   return providers.inferVision(info.model).value === true;
 }
 
+/**
+ * P0-4 — the vision model the WorkBuddy bridge falls back to when the target
+ * window exposes no UI-automation text.
+ *
+ * An adapter can pin one explicitly (config.visionConnectionId / visionModel);
+ * otherwise we look for a probe-tested vision model, then guess from model ids.
+ * Returns null when the user has none, so the bridge reports
+ * VISION_MODEL_REQUIRED instead of silently doing nothing.
+ */
+function visionReaderFor(adapter) {
+  const cfg = (adapter && adapter.config) || {};
+  if (cfg.visionFallback === false) return null;
+  try {
+    return pickVisionModel({ store, providers }, {
+      connectionId: cfg.visionConnectionId || (adapter && adapter.api_connection_id) || null,
+      model: cfg.visionModel || null
+    });
+  } catch { return null; }
+}
+
 function artifactsDirFor(project) {
   const base = project && project.root_path
     ? path.join(project.root_path, '.adp', 'artifacts')
@@ -142,15 +163,22 @@ const MAX_CHAT_DELEGATION_DEPTH = 2;
  * tracks this delegation, so async (wait:false) deliveries also reach a
  * terminal status instead of sitting on `pending` forever.
  */
-async function sendChatTask({ toConversationId, message, depth = 0, messageId = null }) {
+async function sendChatTask({ toConversationId, message, depth = 0, messageId = null, delegationPath = [] }) {
   const conv = store.conversations.get(toConversationId);
   if (!conv) {
     if (messageId) store.agentMessages.update(messageId, { status: 'failed', payload: { error: '目标聊天不存在' } });
     throw new Error('目标聊天不存在');
   }
+  // P1-6 second line of defence: the tool checks the path, but sendChatTask is
+  // also reachable from the async (wait:false) branch and from tests.
+  if (Array.isArray(delegationPath) && delegationPath.slice(0, -1).includes(toConversationId)) {
+    const err = `检测到跨对话循环委派，已阻止：${[...delegationPath].join(' → ')}`;
+    if (messageId) store.agentMessages.update(messageId, { status: 'failed', payload: { error: err } });
+    throw new Error(err);
+  }
   if (messageId) store.agentMessages.update(messageId, { status: 'running' });
   try {
-    await runChatTurn(toConversationId, conv.agent_id, message, { chatDepth: depth });
+    await runChatTurn(toConversationId, conv.agent_id, message, { chatDepth: depth, delegationPath });
   } catch (e) {
     if (messageId) store.agentMessages.update(messageId, { status: 'failed', payload: { error: e.message } });
     throw e;
@@ -179,14 +207,26 @@ async function runChatTurn(conversationId, agentId, userMessage, opts = {}) {
     const STATE_LABEL = {
       locating: '定位目标窗口', focusing: '聚焦窗口', inputting: '输入任务',
       submitted: '已提交，等待对方开始', waiting: '等待对方完成', reading: '读取回答',
+      degrading: '窗口读不到文本，改用截图 + 视觉模型',
+      'vision-reading': '视觉读屏中', 'vision-poll': '视觉读屏中', 'vision-error': '视觉读屏出错',
       completed: '已完成', failed: '失败', timeout: '超时', cancelled: '已取消'
     };
     let res;
     try {
+      // Same ExternalAgentContext the sub-agent path builds — an external agent
+      // launched straight from a chat must be gated, cancellable and rooted in
+      // the current project exactly like a delegated one.
       res = await extAgents.runExternalAgent(agent, userMessage, {
+        projectId: project?.id || currentProjectId || null,
+        projectRoot,
+        conversationId,
         store,
         computerManager: computer.manager,
+        permissionEngine: new PermissionEngine({ store, projectId: project?.id || null }),
+        requestPermission,
+        visionReader: visionReaderFor(agent),
         signal: extAc.signal,
+        emit,
         onState: (state, detail) => emit('assistant_status', {
           conversationId,
           status: `${agent.name}：${STATE_LABEL[state] || state}${detail && detail.error ? ' — ' + detail.error : ''}`
@@ -214,10 +254,16 @@ async function runChatTurn(conversationId, agentId, userMessage, opts = {}) {
     artifactsDir: artifactsDirFor(project),
     subAgentTool: (name) => { const id = subAgentIdFromToolName(name); return id ? getAgentFull(id) : null; },
     buildToolDefs: buildToolDefsFor,
+    // P0-4: resolved per external adapter, not once per turn — a WorkBuddy
+    // adapter may pin its own vision model.
+    visionReaderFor,
     runSubAgent: (subDef, args, ctx) => runSubAgent(deps, subDef, args, ctx),
     sendChatTask, requestPermission, computerManager: computer.manager, emit,
     chatDepth: opts.chatDepth || 0,
     maxChatDelegationDepth: MAX_CHAT_DELEGATION_DEPTH,
+    delegationPath: Array.isArray(opts.delegationPath) ? opts.delegationPath : [],
+    // A chat already mid-turn must not be handed a second task concurrently.
+    isChatBusy: (id) => activeRuns.has(id),
     pinnedFacts: store.memories.list('project', project?.id).map(m => m.value)
   };
   store.messages.create({ conversation_id: conversationId, role: 'user', content: userMessage });
@@ -260,9 +306,18 @@ function register(window) {
   });
   reg('connections:models', async (id) => {
     const conn = store.connections.getDecrypted(id);
-    const list = await providers.getProvider(conn).listModels();
-    store.connections.setModels(id, list);
-    return { models: list };
+    const provider = providers.getProvider(conn);
+    // P1-7: report where the list came from so the UI can flag hard-coded
+    // fallbacks instead of presenting them as if they were fetched live.
+    let result;
+    if (typeof provider.listModelsDetailed === 'function') {
+      result = await provider.listModelsDetailed();
+    } else {
+      const list = await provider.listModels();
+      result = { models: list, source: 'remote' };
+    }
+    store.connections.setModels(id, result.models);
+    return { models: result.models, source: result.source || 'remote', note: result.note || null };
   });
 
   // P1-5 — Diagnostics: probe each capability separately against the live

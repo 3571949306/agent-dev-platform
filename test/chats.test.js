@@ -213,6 +213,84 @@ test('P1-4: 运行时未注入 sendChatTask 时给出明确失败而不是静默
   assert.strictEqual(r.error.code, 'NO_BUS');
 });
 
+/* ----------------------------------------------------------- P1-6 循环检测 */
+
+test('P1-6: A→B→A 被识别为循环委派（即使深度 2 仍在上限内）', async () => {
+  const s = scaffold();
+  // B 正在执行（来自 A 的委派：path=[A,B]，depth=1），现在 B 想把任务发回 A。
+  // depth 1 < max 2，v2.1.0 会让它通过并真的发回去，导致互相踢皮球。
+  const ctx = ctxFor(s, s.b, { chatDepth: 1, delegationPath: [s.a.conv.id], sendChatTask: async () => 'x' });
+  const r = await tool('send_message_to_chat').exec(ctx, { conversation_id: s.a.conv.id, message: '回传主线' });
+  assert.strictEqual(r.ok, false);
+  assert.strictEqual(r.error.code, 'CHAT_DELEGATION_LOOP');
+  assert.strictEqual(r.error.retryable, false);
+  // path 字段必须呈现完整可追溯链：A → B → A
+  assert.deepStrictEqual(r.error.path, [s.a.conv.id, s.b.conv.id, s.a.conv.id]);
+  assert.match(r.error.message, /主线开发 → 前端重构 → 主线开发/);
+});
+
+test('P1-6: 循环链包含可读标题，便于用户定位是谁在踢皮球', async () => {
+  const s = scaffold();
+  const ctx = ctxFor(s, s.c, {
+    chatDepth: 2,
+    delegationPath: [s.a.conv.id, s.b.conv.id],
+    sendChatTask: async () => 'x'
+  });
+  // C 把任务派回 A（A→B→C→A 之间的环路）
+  const r = await tool('send_message_to_chat').exec(ctx, { conversation_id: s.a.conv.id, message: '回到主线' });
+  assert.strictEqual(r.ok, false);
+  assert.strictEqual(r.error.code, 'CHAT_DELEGATION_LOOP');
+  assert.match(r.error.message, /主线开发 → 前端重构 → 回归测试 → 主线开发/);
+  assert.deepStrictEqual(r.error.path, [s.a.conv.id, s.b.conv.id, s.c.conv.id, s.a.conv.id]);
+});
+
+test('P1-6: 正在执行任务的对话不被重复派发（防并发重入）', async () => {
+  const s = scaffold();
+  const ctx = ctxFor(s, s.a, {
+    isChatBusy: (id) => id === s.b.conv.id,
+    sendChatTask: async () => { assert.fail('不应真的发出去'); }
+  });
+  const r = await tool('send_message_to_chat').exec(ctx, { conversation_id: s.b.conv.id, message: '再来一个' });
+  assert.strictEqual(r.ok, false);
+  assert.strictEqual(r.error.code, 'CHAT_BUSY');
+  assert.strictEqual(r.error.retryable, true);
+});
+
+test('P1-6: isChatBusy 仅挡住忙对话，空闲对话照常委派', async () => {
+  const s = scaffold();
+  let called = false;
+  const ctx = ctxFor(s, s.a, {
+    isChatBusy: (id) => id === s.b.conv.id, // 只有 B 忙，C 空闲
+    sendChatTask: async () => { called = true; return 'OK'; }
+  });
+  const r = await tool('send_message_to_chat').exec(ctx, { conversation_id: s.c.conv.id, message: '派给空闲的' });
+  assert.strictEqual(r.ok, true);
+  assert.strictEqual(called, true);
+});
+
+test('P1-6: 成功委派会把完整 delegationPath 透传给下一层', async () => {
+  const s = scaffold();
+  const seen = [];
+  const ctx = ctxFor(s, s.a, {
+    sendChatTask: async (o) => { seen.push(o); return '完成'; }
+  });
+  // A 主动发起第一跳，path 应为 [A, B]
+  const r = await tool('send_message_to_chat').exec(ctx, { conversation_id: s.b.conv.id, message: '第一跳' });
+  assert.strictEqual(r.ok, true);
+  assert.deepStrictEqual(r.data.delegation_path, [s.a.conv.id, s.b.conv.id]);
+  assert.deepStrictEqual(seen[0].delegationPath, [s.a.conv.id, s.b.conv.id]);
+  assert.strictEqual(seen[0].depth, 1);
+});
+
+test('P1-6: 非环形长链仍受深度上限约束（A→B→C 可走，A→B→C→D 才超限）', async () => {
+  // 深度上限是独立的第二道闸，只拦长链不拦环；环形由循环检测单独处理。
+  const s = scaffold();
+  const ctx = ctxFor(s, s.a, { chatDepth: 2, maxChatDelegationDepth: 2, sendChatTask: async () => 'x' });
+  const r = await tool('send_message_to_chat').exec(ctx, { conversation_id: s.c.conv.id, message: '第四层' });
+  assert.strictEqual(r.ok, false);
+  assert.strictEqual(r.error.code, 'DEPTH_EXCEEDED');
+});
+
 /* ----------------------------------------------------------- get_chat_status */
 
 test('P1-4: wait=false 立即返回 message_id，随后可查到最终结果', async () => {

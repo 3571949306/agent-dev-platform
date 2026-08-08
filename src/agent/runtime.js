@@ -26,6 +26,7 @@ const os = require('os');
 const path = require('path');
 const { compressHistory } = require('./context');
 const { plainText, imagePart } = require('../providers/content');
+const { subAgentScopes, ensureScopes } = require('../security/agentScopes');
 
 function withTimeout(p, ms) {
   if (!ms || ms <= 0) return p;
@@ -108,6 +109,10 @@ async function runAgentTurn(deps, opts) {
     emit: deps.emit,
     chatDepth: deps.chatDepth || 0,
     maxChatDelegationDepth: deps.maxChatDelegationDepth ?? 2,
+    // P1-6: the chain of conversations that led here. Depth alone cannot tell
+    // A→B→C from A→B→A; the path can.
+    delegationPath: Array.isArray(deps.delegationPath) ? deps.delegationPath.slice() : [],
+    isChatBusy: deps.isChatBusy,
     sendChatTask: deps.sendChatTask,
     consecutiveFailures: {}, seenActions: new Set(), step: 0,
     pendingImages: [], artifactsDir: artifactsDir(deps), visionEnabled
@@ -242,7 +247,7 @@ async function runAgentTurn(deps, opts) {
   } catch (e) {
     // Pressing Stop mid-request makes the provider (or a tool) throw. That is a
     // cancellation, not a failure — never show the user a red error for it.
-    const isAbort = abortSignal.aborted || /\babort/i.test(e.message || '');
+    const isAbort = abortSignal.aborted || e.aborted === true || e.name === 'AbortError' || /\babort/i.test(e.message || '');
     if (isAbort) {
       store.tasks.update(task.id, { status: 'cancelled' });
       deps.emit('task_cancelled', { taskId: task.id });
@@ -333,10 +338,46 @@ async function executeToolCall(tc, deps, runCtx, agent, conversationId, task, st
   // sub-agent tool?
   const subDef = deps.subAgentTool ? deps.subAgentTool(name) : null;
   if (subDef) {
-    deps.emit('subagent_start', { conversationId, taskId: task.id, agentId: subDef.id, name: subDef.name });
+    // P0-2: delegating is itself a privileged action. An external adapter that
+    // drives the desktop or spawns a CLI must clear the same gate a built-in
+    // tool would — the old code jumped straight to runSubAgent().
+    const scopes = subAgentScopes(subDef);
+    const gate = await ensureScopes(
+      runCtx.permissionEngine,
+      scopes,
+      { taskId: runCtx.taskId, projectId: runCtx.projectId },
+      deps.requestPermission
+        ? ({ scope }) => deps.requestPermission({
+            scope, tool: name, args, agent: agent.name, conversationId,
+            taskId: task.id, subAgent: subDef.name, external: subDef.type === 'external'
+          })
+        : null
+    );
+    if (!gate.ok) {
+      const msg = JSON.stringify({
+        ok: false,
+        error: {
+          code: 'PERMISSION_DENIED',
+          message: `子 Agent「${subDef.name}」需要权限 ${gate.scope}，${gate.reason === 'user_denied' ? '用户已拒绝' : '当前策略不允许'}`,
+          scope: gate.scope,
+          requiredScopes: scopes
+        }
+      });
+      recordToolResult(store, conversationId, task.id, agent.id, name, msg, tc.id);
+      deps.emit('permission_result', { conversationId, name, result: msg });
+      deps.emit('tool_result', { conversationId, name, result: msg });
+      return msg;
+    }
+
+    deps.emit('subagent_start', { conversationId, taskId: task.id, agentId: subDef.id, name: subDef.name, scopes });
     let r;
     try { r = await deps.runSubAgent(subDef, tc.arguments || '{}', runCtx); }
-    catch (e) { r = JSON.stringify({ ok: false, error: { code: 'SUBAGENT_FAILED', message: e.message } }); }
+    catch (e) {
+      const isAbort = e && (e.aborted === true || /\babort/i.test(e.message || ''));
+      r = JSON.stringify(isAbort
+        ? { status: 'cancelled', summary: '', findings: [], changedFiles: [], artifacts: [], errors: ['用户已停止'] }
+        : { ok: false, error: { code: 'SUBAGENT_FAILED', message: e.message } });
+    }
     deps.emit('subagent_result', { conversationId, taskId: task.id, agentId: subDef.id, name: subDef.name, result: r });
     recordToolResult(store, conversationId, task.id, agent.id, name, r, tc.id);
     return r;

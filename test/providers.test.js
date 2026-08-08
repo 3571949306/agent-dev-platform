@@ -116,3 +116,44 @@ test('guessCapabilities 对推理模型标记 reasoning', () => {
   assert.strictEqual(guessCapabilities('gpt-4o').vision, true);
   assert.strictEqual(guessCapabilities('some-random-model').reasoning, false);
 });
+
+/* ----------------------------------------------------------- P1-7 模型列表 */
+
+test('P1-7: Anthropic 内置推荐模型都是完整合法 id（不再有 claude-opus-4- 这种截断 id）', async () => {
+  const p = getProvider({ provider: 'anthropic', base_url: 'http://127.0.0.1:9/v1' }); // 不可达 → 走内置
+  const r = await p.listModelsDetailed();
+  assert.strictEqual(r.source, 'preset', '无法取远程列表时应诚实标记为 preset');
+  assert.ok(Array.isArray(r.models) && r.models.length >= 5);
+  for (const id of r.models) {
+    assert.ok(id && typeof id === 'string', '模型 id 必须是非空字符串');
+    assert.ok(!id.endsWith('-'), `模型 id 不允许以连字符结尾（旧的截断 bug）: ${id}`);
+    assert.ok(!id.endsWith('_'), `模型 id 不允许以下划线结尾: ${id}`);
+  }
+  assert.match(r.note, /内置|推荐/);
+  // 旧版会返回的非法 id 绝不应出现
+  assert.ok(!r.models.includes('claude-opus-4-'));
+  assert.ok(!r.models.includes('claude-sonnet-4-'));
+});
+
+test('P1-7: Anthropic listModels 与 listModelsDetailed 的模型数组一致', async () => {
+  const p = getProvider({ provider: 'anthropic', base_url: 'http://127.0.0.1:9/v1' });
+  const d = await p.listModelsDetailed();
+  const l = await p.listModels();
+  assert.deepStrictEqual(l, d.models);
+});
+
+test('P1-7: 所有 provider 都暴露 listModelsDetailed 且形状统一', async () => {
+  // 仅校验方法存在性；openai/ollama 的详细实现会真实请求 /models，
+  // 在无网环境下会抛错，不在此断言其远程结果。
+  for (const provider of ['openai', 'openai-responses', 'ollama', 'anthropic', 'mock']) {
+    const p = getProvider({ provider, base_url: 'http://127.0.0.1:9/v1' });
+    assert.strictEqual(typeof p.listModelsDetailed, 'function', `${provider} 应暴露 listModelsDetailed`);
+  }
+  // mock 不联网，可确定性地校验返回形状与 source 标签
+  const m = getProvider({ provider: 'mock' });
+  const r = await m.listModelsDetailed();
+  assert.ok(Array.isArray(r.models));
+  assert.strictEqual(r.source, 'preset');
+  assert.match(r.note, /内置|测试/);
+});
+

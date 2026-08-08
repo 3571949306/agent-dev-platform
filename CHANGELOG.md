@@ -1,5 +1,31 @@
 # Changelog
 
+## v2.2.0 — 2026-08-08
+
+> 稳定性闭环与真实环境修复。在 v2.1.0 已打通的核心链路之上，把「基本能用」修到「真实环境稳定可用」：补齐真正的 HTTP Abort/Stop、外部 Agent 权限与中断继承、WorkBuddy 读屏失败时的视觉降级、Codex 项目目录、跨聊天循环检测、Anthropic 模型列表。**不推倒重做、不新增无关大功能。**
+
+### P0 — 真实环境稳定性闭环
+
+* **P0-1 真正的 HTTP Abort / Stop**：重写 `src/providers/http.js`，统一 `request()` 入口；`linkSignals(timeoutMs, externalSignal)` 把超时与外部 `AbortSignal` 合并为一个真正传给 `fetch({signal})` 的信号。模型 Provider（OpenAI Chat/Responses、Anthropic、Ollama、Mock）、HTTP External Agent、Vision 读屏都走同一套 abort 契约——Stop 真正中断底层 socket，而不是等整段流读完才停。
+* **P0-2 外部 Agent 权限继承**：`runExternalAgent` 在入口处复用与 Agent Runtime 相同的 `PermissionEngine` + `ensureScopes` 闸门；从 IPC（Agents 页「立即运行」）和 Runtime 两条路径进入都会被同一把锁拦住，权限不再只在一条路上存在。
+* **P0-3 外部 Agent Stop 继承**：任务开始前已 abort 立即返回 `cancelled`；运行中 abort 经合并信号真正杀掉 HTTP socket / Codex 进程树（`killTree` 按进程组回收子进程）。
+* **P0-4 WorkBuddy UIA 失败后自动 Vision Fallback**：新增 `src/services/visionReader.js` 与 `DesktopVisionReader`。当目标窗口不暴露 UI 自动化文本时，自动截图 → 视觉模型读屏 → 拿回真实回答；画面不变时按帧哈希去重不重复计费；无视觉模型时**诚实报 `VISION_MODEL_REQUIRED`** 而非伪造完成；视觉答案原样返回、不经 diff 破坏。
+
+### P1 — 互通、能力与诊断
+
+* **P1-5 Codex 自动继承当前 Project Root**：`resolveCodexCwd(cfg, ctx)` 优先级 `adapter.cwd > ctx.projectRoot > process.cwd`；Codex CLI 在「当前项目根目录」下运行，不再用应用自身的 cwd。
+* **P1-6 跨聊天真正循环检测**：`send_message_to_chat` 携带完整 `delegationPath`，任意对话在链上被重访即判为 `CHAT_DELEGATION_LOOP`（附带可读链如「主线开发 → 前端重构 → 主线开发」），**A→B→A 即便深度未超限也被拦**；`isChatBusy` 防并发重入；深度上限作为独立的第二道闸只拦长链。
+* **P1-7 Anthropic 模型列表修复**：内置推荐列表改为**完整合法 id**（不再有 `claude-opus-4-` 这种会被 404 的截断 id）；优先请求真实 `/v1/models`，不可用才回退到内置；通过 `connections:models` 返回的 `source` 标签（remote / preset）让 UI 区分「真从服务器拉的」和「内置推荐」。
+
+### 测试 207 / 207 全过
+
+* 新增 / 强化：`providerabort`（abort 契约）· `desktopvision`（视觉降级真实 harness，含去重、诚实失败、中途取消、超预算）· `chats`（P1-6 循环检测 + 并发重入）· `providers`（P1-7 完整 id + source 标签）· `services`（P2-9 穿透外部 Agent 运行时的视觉读屏 / 权限闸门 / Stop / Codex cwd）。
+* 冒烟测试（`npm run smoke`）保留：启动无控制台错误 → `SMOKE_OK`。
+
+### 打包
+
+* 重新生成 `Agent Dev Platform Setup 2.2.0.exe`（NSIS）与 `Agent Dev Platform 2.2.0 portable.exe`（均为 ~84MB，unsigned）。
+
 ## v2.1.0 — 2026-08-08
 
 > 在 v2.0.0 已打通的骨架之上，把「存在但未真正闭环」的关键能力修成可工作的真实能力，并完成端到端验证。**不推倒重做、不删旧功能、不夸大、不假实现。**

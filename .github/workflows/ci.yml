@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  test:
+    name: 单元测试 (Electron Node)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Rebuild native modules for Electron ABI
+        # better-sqlite3 必须按 Electron 的 Node ABI 重新编译，否则主进程加载即崩
+        run: npm run rebuild
+
+      - name: Run test suite
+        # 测试以 ELECTRON_RUN_AS_NODE=1 运行（见 scripts/run-tests.js），
+        # 自动匹配 better-sqlite3 的 Electron ABI。
+        run: npm test
+
+  smoke:
+    name: 冒烟测试 (Electron GUI)
+    runs-on: windows-latest
+    needs: test
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Rebuild native modules for Electron ABI
+        run: npm run rebuild
+
+      - name: Smoke test
+        # 启动 Electron，断言渲染层挂载 + 无控制台 fatal 错误后退出。
+        # 需要显示环境；GitHub Windows runner 自带虚拟显示。
+        run: npm run smoke

@@ -88,6 +88,64 @@ $g.Dispose(); $bmp.Dispose();
     } catch (e) { return { ok: false, error: e.message }; }
   }
   /**
+   * P0-4: capture ONE window instead of the whole desktop.
+   *
+   * The Vision fallback sends a frame to a multimodal model on every change.
+   * A 3840x2160 desktop shot is ~4MB of base64 and buries the target app among
+   * the user's other windows; cropping to the window rect cuts both the token
+   * bill and the misreads. Falls back to the full screen when the rect is
+   * unusable (minimised window with no restore, virtual-desktop edge cases).
+   */
+  async screenshotWindow(title) {
+    if (!title) return this.screenshot();
+    const file = path.join(os.tmpdir(), 'adp_win_' + Date.now() + '.png');
+    const esc = file.replace(/'/g, "''");
+    const r = await ps(`Add-Type -AssemblyName System.Windows.Forms; Add-Type -AssemblyName System.Drawing;
+Add-Type @"
+using System; using System.Runtime.InteropServices;
+public struct ADPRECT { public int Left; public int Top; public int Right; public int Bottom; }
+public class ADPWin {
+  [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out ADPRECT r);
+  [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr h);
+  [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int c);
+}
+"@
+$p = Get-Process | Where-Object { $_.MainWindowTitle -like ("*" + ${psLiteral(title)} + "*") } | Select-Object -First 1;
+if (-not $p) { @{ok=$false; error=("未找到窗口: " + ${psLiteral(title)})} | ConvertTo-Json -Compress; exit }
+$h = $p.MainWindowHandle;
+if ([ADPWin]::IsIconic($h)) { [ADPWin]::ShowWindow($h, 9) | Out-Null; Start-Sleep -Milliseconds 400 }
+$rect = New-Object ADPRECT;
+[ADPWin]::GetWindowRect($h, [ref]$rect) | Out-Null;
+$x = $rect.Left; $y = $rect.Top;
+$w = $rect.Right - $rect.Left; $hh = $rect.Bottom - $rect.Top;
+$full = $false;
+if ($w -le 0 -or $hh -le 0) {
+  $b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds;
+  $x = $b.Left; $y = $b.Top; $w = $b.Width; $hh = $b.Height; $full = $true;
+}
+$bmp = New-Object System.Drawing.Bitmap($w, $hh);
+$g = [System.Drawing.Graphics]::FromImage($bmp);
+$g.CopyFromScreen($x, $y, 0, 0, (New-Object System.Drawing.Size($w, $hh)));
+$bmp.Save('${esc}');
+$g.Dispose(); $bmp.Dispose();
+@{ok=$true; path='${esc}'; width=$w; height=$hh; fullScreen=$full; title=$p.MainWindowTitle} | ConvertTo-Json -Compress`);
+    if (!r.ok) return { ok: false, error: r.error };
+    const d = r.data || {};
+    if (d.ok === false) return { ok: false, error: d.error || '窗口截图失败' };
+    try {
+      const b64 = fs.readFileSync(file).toString('base64');
+      fs.unlinkSync(file);
+      return {
+        ok: true,
+        data_url: 'data:image/png;base64,' + b64,
+        width: d.width, height: d.height,
+        fullScreen: !!d.fullScreen,
+        title: d.title || title
+      };
+    } catch (e) { return { ok: false, error: e.message }; }
+  }
+
+  /**
    * Send a RAW SendKeys string — the caller is responsible for escaping.
    * Use `typeText` when you want literal characters.
    */
@@ -221,6 +279,7 @@ function createComputerTools() {
     { name: 'computer_list_windows', description: '列出当前打开的窗口（标题与进程号）。', risk_level: 'low', permission: 'computer', input_schema: { type: 'object', properties: {} } },
     { name: 'computer_focus_window', description: '按标题聚焦某个窗口。', risk_level: 'medium', permission: 'computer', input_schema: { type: 'object', properties: { title: { type: 'string' } }, required: ['title'] } },
     { name: 'computer_screenshot', description: '截取屏幕并返回图片（base64）。', risk_level: 'low', permission: 'computer', input_schema: { type: 'object', properties: {} } },
+    { name: 'computer_screenshot_window', description: '只截取指定标题的窗口并返回图片（base64）。比全屏截图更省 token、更容易看清。', risk_level: 'low', permission: 'computer', input_schema: { type: 'object', properties: { title: { type: 'string' } }, required: ['title'] } },
     { name: 'computer_press_keys', description: '向当前焦点窗口发送按键（如 %{TAB} 或 hello）。', risk_level: 'medium', permission: 'computer', input_schema: { type: 'object', properties: { keys: { type: 'string' } }, required: ['keys'] } },
     { name: 'computer_click_at', description: '在屏幕坐标 (x,y) 点击。', risk_level: 'medium', permission: 'computer', input_schema: { type: 'object', properties: { x: { type: 'number' }, y: { type: 'number' } }, required: ['x', 'y'] } },
     { name: 'computer_get_ui_tree', description: '获取窗口的 UI 自动化控件树。', risk_level: 'low', permission: 'computer', input_schema: { type: 'object', properties: { title: { type: 'string' } }, required: ['title'] } },
@@ -233,6 +292,7 @@ function createComputerTools() {
     computer_list_windows: async () => manager.listWindows(),
     computer_focus_window: async (c, a) => manager.focusWindow(a.title),
     computer_screenshot: async () => manager.screenshot(),
+    computer_screenshot_window: async (c, a) => manager.screenshotWindow(a.title),
     computer_press_keys: async (c, a) => manager.pressKeys(a.keys),
     computer_click_at: async (c, a) => manager.clickAt(a.x, a.y),
     computer_get_ui_tree: async (c, a) => manager.getUiTree(a.title),

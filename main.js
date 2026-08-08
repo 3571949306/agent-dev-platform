@@ -1,99 +1,126 @@
+'use strict';
 const { app, BrowserWindow, shell } = require('electron');
-const fs = require('fs');
 const path = require('path');
+const fs = require('fs');
 
 let mainWindow = null;
 let httpServer = null;
 
-async function bootstrap() {
-  // Set data file path to user data directory (persists across installs)
-  const userDataPath = app.getPath('userData');
-  const dataFile = path.join(userDataPath, 'data.json');
-  process.env.DATA_FILE = dataFile;
+// --smoke : boot headless-ish, load the UI, collect renderer errors, exit.
+// Used by `npm run smoke` so the packaged app is never shipped with a
+// renderer that throws on first paint.
+const SMOKE = process.argv.includes('--smoke');
+const smokeErrors = [];
 
-  // Migrate existing data on first run
-  if (!fs.existsSync(dataFile)) {
-    const oldDataFile = path.join(__dirname, 'data.json');
-    if (fs.existsSync(oldDataFile)) {
-      fs.copyFileSync(oldDataFile, dataFile);
-      console.log('Migrated existing data.json to user data directory');
+async function bootstrap() {
+  const userDataPath = app.getPath('userData');
+  const store = require('./src/db/store');
+  store.init(userDataPath);
+
+  // First-run: migrate v1 JSON (if present) then seed defaults
+  const initialized = store.settings.get('_initialized');
+  if (!initialized) {
+    const { seedDefaults, findLegacyDataJson } = require('./src/db/seed');
+    const legacy = findLegacyDataJson(userDataPath, __dirname);
+    if (legacy) {
+      const bak = legacy + '.migrated.bak';
+      try { fs.copyFileSync(legacy, bak); } catch {}
+      store.migrateFromJson(legacy);
     }
+    seedDefaults(store);
+    store.settings.set('_initialized', true);
   }
 
-  // Start the Express server (inside Electron process)
-  const { start } = require('./server');
-  const { server, port } = await start(3456);
+  // Static renderer server (127.0.0.1 only; logic goes through IPC)
+  const { start } = require('./src/server/static');
+  const { server, port } = await start(0);
   httpServer = server;
-  console.log(`Server started on port ${port}`);
 
-  // Create the main window
-  mainWindow = new BrowserWindow({
-    width: 1280,
-    height: 820,
-    minWidth: 900,
-    minHeight: 600,
+  // Register IPC + connect MCP servers
+  const handlers = require('./src/ipc/handlers');
+  mainWindow = createWindow(port);
+  handlers.register(mainWindow);
+  await handlers.initServices();
+  console.log(`Agent Dev Platform ready on http://127.0.0.1:${port}`);
+  if (SMOKE) runSmoke(port);
+}
+
+async function runSmoke(port) {
+  const wc = mainWindow.webContents;
+  wc.on('console-message', (_e, level, message, line, sourceId) => {
+    if (level >= 2) smokeErrors.push(`[console] ${message} (${sourceId}:${line})`);
+  });
+  wc.on('render-process-gone', (_e, d) => smokeErrors.push(`[renderer gone] ${d.reason}`));
+  wc.on('preload-error', (_e, p, err) => smokeErrors.push(`[preload] ${p}: ${err.message}`));
+  mainWindow.webContents.on('did-fail-load', (_e, code, desc) => smokeErrors.push(`[load] ${code} ${desc}`));
+
+  await new Promise(r => (wc.isLoading() ? wc.once('did-finish-load', r) : r()));
+  await new Promise(r => setTimeout(r, 2500)); // let boot() finish its IPC round-trips
+
+  // Ask the renderer to report what it actually rendered.
+  let probe;
+  try {
+    probe = await wc.executeJavaScript(`(() => ({
+      hasApi: typeof window.api === 'object',
+      title: document.querySelector('.brand, .topbar')?.textContent?.trim().slice(0, 60) || null,
+      agentOptions: document.querySelectorAll('#agent-select option').length,
+      chatItems: document.querySelectorAll('.chat-item').length,
+      messages: document.querySelectorAll('.msg, .bubble').length,
+      fatal: document.body.innerText.includes('必须在 Agent Dev Platform') || false,
+      bodyLen: document.body.innerHTML.length
+    }))()`);
+  } catch (e) { smokeErrors.push('[probe] ' + e.message); }
+
+  console.log('SMOKE_PROBE ' + JSON.stringify(probe || null));
+  if (smokeErrors.length) {
+    console.error('SMOKE_FAIL\n' + smokeErrors.join('\n'));
+    app.exit(1);
+  } else if (!probe || !probe.hasApi || probe.bodyLen < 500) {
+    console.error('SMOKE_FAIL 渲染层未正常挂载: ' + JSON.stringify(probe));
+    app.exit(1);
+  } else {
+    console.log('SMOKE_OK');
+    app.exit(0);
+  }
+}
+
+function createWindow(port) {
+  const win = new BrowserWindow({
+    width: 1366, height: 850, minWidth: 1000, minHeight: 640,
     title: 'Agent Dev Platform',
     backgroundColor: '#0d1117',
     autoHideMenuBar: true,
     webPreferences: {
       contextIsolation: true,
-      nodeIntegration: false
+      nodeIntegration: false,
+      sandbox: false,
+      preload: path.join(__dirname, 'preload.js')
     }
   });
+  win.loadURL(`http://127.0.0.1:${port}`);
 
-  // Load the app
-  mainWindow.loadURL(`http://localhost:${port}`);
-
-  // Open external links in the system browser; allow localhost popups (standalone chat window)
-  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    if (url.startsWith('http://localhost') || url.startsWith('https://localhost')) {
-      return {
-        action: 'allow',
-        overrideBrowserWindowOptions: {
-          width: 1024,
-          height: 760,
-          minWidth: 720,
-          minHeight: 520,
-          backgroundColor: '#0d1117',
-          autoHideMenuBar: true,
-          title: '对话窗口'
-        }
-      };
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    if (url.startsWith('http://127.0.0.1')) {
+      return { action: 'allow', overrideBrowserWindowOptions: { width: 1100, height: 800, minWidth: 800, minHeight: 560, backgroundColor: '#0d1117', autoHideMenuBar: true, title: '对话窗口' } };
     }
     shell.openExternal(url);
     return { action: 'deny' };
   });
-
-  mainWindow.on('closed', () => {
-    mainWindow = null;
-  });
+  win.on('closed', () => { if (win === mainWindow) mainWindow = null; });
+  return win;
 }
 
 app.whenReady().then(bootstrap);
 
 app.on('window-all-closed', () => {
-  if (httpServer) {
-    httpServer.close();
-    httpServer = null;
-  }
+  if (httpServer) { try { httpServer.close(); } catch {} httpServer = null; }
   app.quit();
 });
+app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) bootstrap(); });
 
-app.on('activate', () => {
-  if (BrowserWindow.getAllWindows().length === 0) {
-    bootstrap();
-  }
-});
-
-// Prevent multiple instances
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
   app.quit();
 } else {
-  app.on('second-instance', () => {
-    if (mainWindow) {
-      if (mainWindow.isMinimized()) mainWindow.restore();
-      mainWindow.focus();
-    }
-  });
+  app.on('second-instance', () => { if (mainWindow) { if (mainWindow.isMinimized()) mainWindow.restore(); mainWindow.focus(); } });
 }

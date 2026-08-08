@@ -4,6 +4,9 @@ node_modules/
 # Build output (large installer, not source)
 dist-electron/
 
+# Build artifacts / cache
+build.log
+
 # Local data / secrets
 data.json
 *.bak

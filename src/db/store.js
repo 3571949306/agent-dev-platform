@@ -1,0 +1,479 @@
+'use strict';
+/**
+ * Data store: CRUD over SQLite + migration from v1 data.json.
+ * All entities live here. JSON columns are serialized/deserialized transparently.
+ */
+const crypto = require('crypto');
+const dbm = require('./schema');
+const sec = require('../security/secret');
+
+function db() { return dbm.getDb(); }
+function uuid() { return crypto.randomUUID(); }
+function now() { return new Date().toISOString(); }
+function j(v) { return JSON.stringify(v === undefined ? null : v); }
+function p(v, def) { try { return JSON.parse(v); } catch { return def; } }
+
+// ---------- projects ----------
+const projects = {
+  list() { return db().prepare('SELECT * FROM projects ORDER BY last_opened_at DESC').all(); },
+  get(id) { return db().prepare('SELECT * FROM projects WHERE id=?').get(id); },
+  create({ name, rootPath, settings }) {
+    const id = uuid(); const t = now();
+    db().prepare(`INSERT INTO projects (id,name,root_path,settings_json,created_at,updated_at,last_opened_at)
+      VALUES (?,?,?,?,?,?,?)`).run(id, name, rootPath, j(settings || {}), t, t, t);
+    return projects.get(id);
+  },
+  update(id, patch) {
+    const cur = projects.get(id); if (!cur) return null;
+    const name = patch.name ?? cur.name;
+    const root = patch.rootPath ?? cur.root_path;
+    const settings = patch.settings ? j(patch.settings) : cur.settings_json;
+    db().prepare('UPDATE projects SET name=?,root_path=?,settings_json=?,updated_at=? WHERE id=?')
+      .run(name, root, settings, now(), id);
+    return projects.get(id);
+  },
+  touch(id) { db().prepare('UPDATE projects SET last_opened_at=? WHERE id=?').run(now(), id); },
+  remove(id) { db().prepare('DELETE FROM projects WHERE id=?').run(id); return true; }
+};
+
+// ---------- api_connections ----------
+const connections = {
+  list() {
+    return db().prepare('SELECT id,name,provider,base_url,api_key_masked,headers_json,models_json,tested,tested_at,last_error,latency_ms,created_at,updated_at FROM api_connections ORDER BY created_at').all()
+      .map(r => ({ ...r, headers: p(r.headers_json, {}), models: p(r.models_json, []), has_key: !!r.api_key_masked }));
+  },
+  get(id) {
+    const r = db().prepare('SELECT * FROM api_connections WHERE id=?').get(id);
+    if (!r) return null;
+    return { ...r, headers: p(r.headers_json, {}), models: p(r.models_json, []), has_key: !!r.api_key_masked };
+  },
+  /** returns connection with decrypted key (main process only) */
+  getDecrypted(id) {
+    const r = db().prepare('SELECT * FROM api_connections WHERE id=?').get(id);
+    if (!r) return null;
+    return { ...r, api_key: sec.decrypt(r.api_key_enc), headers: p(r.headers_json, {}), models: p(r.models_json, []) };
+  },
+  create(body) {
+    const id = uuid(); const t = now();
+    const key = body.api_key || '';
+    db().prepare(`INSERT INTO api_connections (id,name,provider,base_url,api_key_enc,api_key_masked,headers_json,models_json,tested,created_at,updated_at)
+      VALUES (?,?,?,?,?,?,?,?,0,?,?)`)
+      .run(id, body.name || '新连接', body.provider || 'openai', body.base_url || 'https://api.openai.com/v1',
+        sec.encrypt(key), sec.mask(key), j(body.headers || {}), j(body.models || []), t, t);
+    return connections.get(id);
+  },
+  update(id, body) {
+    const cur = connections.get(id); if (!cur) return null;
+    const name = body.name ?? cur.name;
+    const provider = body.provider ?? cur.provider;
+    const baseUrl = body.base_url ?? cur.base_url;
+    const headers = body.headers ? j(body.headers) : cur.headers_json;
+    const models = body.models ? j(body.models) : cur.models_json;
+    let enc = cur.api_key_enc, masked = cur.api_key_masked;
+    if (body.api_key !== undefined) {
+      if (body.api_key === '') { enc = ''; masked = ''; }
+      else if (body.api_key !== cur.api_key_masked) { enc = sec.encrypt(body.api_key); masked = sec.mask(body.api_key); }
+    }
+    const tested = body.tested ?? cur.tested;
+    const testedAt = body.tested_at ?? cur.tested_at;
+    const lastError = body.last_error ?? cur.last_error;
+    const latency = body.latency_ms ?? cur.latency_ms;
+    db().prepare(`UPDATE api_connections SET name=?,provider=?,base_url=?,api_key_enc=?,api_key_masked=?,headers_json=?,models_json=?,tested=?,tested_at=?,last_error=?,latency_ms=?,updated_at=? WHERE id=?`)
+      .run(name, provider, baseUrl, enc, masked, headers, models, tested ? 1 : 0, testedAt, lastError, latency, now(), id);
+    return connections.get(id);
+  },
+  setTestResult(id, { ok, error, latency }) {
+    const cur = connections.get(id); if (!cur) return null;
+    db().prepare('UPDATE api_connections SET tested=?,tested_at=?,last_error=?,latency_ms=? WHERE id=?')
+      .run(ok ? 1 : 0, ok ? now() : cur.tested_at, error || '', latency ?? null, id);
+    return connections.get(id);
+  },
+  setModels(id, models) {
+    db().prepare('UPDATE api_connections SET models_json=? WHERE id=?').run(j(models), id);
+    return connections.get(id);
+  },
+  remove(id) { db().prepare('DELETE FROM api_connections WHERE id=?').run(id); return true; }
+};
+
+// ---------- models ----------
+const models = {
+  listByConnection(connId) { return db().prepare('SELECT * FROM models WHERE connection_id=?').all(connId); },
+  upsert(connId, modelId, caps) {
+    const ex = db().prepare('SELECT id FROM models WHERE connection_id=? AND model_id=?').get(connId, modelId);
+    if (ex) { db().prepare('UPDATE models SET capabilities_json=? WHERE id=?').run(j(caps || {}), ex.id); return ex.id; }
+    const id = uuid();
+    db().prepare('INSERT INTO models (id,connection_id,model_id,capabilities_json,created_at) VALUES (?,?,?,?,?)')
+      .run(id, connId, modelId, j(caps || {}), now());
+    return id;
+  },
+  favorite(id, fav) { db().prepare('UPDATE models SET favorite=? WHERE id=?').run(fav ? 1 : 0, id); }
+};
+
+// ---------- prompts ----------
+const prompts = {
+  list() { return db().prepare('SELECT * FROM prompts ORDER BY created_at').all().map(r => ({ ...r, tags: p(r.tags_json, []) })); },
+  get(id) { const r = db().prepare('SELECT * FROM prompts WHERE id=?').get(id); return r ? { ...r, tags: p(r.tags_json, []) } : null; },
+  create(body) {
+    const id = uuid(); const t = now();
+    db().prepare('INSERT INTO prompts (id,name,version,content,description,tags_json,tested,created_at,updated_at) VALUES (?,?,1,?,?,?,0,?,?)')
+      .run(id, body.name || '未命名', body.content || '', body.description || '', j(body.tags || []), t, t);
+    return prompts.get(id);
+  },
+  update(id, body) {
+    const cur = prompts.get(id); if (!cur) return null;
+    const content = body.content ?? cur.content;
+    const version = body.content !== undefined ? (cur.version || 1) + 1 : cur.version;
+    db().prepare('UPDATE prompts SET name=?,content=?,version=?,description=?,tags_json=?,tested=?,updated_at=? WHERE id=?')
+      .run(body.name ?? cur.name, content, version, body.description ?? cur.description, j(body.tags ?? cur.tags), body.tested ?? cur.tested, now(), id);
+    return prompts.get(id);
+  },
+  remove(id) { db().prepare('DELETE FROM prompts WHERE id=?').run(id); return true; }
+};
+
+// ---------- skills ----------
+const skills = {
+  list() { return db().prepare('SELECT * FROM skills ORDER BY created_at').all().map(r => ({ ...r, recommended_tools: p(r.recommended_tools_json, []), capability: p(r.capability_json, []), permission_preset: p(r.permission_preset_json, []) })); },
+  get(id) { const r = db().prepare('SELECT * FROM skills WHERE id=?').get(id); return r ? { ...r, recommended_tools: p(r.recommended_tools_json, []), capability: p(r.capability_json, []), permission_preset: p(r.permission_preset_json, []) } : null; },
+  create(body) {
+    const id = uuid(); const t = now();
+    db().prepare('INSERT INTO skills (id,name,description,prompt,recommended_tools_json,capability_json,permission_preset_json,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)')
+      .run(id, body.name, body.description || '', body.prompt || '', j(body.recommended_tools || []), j(body.capability || []), j(body.permission_preset || []), t, t);
+    return skills.get(id);
+  },
+  remove(id) { db().prepare('DELETE FROM skills WHERE id=?').run(id); return true; }
+};
+
+// ---------- agents (native + computer) ----------
+function rowToAgent(r) {
+  if (!r) return null;
+  return { ...r, tools: p(r.tools_json, []), permissions: p(r.permissions_json, []), sub_agent_ids: p(r.sub_agent_ids_json, []), workspace: p(r.workspace_json, {}), is_main: !!r.is_main };
+}
+const agents = {
+  list() {
+    const native = db().prepare("SELECT * FROM agents WHERE type IN ('native','computer') ORDER BY created_at").all().map(rowToAgent);
+    const ext = externalAgents.list();
+    return [...native, ...ext];
+  },
+  listNative() { return db().prepare("SELECT * FROM agents WHERE type IN ('native','computer') ORDER BY created_at").all().map(rowToAgent); },
+  get(id) { return rowToAgent(db().prepare('SELECT * FROM agents WHERE id=?').get(id)); },
+  create(body) {
+    const id = uuid(); const t = now();
+    const type = body.type === 'computer' ? 'computer' : 'native';
+    db().prepare(`INSERT INTO agents (id,name,description,type,system_prompt_id,provider,model,api_connection_id,tools_json,permissions_json,max_steps,timeout_ms,temperature,max_tokens,is_main,sub_agent_ids_json,workspace_json,created_at,updated_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+      .run(id, body.name || '新 Agent', body.description || '', type, body.system_prompt_id || null, body.provider || null, body.model || null, body.api_connection_id || null,
+        j(body.tools || []), j(body.permissions || []), body.max_steps ?? 40, body.timeout_ms ?? 600000, body.temperature ?? 0.7, body.max_tokens ?? 4096, body.is_main ? 1 : 0, j(body.sub_agent_ids || []), j(body.workspace || {}), t, t);
+    return agents.get(id);
+  },
+  update(id, body) {
+    const cur = agents.get(id); if (!cur) return null;
+    db().prepare(`UPDATE agents SET name=?,description=?,system_prompt_id=?,provider=?,model=?,api_connection_id=?,tools_json=?,permissions_json=?,max_steps=?,timeout_ms=?,temperature=?,max_tokens=?,is_main=?,sub_agent_ids_json=?,workspace_json=?,updated_at=? WHERE id=?`)
+      .run(body.name ?? cur.name, body.description ?? cur.description, body.system_prompt_id ?? cur.system_prompt_id, body.provider ?? cur.provider, body.model ?? cur.model, body.api_connection_id ?? cur.api_connection_id,
+        j(body.tools ?? cur.tools), j(body.permissions ?? cur.permissions), body.max_steps ?? cur.max_steps, body.timeout_ms ?? cur.timeout_ms, body.temperature ?? cur.temperature, body.max_tokens ?? cur.max_tokens, body.is_main ? 1 : (cur.is_main ? 1 : 0), j(body.sub_agent_ids ?? cur.sub_agent_ids), j(body.workspace ?? cur.workspace), now(), id);
+    return agents.get(id);
+  },
+  remove(id) { db().prepare('DELETE FROM agents WHERE id=?').run(id); return true; }
+};
+
+// ---------- external_agents ----------
+function rowToExternal(r) {
+  if (!r) return null;
+  return { ...r, type: 'external', capabilities: p(r.capabilities_json, []), config: p(r.config_json, {}), online: !!r.online };
+}
+const externalAgents = {
+  list() { return db().prepare('SELECT * FROM external_agents ORDER BY created_at').all().map(rowToExternal); },
+  get(id) { return rowToExternal(db().prepare('SELECT * FROM external_agents WHERE id=?').get(id)); },
+  create(body) {
+    const id = uuid(); const t = now();
+    db().prepare(`INSERT INTO external_agents (id,name,description,adapter_type,endpoint,command,config_json,capabilities_json,online,created_at,updated_at)
+      VALUES (?,?,?,?,?,?,?,?,0,?,?)`)
+      .run(id, body.name || '新外部 Agent', body.description || '', body.adapter_type || 'http', body.endpoint || '', body.command || '', j(body.config || {}), j(body.capabilities || []), t, t);
+    return externalAgents.get(id);
+  },
+  update(id, body) {
+    const cur = externalAgents.get(id); if (!cur) return null;
+    db().prepare('UPDATE external_agents SET name=?,description=?,adapter_type=?,endpoint=?,command=?,config_json=?,capabilities_json=?,online=?,updated_at=? WHERE id=?')
+      .run(body.name ?? cur.name, body.description ?? cur.description, body.adapter_type ?? cur.adapter_type, body.endpoint ?? cur.endpoint, body.command ?? cur.command, j(body.config ?? cur.config), j(body.capabilities ?? cur.capabilities), body.online ? 1 : 0, now(), id);
+    return externalAgents.get(id);
+  },
+  setOnline(id, online) { db().prepare('UPDATE external_agents SET online=? WHERE id=?').run(online ? 1 : 0, id); },
+  remove(id) { db().prepare('DELETE FROM external_agents WHERE id=?').run(id); return true; }
+};
+
+// ---------- conversations ----------
+const conversations = {
+  list(projectId) {
+    const sql = projectId ? 'SELECT * FROM conversations WHERE project_id=? ORDER BY updated_at DESC' : 'SELECT * FROM conversations ORDER BY updated_at DESC';
+    return db().prepare(sql).all(...(projectId ? [projectId] : [])).map(r => ({ ...r, project_id: r.project_id }));
+  },
+  get(id) { return db().prepare('SELECT * FROM conversations WHERE id=?').get(id); },
+  getWithMessages(id) {
+    const conv = conversations.get(id); if (!conv) return null;
+    return { ...conv, messages: messages.list(id) };
+  },
+  create({ projectId, agentId, title }) {
+    const id = uuid(); const t = now();
+    db().prepare('INSERT INTO conversations (id,project_id,agent_id,title,created_at,updated_at) VALUES (?,?,?,?,?,?)')
+      .run(id, projectId || null, agentId || null, title || '新对话', t, t);
+    return conversations.get(id);
+  },
+  update(id, patch) {
+    const cur = conversations.get(id); if (!cur) return null;
+    db().prepare('UPDATE conversations SET title=?,agent_id=?,updated_at=? WHERE id=?')
+      .run(patch.title ?? cur.title, patch.agentId ?? cur.agent_id, now(), id);
+    return conversations.get(id);
+  },
+  remove(id) {
+    db().prepare('DELETE FROM messages WHERE conversation_id=?').run(id);
+    db().prepare('DELETE FROM agent_events WHERE conversation_id=?').run(id);
+    db().prepare('DELETE FROM conversations WHERE id=?').run(id);
+    return true;
+  }
+};
+
+// ---------- messages ----------
+const messages = {
+  list(convId) { return db().prepare('SELECT * FROM messages WHERE conversation_id=? ORDER BY created_at, rowid').all(convId).map(r => ({ ...r, tool_calls: p(r.tool_calls_json, null) })); },
+  create({ conversation_id, role, content, tool_calls, tool_call_id, model, tokens, rating }) {
+    const id = uuid();
+    db().prepare('INSERT INTO messages (id,conversation_id,role,content,tool_calls_json,tool_call_id,model,tokens,rating,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)')
+      .run(id, conversation_id, role, content || '', tool_calls ? j(tool_calls) : null, tool_call_id || null, model || null, tokens ?? null, rating ?? null, now());
+    db().prepare('UPDATE conversations SET updated_at=? WHERE id=?').run(now(), conversation_id);
+    return db().prepare('SELECT * FROM messages WHERE id=?').get(id);
+  },
+  update(id, patch) {
+    const cur = db().prepare('SELECT * FROM messages WHERE id=?').get(id); if (!cur) return null;
+    db().prepare('UPDATE messages SET content=?,rating=? WHERE id=?').run(patch.content ?? cur.content, patch.rating ?? cur.rating, id);
+    return db().prepare('SELECT * FROM messages WHERE id=?').get(id);
+  },
+  rate(id, rating) { db().prepare('UPDATE messages SET rating=? WHERE id=?').run(rating, id); return true; }
+};
+
+// ---------- agent_events ----------
+const events = {
+  append({ conversation_id, task_id, agent_id, type, payload }) {
+    const id = uuid();
+    db().prepare('INSERT INTO agent_events (id,conversation_id,task_id,agent_id,type,payload_json,created_at) VALUES (?,?,?,?,?,?,?)')
+      .run(id, conversation_id || null, task_id || null, agent_id || null, type, j(payload || {}), now());
+    return id;
+  },
+  list(convId) { return db().prepare('SELECT * FROM agent_events WHERE conversation_id=? ORDER BY created_at, rowid').all(convId); },
+  listByTask(taskId) { return db().prepare('SELECT * FROM agent_events WHERE task_id=? ORDER BY created_at, rowid').all(taskId); }
+};
+
+// ---------- tasks ----------
+const tasks = {
+  list(projectId) {
+    const sql = projectId ? 'SELECT * FROM tasks WHERE project_id=? ORDER BY created_at DESC' : 'SELECT * FROM tasks ORDER BY created_at DESC';
+    return db().prepare(sql).all(...(projectId ? [projectId] : []));
+  },
+  get(id) { return db().prepare('SELECT * FROM tasks WHERE id=?').get(id); },
+  create({ projectId, conversationId, agentId, title, status }) {
+    const id = uuid(); const t = now();
+    db().prepare('INSERT INTO tasks (id,project_id,conversation_id,agent_id,title,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)')
+      .run(id, projectId || null, conversationId || null, agentId || null, title || '', status || 'queued', t, t);
+    return tasks.get(id);
+  },
+  update(id, patch) {
+    const cur = tasks.get(id); if (!cur) return null;
+    db().prepare('UPDATE tasks SET title=?,status=?,summary=?,error=?,updated_at=? WHERE id=?')
+      .run(patch.title ?? cur.title, patch.status ?? cur.status, patch.summary ?? cur.summary, patch.error ?? cur.error, now(), id);
+    return tasks.get(id);
+  },
+  addStep(taskId, label) {
+    const id = uuid();
+    db().prepare('INSERT INTO task_steps (id,task_id,label,status,created_at) VALUES (?,?,?,?,?)').run(id, taskId, label, 'pending', now());
+    return id;
+  },
+  updateStep(stepId, status) { db().prepare('UPDATE task_steps SET status=? WHERE id=?').run(status, stepId); },
+  steps(taskId) { return db().prepare('SELECT * FROM task_steps WHERE task_id=? ORDER BY created_at').all(taskId); }
+};
+
+// ---------- agent_messages (bus) ----------
+const agentMessages = {
+  send({ projectId, taskId, fromAgentId, toAgentId, type, content, payload }) {
+    const id = uuid();
+    db().prepare('INSERT INTO agent_messages (id,project_id,task_id,from_agent_id,to_agent_id,type,content,payload_json,status,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)')
+      .run(id, projectId || null, taskId || null, fromAgentId || null, toAgentId || null, type || 'message', content || '', j(payload || {}), 'pending', now());
+    return id;
+  },
+  list(filter) {
+    let sql = 'SELECT * FROM agent_messages';
+    const where = []; const params = [];
+    if (filter && filter.toAgentId) { where.push('to_agent_id=?'); params.push(filter.toAgentId); }
+    if (filter && filter.status) { where.push('status=?'); params.push(filter.status); }
+    if (where.length) sql += ' WHERE ' + where.join(' AND ');
+    sql += ' ORDER BY created_at';
+    return db().prepare(sql).all(...params);
+  },
+  update(id, patch) { db().prepare('UPDATE agent_messages SET status=?,content=? WHERE id=?').run(patch.status ?? 'pending', patch.content ?? '', id); }
+};
+
+// ---------- tools (registry) ----------
+const tools = {
+  list() { return db().prepare('SELECT * FROM tools ORDER BY created_at').all().map(r => ({ ...r, input_schema: p(r.input_schema_json, {}), config: p(r.config_json, {}) })); },
+  get(id) { const r = db().prepare('SELECT * FROM tools WHERE id=?').get(id); return r ? { ...r, input_schema: p(r.input_schema_json, {}), config: p(r.config_json, {}) } : null; },
+  create(body) {
+    const id = uuid();
+    db().prepare('INSERT INTO tools (id,name,description,source,risk_level,input_schema_json,config_json,created_at) VALUES (?,?,?,?,?,?,?,?)')
+      .run(id, body.name, body.description || '', body.source || 'builtin', body.risk_level || 'low', j(body.input_schema || {}), j(body.config || {}), now());
+    return tools.get(id);
+  },
+  update(id, body) {
+    const cur = tools.get(id); if (!cur) return null;
+    db().prepare('UPDATE tools SET name=?,description=?,source=?,risk_level=?,input_schema_json=?,config_json=? WHERE id=?')
+      .run(body.name ?? cur.name, body.description ?? cur.description, body.source ?? cur.source, body.risk_level ?? cur.risk_level, j(body.input_schema ?? cur.input_schema), j(body.config ?? cur.config), id);
+    return tools.get(id);
+  },
+  remove(id) { db().prepare('DELETE FROM tools WHERE id=?').run(id); return true; }
+};
+
+// ---------- mcp_servers ----------
+const mcpServers = {
+  list() { return db().prepare('SELECT * FROM mcp_servers ORDER BY created_at').all().map(r => ({ ...r, args: p(r.args_json, []), env: p(r.env_json, {}), tools: p(r.tools_json, []) })); },
+  get(id) { const r = db().prepare('SELECT * FROM mcp_servers WHERE id=?').get(id); return r ? { ...r, args: p(r.args_json, []), env: p(r.env_json, {}), tools: p(r.tools_json, []) } : null; },
+  create(body) {
+    const id = uuid();
+    db().prepare('INSERT INTO mcp_servers (id,name,transport,command,args_json,url,env_json,status,tools_json,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)')
+      .run(id, body.name, body.transport || 'stdio', body.command || '', j(body.args || []), body.url || '', j(body.env || {}), 'disconnected', j(body.tools || []), now());
+    return mcpServers.get(id);
+  },
+  update(id, body) {
+    const cur = mcpServers.get(id); if (!cur) return null;
+    db().prepare('UPDATE mcp_servers SET name=?,transport=?,command=?,args_json=?,url=?,env_json=?,status=?,tools_json=? WHERE id=?')
+      .run(body.name ?? cur.name, body.transport ?? cur.transport, body.command ?? cur.command, j(body.args ?? cur.args), body.url ?? cur.url, j(body.env ?? cur.env), body.status ?? cur.status, j(body.tools ?? cur.tools), id);
+    return mcpServers.get(id);
+  },
+  setStatus(id, status, toolsList) {
+    db().prepare('UPDATE mcp_servers SET status=?,tools_json=? WHERE id=?').run(status, j(toolsList || []), id);
+    return mcpServers.get(id);
+  },
+  remove(id) { db().prepare('DELETE FROM mcp_servers WHERE id=?').run(id); return true; }
+};
+
+// ---------- memories ----------
+const memories = {
+  list(layer, projectId) {
+    let sql = 'SELECT * FROM memories'; const w = []; const pr = [];
+    if (layer) { w.push('layer=?'); pr.push(layer); }
+    if (projectId) { w.push('project_id=?'); pr.push(projectId); }
+    if (w.length) sql += ' WHERE ' + w.join(' AND ');
+    return db().prepare(sql).all(...pr);
+  },
+  set({ layer, projectId, agentId, conversationId, taskId, key, value }) {
+    const ex = db().prepare('SELECT id FROM memories WHERE layer=? AND key=? AND (project_id IS ? OR project_id=?)').get(layer, key, projectId || null, projectId || null);
+    if (ex) { db().prepare('UPDATE memories SET value=?,updated_at=? WHERE id=?').run(String(value), now(), ex.id); return ex.id; }
+    const id = uuid();
+    db().prepare('INSERT INTO memories (id,layer,project_id,agent_id,conversation_id,task_id,key,value,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)')
+      .run(id, layer, projectId || null, agentId || null, conversationId || null, taskId || null, key, String(value), now(), now());
+    return id;
+  },
+  remove(id) { db().prepare('DELETE FROM memories WHERE id=?').run(id); return true; }
+};
+
+// ---------- checkpoints / file_changes / usage / audit ----------
+const checkpoints = {
+  create({ projectId, taskId, kind, ref }) {
+    const id = uuid();
+    db().prepare('INSERT INTO checkpoints (id,project_id,task_id,kind,ref_json,created_at) VALUES (?,?,?,?,?,?)').run(id, projectId || null, taskId || null, kind || 'snapshot', j(ref || {}), now());
+    return id;
+  },
+  list(projectId) { return db().prepare('SELECT * FROM checkpoints WHERE project_id=? ORDER BY created_at DESC').all(projectId); }
+};
+const fileChanges = {
+  create({ projectId, taskId, agentId, path: fp, before, after, diff }) {
+    const id = uuid();
+    db().prepare('INSERT INTO file_changes (id,project_id,task_id,agent_id,path,before,after,diff,created_at) VALUES (?,?,?,?,?,?,?,?,?)')
+      .run(id, projectId || null, taskId || null, agentId || null, fp, before || null, after || null, diff || '', now());
+    return id;
+  },
+  list(projectId) { return db().prepare('SELECT * FROM file_changes WHERE project_id=? ORDER BY created_at DESC').all(projectId); }
+};
+const usage = {
+  create({ provider, model, inputTokens, outputTokens, totalTokens, latencyMs, estimatedCost }) {
+    const id = uuid();
+    db().prepare('INSERT INTO usage_records (id,provider,model,input_tokens,output_tokens,total_tokens,latency_ms,estimated_cost,created_at) VALUES (?,?,?,?,?,?,?,?,?)')
+      .run(id, provider || '', model || '', inputTokens || 0, outputTokens || 0, totalTokens || 0, latencyMs || 0, estimatedCost || 0, now());
+    return id;
+  },
+  list(limit) { return db().prepare('SELECT * FROM usage_records ORDER BY created_at DESC LIMIT ?').all(limit || 200); },
+  summary() {
+    const row = db().prepare('SELECT COALESCE(SUM(total_tokens),0) AS total, COALESCE(SUM(estimated_cost),0) AS cost FROM usage_records').get();
+    return row;
+  }
+};
+const audit = {
+  record({ agent, task, tool, target, permission, result }) {
+    const id = uuid();
+    db().prepare('INSERT INTO permissions_audit (id,time,agent,task,tool,target,permission,result) VALUES (?,?,?,?,?,?,?,?)')
+      .run(id, now(), agent || '', task || '', tool || '', target || '', permission || '', result || '');
+    return id;
+  },
+  list(limit) { return db().prepare('SELECT * FROM permissions_audit ORDER BY time DESC LIMIT ?').all(limit || 200); }
+};
+
+// ---------- settings ----------
+const settings = {
+  get(key, def) { const r = db().prepare('SELECT value_json FROM settings WHERE key=?').get(key); return r ? p(r.value_json, def) : def; },
+  set(key, value) { db().prepare('INSERT INTO settings (key,value_json) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value_json=?').run(key, j(value), j(value)); return value; },
+  all() { const rows = db().prepare('SELECT key,value_json FROM settings').all(); const o = {}; rows.forEach(r => o[r.key] = p(r.value_json, null)); return o; }
+};
+
+// ---------- v1 JSON migration ----------
+function migrateFromJson(jsonPath) {
+  if (!jsonPath || !require('fs').existsSync(jsonPath)) return false;
+  let data;
+  try { data = JSON.parse(require('fs').readFileSync(jsonPath, 'utf8')); } catch { return false; }
+  const tx = db().transaction(() => {
+    // connections
+    (data.api_connections || []).forEach(c => {
+      const id = uuid(); const t = now();
+      db().prepare(`INSERT INTO api_connections (id,name,provider,base_url,api_key_enc,api_key_masked,headers_json,models_json,tested,tested_at,created_at,updated_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`)
+        .run(id, c.name || '连接', c.provider || 'openai', c.base_url || 'https://api.openai.com/v1',
+          sec.encrypt(c.api_key || ''), sec.mask(c.api_key || ''), j(c.headers || {}), j(c.models || []), c.tested ? 1 : 0, c.tested_at || null, t, t);
+      c._newId = id;
+    });
+    // prompts
+    (data.prompts || []).forEach(p0 => {
+      const id = uuid();
+      db().prepare('INSERT INTO prompts (id,name,version,content,description,tags_json,tested,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)')
+        .run(id, p0.name || 'Prompt', p0.version || 1, p0.content || '', p0.description || '', j(p0.tags || []), p0.tested ? 1 : 0, now(), now());
+    });
+    // agents (+ external via type)
+    (data.agents || []).forEach(a => {
+      const id = uuid(); const t = now();
+      const conn = (data.api_connections || []).find(c => c.id === a.api_connection_id);
+      const connId = conn ? conn._newId : null;
+      const subIds = (a.sub_agent_ids || []).map(oldId => {
+        const found = (data.agents || []).find(x => x.id === oldId);
+        return found ? found._newId : oldId;
+      });
+      db().prepare(`INSERT INTO agents (id,name,description,type,system_prompt_id,provider,model,api_connection_id,tools_json,permissions_json,max_steps,timeout_ms,temperature,max_tokens,is_main,sub_agent_ids_json,workspace_json,created_at,updated_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+        .run(id, a.name || 'Agent', a.description || '', 'native', a.system_prompt_id || null, a.provider || null, a.model || null, connId,
+          j(a.tool_ids || []), j(a.permissions || []), a.max_steps || 40, a.timeout_ms || 600000, a.temperature ?? 0.7, a.max_tokens || 4096, a.is_main ? 1 : 0, j(subIds), j(a.workspace || {}), t, t);
+      a._newId = id;
+    });
+    // conversations + messages
+    (data.conversations || []).forEach(c => {
+      const id = uuid(); const agentId = c.agent_id ? ((data.agents || []).find(a => a.id === c.agent_id)?._newId || null) : null;
+      db().prepare('INSERT INTO conversations (id,project_id,agent_id,title,created_at,updated_at) VALUES (?,?,?,?,?,?)')
+        .run(id, null, agentId, c.title || '新对话', c.created_at || now(), c.updated_at || now());
+      c._newId = id;
+      (data.messages || []).filter(m => m.conversation_id === c.id).forEach(m => {
+        db().prepare('INSERT INTO messages (id,conversation_id,role,content,tool_calls_json,tool_call_id,model,tokens,rating,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)')
+          .run(uuid(), id, m.role, m.content || '', m.tool_calls ? j(m.tool_calls) : null, m.tool_call_id || null, m.model || null, m.tokens ?? null, m.rating ?? null, m.created_at || now());
+      });
+    });
+  });
+  tx();
+  return true;
+}
+
+module.exports = {
+  db, init: dbm.initDb, getDb: dbm.getDb,
+  projects, connections, models, prompts, skills, agents, externalAgents,
+  conversations, messages, events, tasks, agentMessages, tools, mcpServers,
+  memories, checkpoints, fileChanges, usage, audit, settings, migrateFromJson
+};

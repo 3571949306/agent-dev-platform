@@ -1,19 +1,28 @@
 {
   "name": "agent-dev-platform",
-  "version": "1.0.0",
-  "description": "Personal Agent Development Platform",
+  "version": "2.0.0",
+  "description": "Agent Dev Platform - 本地 AI Agent IDE（智能体开发环境）：Coding Agent / 多 Agent 调度 / API 管理 / Computer Use / MCP / 外部 Agent 聚合",
   "main": "main.js",
   "scripts": {
-    "start": "node server.js",
+    "start": "node src/server/static.js",
     "electron": "electron .",
-    "dist": "electron-builder --win"
+    "dist": "electron-builder --win nsis portable",
+    "rebuild": "electron-rebuild -f -w better-sqlite3",
+    "test": "node scripts/run-tests.js",
+    "smoke": "electron . --smoke",
+    "icon": "node scripts/make-icon.js"
   },
   "dependencies": {
+    "better-sqlite3": "^11.8.1",
     "express": "^4.21.0"
+  },
+  "optionalDependencies": {
+    "playwright": "^1.49.0"
   },
   "devDependencies": {
     "electron": "^31.7.7",
-    "electron-builder": "^24.13.3"
+    "electron-builder": "^24.13.3",
+    "electron-rebuild": "^3.2.9"
   },
   "build": {
     "appId": "com.agentdev.platform",
@@ -23,7 +32,14 @@
     },
     "asar": false,
     "win": {
-      "target": "nsis"
+      "target": [
+        { "target": "nsis", "arch": ["x64"] },
+        { "target": "portable", "arch": ["x64"] }
+      ],
+      "icon": "build/icon.ico"
+    },
+    "portable": {
+      "artifactName": "Agent Dev Platform ${version} portable.exe"
     },
     "nsis": {
       "oneClick": false,
@@ -34,14 +50,16 @@
     },
     "files": [
       "main.js",
-      "server.js",
-      "store.js",
-      "llm.js",
+      "preload.js",
+      "src/**/*",
       "public/**/*",
+      "build/**/*",
       "node_modules/**/*",
       "!node_modules/**/{*.md,*.markdown,LICENSE,CHANGELOG,test,tests,__tests__,docs,example,examples}",
       "!node_modules/electron/**",
-      "!node_modules/electron-builder/**"
+      "!node_modules/electron-builder/**",
+      "!node_modules/playwright/**/*.zip",
+      "!node_modules/playwright/.local-browsers/**"
     ]
   }
 }

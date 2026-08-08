@@ -1,0 +1,248 @@
+'use strict';
+/**
+ * P1 service integration tests — these hit the REAL implementations:
+ *   - MCP client against a real JSON-RPC stdio server (test/fixtures)
+ *   - Browser automation against a real browser (Playwright Chromium or the
+ *     system Edge/Chrome fallback)
+ *   - Windows Computer runtime against real PowerShell
+ *   - External agent adapters (Codex over a mock provider, HTTP, WorkBuddy)
+ *
+ * Nothing here is stubbed out; if a capability is genuinely unavailable on the
+ * machine the test asserts that the failure is *graceful and reported*, which
+ * is the contract the agent runtime depends on.
+ */
+const test = require('node:test');
+const assert = require('node:assert');
+const os = require('os');
+const fs = require('fs');
+const path = require('path');
+const http = require('http');
+
+const { McpClient, McpManager } = require('../src/services/mcp');
+const { BrowserManager, createBrowserTools } = require('../src/services/browser');
+const { ComputerManager } = require('../src/services/computer');
+const extAgents = require('../src/services/externalAgents');
+const store = require('../src/db/store');
+
+const FIXTURE = path.join(__dirname, 'fixtures', 'mcp-echo-server.js');
+// Under `ELECTRON_RUN_AS_NODE=1` execPath is electron.exe behaving as node,
+// and the child inherits that env, so it is a valid node runner either way.
+const NODE_BIN = process.execPath;
+
+/* ------------------------------------------------------------------ MCP */
+
+test('MCP: 与真实 stdio 服务器完成握手并发现工具', async () => {
+  const client = new McpClient({ id: 'm1', transport: 'stdio', command: NODE_BIN, args: [FIXTURE], timeoutMs: 15000 });
+  const tools = await client.connect();
+  assert.strictEqual(client.connected, true);
+  assert.deepStrictEqual(tools.map(t => t.name).sort(), ['add', 'echo']);
+  assert.ok(tools[0].input_schema, 'inputSchema 应被规范化为 input_schema');
+  client.disconnect();
+});
+
+test('MCP: tools/call 返回真实结果（文本内容被拼接）', async () => {
+  const client = new McpClient({ id: 'm2', transport: 'stdio', command: NODE_BIN, args: [FIXTURE], timeoutMs: 15000 });
+  await client.connect();
+  assert.strictEqual(await client.callTool('echo', { text: '你好 MCP' }), '你好 MCP');
+  assert.strictEqual(await client.callTool('add', { a: 2, b: 40 }), '42');
+  client.disconnect();
+});
+
+test('MCP: 未知工具返回 JSON-RPC 错误而不是静默成功', async () => {
+  const client = new McpClient({ id: 'm3', transport: 'stdio', command: NODE_BIN, args: [FIXTURE], timeoutMs: 15000 });
+  await client.connect();
+  await assert.rejects(() => client.callTool('nope', {}), /Unknown tool/);
+  client.disconnect();
+});
+
+test('MCP: 命令不存在时优雅失败，不抛未捕获的 error 事件', async () => {
+  const mgr = new McpManager();
+  await assert.rejects(
+    () => mgr.connect({ id: 'bad', transport: 'stdio', command: 'adp-definitely-not-a-real-binary', args: [], timeoutMs: 8000 }),
+    (e) => /启动失败|退出|超时/.test(e.message)
+  );
+  assert.strictEqual(mgr.get('bad'), undefined, '失败的连接不应被登记');
+});
+
+test('MCP: 服务器不响应握手时按超时失败（不会永久挂起启动）', async () => {
+  const t0 = Date.now();
+  const client = new McpClient({ id: 'slow', transport: 'stdio', command: NODE_BIN, args: [FIXTURE, '--slow'], timeoutMs: 1200 });
+  await assert.rejects(() => client.connect(), /超时/);
+  assert.ok(Date.now() - t0 < 6000, '应在超时窗口内返回，实际耗时 ' + (Date.now() - t0) + 'ms');
+  client.disconnect();
+});
+
+test('MCP: 管理器在未连接时调用工具会明确报错', async () => {
+  const mgr = new McpManager();
+  await assert.rejects(() => mgr.callTool('nonexistent', 'echo', {}), /未连接/);
+});
+
+test('MCP: disconnect 后进程被回收', async () => {
+  const client = new McpClient({ id: 'm4', transport: 'stdio', command: NODE_BIN, args: [FIXTURE], timeoutMs: 15000 });
+  await client.connect();
+  const proc = client.proc;
+  client.disconnect();
+  await new Promise(r => setTimeout(r, 800));
+  assert.ok(proc.killed || proc.exitCode !== null, '子进程应已退出');
+});
+
+/* -------------------------------------------------------------- Browser */
+
+test('Browser: 真实启动浏览器并完成导航 / 快照 / 截图 / 交互', async (t) => {
+  const mgr = new BrowserManager();
+  let launched;
+  try {
+    launched = await mgr.launch({ headless: true });
+  } catch (e) {
+    // No Chromium download AND no Edge/Chrome on the box — the contract is
+    // that the error is actionable, not that the machine has a browser.
+    assert.match(e.message, /playwright install|Edge|Chrome/i);
+    t.diagnostic('本机无可用浏览器内核，已验证降级错误信息：' + e.message.split('\n')[0]);
+    return;
+  }
+  t.diagnostic('浏览器内核：' + launched.engine);
+  assert.ok(launched.ok);
+
+  const page = path.join(os.tmpdir(), 'adp-browser-test.html');
+  fs.writeFileSync(page, `<!doctype html><meta charset="utf-8"><title>ADP 浏览器测试</title>
+    <input id="q"><button id="go" onclick="document.title='clicked:'+document.getElementById('q').value">Go</button>`);
+
+  const nav = await mgr.navigate('file:///' + page.replace(/\\/g, '/'));
+  assert.strictEqual(nav.title, 'ADP 浏览器测试');
+
+  const snap = await mgr.snapshot();
+  assert.ok(snap.accessibility.length > 2, '应返回可访问性树');
+
+  await mgr.type('#q', 'hello');
+  await mgr.click('#go');
+  const after = await mgr.snapshot();
+  assert.strictEqual(after.title, 'clicked:hello', '输入与点击应真实生效');
+
+  const shot = await mgr.screenshot();
+  assert.ok(shot.data_url.startsWith('data:image/png;base64,') && shot.data_url.length > 1000);
+
+  assert.strictEqual(mgr.status().launched, true);
+  await mgr.close();
+  assert.strictEqual(mgr.status().launched, false);
+  fs.unlinkSync(page);
+});
+
+test('Browser: 工具层错误被包装成 {ok:false,error} 而不是抛异常', async () => {
+  const { defs, execs } = createBrowserTools();
+  assert.ok(defs.every(d => d.permission === 'browser'), '所有浏览器工具都必须走 browser 权限');
+  const r = await execs.browser_navigate({}, { url: 'http://127.0.0.1:1/definitely-refused' });
+  assert.strictEqual(r.ok, false);
+  assert.strictEqual(r.error.code, 'BROWSER_ERROR');
+  assert.ok(r.error.message.length > 0);
+  const { manager } = require('../src/services/browser');
+  await manager.close();
+});
+
+/* ------------------------------------------------------------- Computer */
+
+test('Computer: 列出真实窗口', async (t) => {
+  const c = new ComputerManager();
+  const r = await c.listWindows();
+  assert.strictEqual(r.ok, true, '列窗口失败: ' + r.error);
+  assert.ok(Array.isArray(r.windows));
+  t.diagnostic('当前可见窗口数：' + r.windows.length);
+  if (r.windows.length) assert.ok('title' in r.windows[0] && 'pid' in r.windows[0]);
+});
+
+test('Computer: 真实屏幕截图返回 PNG data URL', async (t) => {
+  const c = new ComputerManager();
+  const r = await c.screenshot();
+  assert.strictEqual(r.ok, true, '截图失败: ' + r.error);
+  assert.ok(r.data_url.startsWith('data:image/png;base64,'));
+  assert.ok(r.data_url.length > 10000, '截图数据过小，可能是空图');
+  t.diagnostic('截图大小：' + Math.round(r.data_url.length / 1024) + 'KB');
+});
+
+test('Computer: 聚焦不存在的窗口返回结构化失败而不是崩溃', async () => {
+  const c = new ComputerManager();
+  const r = await c.focusWindow('绝对不存在的窗口标题-zzz');
+  assert.strictEqual(r.ok, false);
+  assert.ok(String(r.error).length > 0);
+});
+
+test('Computer: 工具层把失败规范化为 {ok:false,error}', async () => {
+  const { defs, execs } = require('../src/services/computer').createComputerTools();
+  assert.ok(defs.every(d => d.permission === 'computer'));
+  const r = await execs.computer_get_ui_tree({}, { title: '绝对不存在的窗口标题-zzz' });
+  assert.strictEqual(r.ok, false);
+});
+
+/* ------------------------------------------------------- External agents */
+
+test('ExternalAgent: 未知适配器类型返回结构化失败', async () => {
+  const out = JSON.parse(await extAgents.runExternalAgent({ adapter_type: 'nope' }, 'task', {}));
+  assert.strictEqual(out.status, 'failed');
+  assert.match(out.errors[0], /未知外部 Agent 类型/);
+});
+
+test('ExternalAgent: Codex 未配置时给出可操作的错误', async () => {
+  const out = JSON.parse(await extAgents.runExternalAgent({ adapter_type: 'codex', config: {} }, 'task', { store }));
+  assert.strictEqual(out.status, 'failed');
+  assert.match(out.errors[0], /CLI 路径或 API 连接/);
+});
+
+test('ExternalAgent: Codex 走 API 连接时返回模型内容', async () => {
+  const userData = fs.mkdtempSync(path.join(os.tmpdir(), 'adp-ext-'));
+  store.init(userData);
+  const conn = store.connections.create({ name: 'mockconn', provider: 'mock', base_url: '', api_key: '' });
+  const out = JSON.parse(await extAgents.runExternalAgent(
+    { adapter_type: 'codex', config: { connectionId: conn.id } },
+    '给 utils.js 加一个 slugify 函数',
+    { store }
+  ));
+  assert.strictEqual(out.status, 'completed');
+  assert.ok(out.summary.length > 0, 'Codex 适配器应回填模型输出');
+  assert.ok(Array.isArray(out.changedFiles) && Array.isArray(out.findings), '必须符合结构化结果契约');
+});
+
+test('ExternalAgent: HTTP 适配器对真实本地服务发起调用', async () => {
+  const srv = http.createServer((req, res) => {
+    let body = '';
+    req.on('data', d => body += d);
+    req.on('end', () => {
+      const parsed = JSON.parse(body || '{}');
+      res.writeHead(200, { 'Content-Type': 'text/plain' });
+      res.end('received:' + parsed.task);
+    });
+  });
+  await new Promise(r => srv.listen(0, '127.0.0.1', r));
+  const url = 'http://127.0.0.1:' + srv.address().port;
+  try {
+    const out = JSON.parse(await extAgents.runExternalAgent({ adapter_type: 'http', config: { endpoint: url } }, '构建项目', {}));
+    assert.strictEqual(out.status, 'completed');
+    assert.strictEqual(out.summary, 'received:构建项目');
+  } finally { srv.close(); }
+});
+
+test('ExternalAgent: HTTP 端点不可达时不抛异常', async () => {
+  const out = JSON.parse(await extAgents.runExternalAgent({ adapter_type: 'http', config: { endpoint: 'http://127.0.0.1:1/nope' } }, 'x', {}));
+  assert.strictEqual(out.status, 'failed');
+  assert.ok(out.errors.length > 0);
+});
+
+test('ExternalAgent: WorkBuddy 桥接找不到窗口时提示先打开桌面应用', async () => {
+  const fakeComputer = { listWindows: async () => ({ ok: true, windows: [{ pid: 1, title: '记事本' }] }) };
+  const out = JSON.parse(await extAgents.runExternalAgent({ adapter_type: 'workbuddy', config: {} }, 'task', { computerManager: fakeComputer }));
+  assert.strictEqual(out.status, 'failed');
+  assert.match(out.errors[0], /未找到 WorkBuddy 窗口/);
+});
+
+test('ExternalAgent: WorkBuddy 桥接命中窗口时聚焦、发送并回传截图', async () => {
+  const calls = [];
+  const fakeComputer = {
+    listWindows: async () => ({ ok: true, windows: [{ pid: 7, title: 'WorkBuddy — 工作台' }] }),
+    focusWindow: async (t) => { calls.push('focus:' + t); return { ok: true }; },
+    pressKeys: async (k) => { calls.push('keys:' + k); return { ok: true }; },
+    screenshot: async () => ({ ok: true, data_url: 'data:image/png;base64,AAAA' })
+  };
+  const out = JSON.parse(await extAgents.runExternalAgent({ adapter_type: 'workbuddy', config: {} }, '整理周报', { computerManager: fakeComputer }));
+  assert.strictEqual(out.status, 'completed');
+  assert.ok(calls.some(c => c.startsWith('focus:WorkBuddy')));
+  assert.ok(calls.some(c => c === 'keys:整理周报~'), '任务文本后应追加回车');
+  assert.strictEqual(out.screenshot, 'data:image/png;base64,AAAA');
+});

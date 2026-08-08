@@ -58,7 +58,7 @@ function buildSystemPrompt(agent, project, pinnedFacts, store) {
   const parts = [];
   if (sys) parts.push(sys);
   if (project) parts.push(`\n当前项目：「${project.name}」，根目录：${project.root_path}`);
-  parts.push('\n你是一个本地 AI 编程助手（Coding Agent）。你可以读取文件、搜索代码、修改文件、运行终端命令、调用子 Agent。请直接动手完成任务，而不是只给建议。每次修改后通过构建/测试验证。');
+  parts.push('\n你是一个本地 AI 编程助手（Coding Agent）。你可以读取文件、搜索代码、修改文件、运行终端命令、调用子智能体。请直接动手完成任务，而不是只给建议。每次修改后通过构建/测试验证。');
   if (pinnedFacts && pinnedFacts.length) parts.push('\n已知事实：\n' + pinnedFacts.map(f => '- ' + f).join('\n'));
   return parts.join('\n');
 }
@@ -159,6 +159,9 @@ async function runAgentTurn(deps, opts) {
           tools: toolDefs,
           temperature: agent.temperature ?? 0.7,
           maxTokens: agent.max_tokens ?? 4096,
+          // v2.3.1: agent.timeout_ms 同时约束「模型请求」与工具执行——服务端永不返回时
+          // 也能以 timeout 终态收尾，而不是让 Spinner 无限转（P0-6 超时用例）。
+          timeoutMs: TOOL_TIMEOUT,
           signal: abortSignal,
           onChunk: (t) => { buf.push(t); deps.emit('assistant_text', { conversationId, taskId: task.id, chunk: t }); },
           onToolCall: (tcs) => { toolCallsAcc = tcs; }
@@ -358,7 +361,7 @@ async function executeToolCall(tc, deps, runCtx, agent, conversationId, task, st
         ok: false,
         error: {
           code: 'PERMISSION_DENIED',
-          message: `子 Agent「${subDef.name}」需要权限 ${gate.scope}，${gate.reason === 'user_denied' ? '用户已拒绝' : '当前策略不允许'}`,
+          message: `子智能体「${subDef.name}」需要权限 ${gate.scope}，${gate.reason === 'user_denied' ? '用户已拒绝' : '当前策略不允许'}`,
           scope: gate.scope,
           requiredScopes: scopes
         }

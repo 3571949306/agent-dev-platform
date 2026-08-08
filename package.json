@@ -1,6 +1,6 @@
 {
   "name": "agent-dev-platform",
-  "version": "2.3.0",
+  "version": "2.3.1",
   "description": "Agent Dev Platform - 本地 AI Agent IDE（智能体开发环境）：Coding Agent / 多 Agent 调度 / API 管理 / Computer Use / MCP / 外部 Agent 聚合",
   "main": "main.js",
   "scripts": {
@@ -21,6 +21,7 @@
     "playwright": "^1.49.0"
   },
   "devDependencies": {
+    "@playwright/test": "^1.62.1",
     "electron": "^31.7.7",
     "electron-builder": "^24.13.3",
     "electron-rebuild": "^3.2.9"
@@ -34,8 +35,18 @@
     "asar": false,
     "win": {
       "target": [
-        { "target": "nsis", "arch": ["x64"] },
-        { "target": "portable", "arch": ["x64"] }
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
       ],
       "icon": "build/icon.ico"
     },

@@ -18,3 +18,7 @@ data.json
 .DS_Store
 npm-debug.log*
 *.log
+
+# Playwright E2E artifacts
+test-results/
+playwright-report/

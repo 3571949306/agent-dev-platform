@@ -25,6 +25,26 @@ const { externalAgentScopes, ensureScopes } = require('../security/agentScopes')
 
 const TERMINAL_STATES = ['completed', 'failed', 'timeout', 'cancelled'];
 
+/**
+ * v2.3.1 (P0-4) — 把 External Agent 返回（string 或对象）映射为 Run 终态结果：
+ *   { status, error }
+ * completed/failed/timeout/cancelled 统一映射；无法解析一律 failed。
+ * 供 runChatTurn 使用：外部结果 = Run 结果（当外部智能体直接作为聊天运行时）。
+ */
+function mapExternalResult(raw) {
+  try {
+    const parsed = typeof raw === 'string' ? JSON.parse(raw) : (raw || {});
+    if (parsed && TERMINAL_STATES.includes(parsed.status)) {
+      const errors = Array.isArray(parsed.errors) ? parsed.errors.join('; ') : null;
+      let error = errors || null;
+      // 失败/超时且没有 errors 数组时，用 summary 兜底；completed 的 summary 是答案不是错误
+      if (!error && (parsed.status === 'failed' || parsed.status === 'timeout')) error = parsed.summary || null;
+      return { status: parsed.status, error };
+    }
+  } catch { /* fallthrough */ }
+  return { status: 'failed', error: null };
+}
+
 function structured(status, summary, extra = {}) {
   return JSON.stringify({
     status,
@@ -271,7 +291,7 @@ async function runHttpAgent(adapter, taskText, ctx = {}) {
       errors: resp.ok ? [] : [`HTTP ${resp.status}`]
     });
   } catch (e) {
-    if (link.timedOut) return structured('timeout', '', { errors: [`HTTP Agent 超过 ${Math.round(timeoutMs / 1000)} 秒未响应`] });
+    if (link.timedOut) return structured('timeout', '', { errors: [`HTTP 智能体超过 ${Math.round(timeoutMs / 1000)} 秒未响应`] });
     const cancelled = (ctx.signal && ctx.signal.aborted) || link.externallyAborted;
     return structured(cancelled ? 'cancelled' : 'failed', '', { errors: [cancelled ? '用户已停止' : e.message] });
   } finally { link.dispose(); }
@@ -313,7 +333,7 @@ async function runExternalAgent(adapter, taskText, ctx = {}) {
         code: 'PERMISSION_DENIED',
         requiredScopes: scopes,
         deniedScope: gate.scope,
-        errors: [`外部 Agent「${adapter.name}」需要权限 ${gate.scope}，${gate.reason === 'user_denied' ? '用户已拒绝' : '当前策略不允许'}`]
+        errors: [`外部智能体「${adapter.name}」需要权限 ${gate.scope}，${gate.reason === 'user_denied' ? '用户已拒绝' : '当前策略不允许'}`]
       });
       recordStatus(ctx.store, adapter, 'failed', `权限不足：${gate.scope}`);
       return raw;
@@ -325,7 +345,7 @@ async function runExternalAgent(adapter, taskText, ctx = {}) {
     case 'codex': raw = await runCodex(adapter, taskText, ctx.store, ctx); break;
     case 'workbuddy': raw = await runWorkBuddyBridge(adapter, taskText, ctx.computerManager, ctx); break;
     case 'http': raw = await runHttpAgent(adapter, taskText, ctx); break;
-    default: raw = structured('failed', '', { errors: ['未知外部 Agent 类型：' + adapter.adapter_type] });
+    default: raw = structured('failed', '', { errors: ['未知外部智能体类型：' + adapter.adapter_type] });
   }
   let status = 'failed';
   try { status = JSON.parse(raw).status || 'failed'; } catch { /* keep failed */ }
@@ -339,5 +359,5 @@ async function runExternalAgent(adapter, taskText, ctx = {}) {
 
 module.exports = {
   runExternalAgent, runCodex, runWorkBuddyBridge, runHttpAgent,
-  killTree, resolveCodexCwd, TERMINAL_STATES
+  killTree, resolveCodexCwd, TERMINAL_STATES, mapExternalResult
 };

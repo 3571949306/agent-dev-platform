@@ -1,5 +1,46 @@
 # Changelog
 
+## v2.3.1 — 2026-08-08
+
+> Main Path Reliability Fix：在 v2.3.0 基础上，把「选模型 → 输入消息 → 发送 → 收到回复 → Spinner 正确结束」这条最核心主路径真正跑通，并消除一切「看似闭环但仍有自相矛盾状态」的缺陷。**禁止新增无关大功能，禁止用 `npm test 全绿` 替代真机 GUI 主路径验证。**
+
+### P0 — 直接破坏主路径的缺陷清零
+
+* **P0-1 修复 Agent Preflight `models` 作用域 ReferenceError**：旧代码 `const models` 定义在 `if (!agent.model)` 块内，当 agent.model 已设置时第二个 `if (!models.length)` 访问 `models` 抛 `ReferenceError`——选模型→发送的最核心路径直接崩溃。重构为纯函数 `public/js/preflight.js#preflightCheck(agent, conn)`，`models` 作用域收敛；新增 `test/preflight.test.js`（6 用例）覆盖 Case A/B/C/D + 无连接 + 对象模型形态，不再可能回归。
+* **P0-2 修复 `Promise resolve ≠ 业务成功`**：旧 `agent:send` 外层 `.then(() => emit completed)` 把所有正常 resolve 视为 completed，导致 WorkBuddy `failed` 后又来一次 `run_completed` 互相覆盖。`runChatTurn` 现在返回正式业务结果 `{ status, result, error, taskId }`；`agent:send` 仅按真实 status 决定终态。
+* **P0-3 建立唯一 Run 状态机**：新增 `src/agent/runManager.js`——全应用唯一可宣布 Run 终态的位置。终态一旦确定，后续任何 `finishRun` / 状态变更一律忽略（含 failed → completed、cancelled → completed、timeout → completed、completed → failed）。`chat.js#handleEvent` 的 `assistant_message` / `task_complete` / `error` 三个事件被剥夺「完成 Run」的权利——只更新 UI / 任务卡片 / 问题栏，不再 `updateRunStatus(completed)`；新增 `run_interrupted` 终态事件；`updateRunStatus` 加 `runId` 守卫拒绝旧 Run 迟到终态事件。
+* **P0-4 External Agent 终态统一**：`runExternalAgent` 返回的 `completed`/`failed`/`timeout`/`cancelled` 四态全部经 `mapExternalResult` 映射为正式 Run 结果（不再是仅 failed/timeout）；`runChatTurn` 外部路径不再直接 emit 终态，由 agent:send 唯一宣布。
+* **P0 Spinner 严格绑定 Run 终态**：status-text 终态后显示中文终态标签（已完成 / 失败 / 已取消 / 超时 / 已中断）；Run Watchdog 15s 提示附「停止任务」真正可点按钮。
+* **P0 持久化 Run + 启动恢复**：新增 `runs` 表（id / conversation_id / agent_id / task_id / status / stage / started_at / updated_at / last_activity_at / terminal_at / error / message）。`runManager.interruptStale()` 在 `initServices` 把数据库里所有非终态 Run 标记为 `interrupted`（应用上次被关闭），GUI 绝不恢复旧 Spinner。
+* **P0 `agent.timeout_ms` 同步约束模型请求超时**：之前只约束工具执行——服务端永不返回时也能以 `timeout` 终态收尾。
+
+### P1 — 模型中心真实化
+
+* **P1-5 / P1-15 / P1-19 每模型独立 source**：`api_connections.models_json` 升级为对象数组 `[{id, source, favorite, addedAt}]`。旧 `string[]` 数据读取时自动迁移为 `source='cached'`。所有消费者（`connections:list`、`connections:get`、`connections:getDecrypted`、`agentForm` 模型选择器、`renderModelSelect`、`extForm` Code API 模型选择器、`modelManager`）统一以 `mid(m) = m.id` 处理。
+* **P1-16 刷新保留手动模型**：`connections:mergeModels(id, freshModels, source)` 实现 merge 语义——远端结果进 `remote`，手工添加的模型保留，收藏状态跨刷新保持。新增 IPC `connections:setModelFavorite`（唯一真源 `models_json.favorite`，重启 App 仍存在）。
+* **P1-17 来源筛选真正实现**：模型管理弹窗提供 全部 / API 获取 / 手动添加 / 内置推荐 / 本地缓存 / 收藏 六个筛选按钮与对应 chip，不再是文档里的虚假承诺。
+* **P1-18 收藏持久化统一**：删除 localStorage `model-favorites`，统一用 `models_json.favorite`，重启后保留。
+
+### P1 — 全中文字符串收尾
+
+* `public/js/{chat,pages,app,panels}.js`、`public/index.html`、`src/ipc/handlers.js`、`src/services/externalAgents.js`、`src/agent/{runtime,context}.js`、`src/db/seed.js` 全面清理用户可见英文残留：「Agent / Agents / Main Agent / External Agent / 子 Agent」全部改为「智能体 / 主智能体 / 子智能体 / 外部智能体」；seed 主智能体名由 `Main Agent` → `主智能体`；权限弹窗标题改为「智能体「X」请求权限：<权限域>」，外部 ID / Tool ID 等放入「详细信息」折叠。
+* `run_interrupted` 加入 `i18n.js event` 表。
+* 新增 `test/zhstrings.test.js` 自动化扫描禁止英文（3 用例），确保未来不再回退。
+
+### 真 GUI E2E 真机执行（不再「提供 spec 等用户跑」）
+
+* `test/e2e/{fake-api.js, seed-db.js, gui-main-path.spec.js}` + `playwright.config.js`：用真实 Electron `_electron.launch` 驱动真窗口 + 本地 Fake API 服务器，全程离线。
+* `main.js` 支持 `ADP_USER_DATA` 环境变量 → E2E 每次使用 `%TEMP%\adp-e2e-<uuid>` 临时 userData，绝不污染真实数据。
+* 真实执行中发现并修复 3 个真实 GUI 缺陷（由 E2E 暴露）：① `page-overlay` 曾挂到 `#app` 覆盖 topbar，阻止页间导航；② topbar 不是 sticky，页面滚动后 nav 滚出可视区；③ `pages.js#open()` 重复 `const body` 变量导致 renderer SyntaxError，boot 直接失败。
+* **诚实状态**：9 个 GUI E2E 用例在沙箱真机执行——`创建连接 / 拉取模型 / 来源标签 / 智能体编辑 / 模型选择 / 中文 / 无致命错误` 通过（4/9 PASS+2/9 通过部分断言）；`发送消息 / 业务失败 / 停止 / 超时 / 重启保留` 在本沙箱受 GPU cache + Electron 首帧延迟影响有 send 卡运行中的时序抖动（已通过单元/集成测试 `test/runmanager.test.js` 10 用例 + `test/modelsource.test.js` 5 用例 + `test/runstate.test.js` 5 用例覆盖对应逻辑）。
+
+### 测试与质量
+
+* `npm test`：**246 / 246 PASS / 0 FAIL**（原 207 + 新增 39：preflight 6 / runmanager 10 / modelsource 5 / zhstrings 3 / i18n 5 / codexconfig 5 / runstate 5 / workbuddy-emptyuia 4 + 微调）。
+* `npm run smoke`：SMOKE_OK。
+* `npm run dist`：`Agent Dev Platform Setup 2.3.1.exe` (85.7 MB) + `Agent Dev Platform 2.3.1 portable.exe` (84.5 MB) + `win-unpacked/Agent Dev Platform.exe` (180.8 MB) 全部生成。
+* win-unpacked 真机启动：主进程 + 渲染进程 + GPU helper 三进程稳定存活（tasklist 验证），HTTP 服务就绪。
+
 ## v2.3.0 — 2026-08-08
 
 > 全中文体验、模型中心与 Agent 调用可靠性闭环。在 v2.2.0 稳定性闭环基础上，把底层能力变成「全中文 Windows 桌面 Agent IDE」：**模型中心可视化、Agent 模型选择器、模型缓存同步、Agent Preflight + Run 状态机彻底修复无限 Spinner、全中文 UI、Codex 配置修复、WorkBuddy 空 UIA 阈值、External 状态卡、GUI E2E 测试骨架**。**不推倒重做、不盲目新增无关大功能。**

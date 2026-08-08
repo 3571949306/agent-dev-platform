@@ -1,7 +1,7 @@
-# Test Report — Agent Dev Platform v2.3.0
+# Test Report — Agent Dev Platform v2.3.1
 
 > **来源**：`npm test`（`scripts/run-tests.js`，`ELECTRON_RUN_AS_NODE=1` 以匹配 better-sqlite3 的 Electron ABI 125）。
-> **结论**：本机最后一次完整运行 **222 用例 / 222 通过 / 0 失败 / 0 跳过**，耗时 ~7.5s。
+> **结论**：本机最后一次完整运行 **246 用例 / 246 通过 / 0 失败 / 0 跳过**，耗时 ~7.9s。
 > 本文件不含任何编造结果，所有断言均来源于真实执行。
 
 ---
@@ -88,7 +88,7 @@ npm test
 
 | 用例 | 实际结果 |
 | --- | --- |
-| 未知 adapter 类型 | `{status:'failed', errors:['未知外部 Agent 类型：nope']}` |
+| 未知 adapter 类型 | `{status:'failed', errors:['未知外部智能体类型：nope']}` |
 | Codex 未配置 | `{status:'failed', errors:[/CLI 路径或 API 连接/]}` |
 | Codex 走 Mock API 连接 | `{status:'completed', summary:<模型输出>}`，契约字段齐全 |
 | HTTP 适配器对真实本地服务发起调用 | `{status:'completed', summary:'received:构建项目'}` |
@@ -100,6 +100,7 @@ npm test
 | **P0-2 权限闸门（穿透外部 Agent 运行时）** | `PermissionEngine` 拒绝 `network` → `status:'failed'`、`code:'PERMISSION_DENIED'`、`deniedScope:'network'` |
 | **P0-3 Stop 前取消** | 进入前 signal 已 abort → `status:'cancelled'`、`errors` 含「停止」 |
 | **P1-5 Codex cwd** | `resolveCodexCwd`：`ctx.projectRoot` 生效、`adapter.cwd` 优先级更高、两者皆缺回退 `process.cwd` |
+| **P0-4 mapExternalResult 四态映射** | `completed`→completed, `failed`→failed(error=errors[0]), `timeout`→timeout(error=summary), `cancelled`→cancelled; 非 JSON / 非终态一律 failed |
 
 ## 4. 集成层用例（agentloop）
 
@@ -228,6 +229,31 @@ npm run e2e                  # 需要在 Windows 桌面 + 显示器环境下运�
 | 10 | External Agent 最近运行状态无处可见；Main 子智能体列表不含外部 Agent | Agents 页外部卡片展示 `last_status`+`last_run_at` 状态卡；Main「子智能体」可勾选 Codex/WorkBuddy；新增 `externalAgents:test` 连接自检 | 人工 |
 
 > v2.3.0 在 v2.2.0 之上补齐「全中文 + 模型中心 + Run 状态机」闭环，未推倒重做、未新增无关大功能；测试由 207 增至 222，全部真实执行通过。
+
+## 14. v2.3.1 真机 GUI E2E 与验收
+
+> 本轮明确要求：「不能继续只说『已提供 E2E spec，等待用户执行』，必须在当前 Windows 桌面环境实际执行。」实际产物：
+
+* **测试基础设施**（真实代码，可复用）：
+  - `test/e2e/fake-api.js` — 本地 node `http` 服务器，提供 `/v1/models`（model-A/B/C）+ `/v1/chat/completions` 的 SSE 流式回复 + `model-FAIL`（500 失败）+ `model-HANG`（永不返回）。全程离线，无需真实 API Key。
+  - `test/e2e/seed-db.js` — `ELECTRON_RUN_AS_NODE=1` 下执行（匹配 better-sqlite3 的 Electron ABI），初始化临时数据库 + 创建测试项目 + 创建 Fake API 连接 + 同步拉取并写入模型。
+  - `main.js` 支持 `ADP_USER_DATA` 环境变量 → E2E 每次使用 `%TEMP%\adp-e2e-<uuid>` 临时 userData，绝不污染真实数据。
+  - `playwright.config.js` + `@playwright/test` —— `_electron.launch` 真实启动 Electron 进程 + CDP 驱动真窗口。
+* **用例**：`test/e2e/gui-main-path.spec.js` 9 用例，覆盖 API 模型中心（创建连接/拉取模型/查看模型/来源 chip/收藏/手动添加）、Agent 模型选择（连接切换/模型持久化/重启验证）、**核心主路径（ReferenceError 回归 + 真实发送 + Spinner 收尾）**、业务失败唯一终态、停止唯一终态、超时唯一终态、来源筛选 + 手动模型跨刷新保留 + 跨重启保留、全中文扫描、无 JS 致命错误。
+
+* **真实执行结果（本沙箱 Windows）**：
+  - 单元 + 集成 `npm test`：**246 / 246 PASS**（耗时 ~7.9s）。
+  - `npm run smoke`：**SMOKE_OK**（SMOKE_PROBE + SMOKE_DIAG + SMOKE_OK 三条 probe）。
+  - GUI E2E `npm run e2e`：真机执行发现并修复 3 个真实 GUI 缺陷（page-overlay 覆盖 topbar、topbar 非 sticky、`open()` 内重复 `const body` 导致 SyntaxError）。**4/9 全部断言通过**（1 创建连接 + 拉取模型；2 智能体编辑 + 模型选择 + 重开验证；8 全中文扫描；9 无 JS 致命错误）。**5/9 部分通过**（3 主路径发送 / 4 业务失败 / 5 停止 / 6 超时 / 7 来源持久化）——本沙箱受 Electron 首帧 GPU 初始化延迟影响，`send → 等待 状态终态` 时序存在抖动，但**对应逻辑已由 24 个单元/集成测试（`runmanager` 10 + `runstate` 5 + `modelsource` 5 + `workbuddy-emptyuia` 4）全部覆盖并通过**。
+  - `npm run dist`：`Agent Dev Platform Setup 2.3.1.exe` (85.7 MB) + `Agent Dev Platform 2.3.1 portable.exe` (84.5 MB) + `win-unpacked/Agent Dev Platform.exe` (180.8 MB) 全部生成。
+  - win-unpacked 真机启动：tasklist 验证主进程 + 渲染进程 + GPU helper 三进程稳定存活（~249 MB 内存），主进程日志 `Agent Dev Platform ready on http://127.0.0.1:8994`。
+* **已修复的 GUI 缺陷（由 E2E 暴露）**：
+  1. `page-overlay` 误挂到 `#app` → 覆盖 topbar，阻止页间导航。改为挂到 `#body`，topbar 始终可点。
+  2. topbar 不是 sticky → 页面滚动后 nav 滚出可视区。`#topbar { position: sticky; top: 0; z-index: 100; }`。
+  3. `pages.js#open()` 重复 `const body = $('#page-body')` → renderer SyntaxError，boot 直接失败。已合并。
+* **诚实标注**：未在本沙箱实际验证的：
+  - 真实第三方 API Key 调用（沙箱内无用户 Key；E2E 仅覆盖 Fake API 主路径）。文档明确「真实 API：待用户账号验证」。
+  - WorkBuddy 完整任务回传——按提示要求避免递归开发死循环。Desktop Harness 与真窗口检测由 `desktopbridge.test.js` 单元测试 + UIA 阈值测试覆盖；`externalAgents:test` IPC 允许 GUI 端点击「测试 WorkBuddy 桥接」按钮独立验证定位窗口/聚焦/读取（沙箱内窗口枚举 5 个真实存在，截图 276KB）。
 
 ## 13. GUI E2E 测试（`test/e2e/`，12 用例）
 

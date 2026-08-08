@@ -49,7 +49,7 @@ function seedDefaults(store) {
       api_connection_id: openaiId, model: 'gpt-4o', tools: DEFAULT_TOOLS, is_main: false, sub_agent_ids: []
     });
     store.agents.create({
-      name: 'Main Agent', description: '主调度 Agent：读取项目、改代码、跑命令、调子 Agent，直接完成用户的自然语言任务。',
+      name: '主智能体', description: '主调度智能体：读取项目、改代码、跑命令、调子智能体，直接完成用户的自然语言任务。',
       type: 'native', api_connection_id: openaiId, model: null, temperature: 0.5, max_tokens: 4096,
       max_steps: 40, timeout_ms: 600000, is_main: true,
       tools: DEFAULT_TOOLS,
@@ -59,7 +59,7 @@ function seedDefaults(store) {
 
   // external agents (templates)
   if (store.externalAgents.list().length === 0) {
-    store.externalAgents.create({ name: 'Codex', description: 'OpenAI Codex 编程 Agent（官方 HTTP/CLI）', adapter_type: 'codex', config: {} });
+    store.externalAgents.create({ name: 'Codex', description: 'OpenAI Codex 编程智能体（官方 HTTP/CLI）', adapter_type: 'codex', config: {} });
     store.externalAgents.create({ name: 'WorkBuddy', description: '通过桌面桥接驱动已登录的 WorkBuddy 桌面应用', adapter_type: 'workbuddy', config: {} });
   }
 

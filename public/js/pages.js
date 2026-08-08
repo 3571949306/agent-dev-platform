@@ -60,7 +60,8 @@ function ensureOverlay() {
   if (overlay) return overlay;
   overlay = h('div', { class: 'page-overlay hidden' });
   overlay.innerHTML = `<div class="page-head"><h2 id="page-title"></h2><button class="btn" id="page-close">← 返回工作台</button></div><div class="page-body" id="page-body"></div>`;
-  document.getElementById('app').appendChild(overlay);
+  // v2.3.1: overlay 只覆盖工作区（#body），不能盖住 topbar — 否则页间导航被自己的 overlay 挡住
+  (document.getElementById('body') || document.getElementById('app')).appendChild(overlay);
   overlay.querySelector('#page-close').onclick = close;
   document.addEventListener('keydown', e => { if (e.key === 'Escape' && !overlay.classList.contains('hidden')) close(); });
   return overlay;
@@ -186,7 +187,7 @@ async function loadDiagExtras(body, connId) {
 
   try {
     const calls = await api.diagModelCalls(60);
-    callsBox.innerHTML = calls.length ? `<table class="tbl"><thead><tr><th>时间</th><th>Agent</th><th>连接</th><th>请求模型</th><th>实际模型</th><th>来源</th><th>回退</th><th>图</th><th>延迟</th><th>结果</th></tr></thead><tbody>
+    callsBox.innerHTML = calls.length ? `<table class="tbl"><thead><tr><th>时间</th><th>智能体</th><th>连接</th><th>请求模型</th><th>实际模型</th><th>来源</th><th>回退</th><th>图</th><th>延迟</th><th>结果</th></tr></thead><tbody>
       ${calls.map(r => `<tr class="${r.fell_back ? 'row-warn' : ''}">
         <td class="muted small">${esc(fmtTime(r.created_at))}</td>
         <td>${esc(r.agent_name || '—')}</td>
@@ -203,7 +204,7 @@ async function loadDiagExtras(body, connId) {
 
   try {
     const mis = await api.diagMismatches();
-    misBox.innerHTML = mis.length ? `<table class="tbl"><thead><tr><th>时间</th><th>Agent</th><th>请求</th><th>实际</th><th>来源</th></tr></thead><tbody>
+    misBox.innerHTML = mis.length ? `<table class="tbl"><thead><tr><th>时间</th><th>智能体</th><th>请求</th><th>实际</th><th>来源</th></tr></thead><tbody>
       ${mis.map(r => `<tr><td class="muted small">${esc(fmtTime(r.created_at))}</td><td>${esc(r.agent_name || '—')}</td><td class="mono small">${esc(r.requested_model)}</td><td class="mono small">${esc(r.actual_model)}</td><td class="muted small">${esc(r.model_source)}</td></tr>`).join('')}</tbody></table>`
       : '<div class="muted small">没有模型回退或不匹配。</div>';
   } catch (e) { misBox.innerHTML = `<div class="muted small">加载失败：${esc(e.message)}</div>`; }
@@ -213,10 +214,12 @@ export async function open(page) {
   ensureOverlay();
   current = page;
   overlay.classList.remove('hidden');
-  $$('.topnav button').forEach(b => b.classList.toggle('active', b.dataset.page === page));
-  const title = { dashboard: '总览', connections: 'API 连接', agents: 'Agents', mcp: 'MCP 服务器', diagnostics: '能力诊断', settings: '设置' }[page] || page;
-  $('#page-title').textContent = title;
+  // v2.3.1: 每次打开页都把页面滚动复位到顶部，避免 sticky topbar 与 overlay 互相遮挡
   const body = $('#page-body');
+  if (body) body.scrollTop = 0;
+  $$('.topnav button').forEach(b => b.classList.toggle('active', b.dataset.page === page));
+  const title = { dashboard: '总览', connections: 'API 连接', agents: '智能体', mcp: 'MCP 服务器', diagnostics: '能力诊断', settings: '设置' }[page] || page;
+  $('#page-title').textContent = title;
   body.innerHTML = '<div class="muted">加载中…</div>';
   try {
     if (page === 'dashboard') await renderDashboard(body);
@@ -240,8 +243,8 @@ async function renderDashboard(body) {
     <div class="stats">
       ${card(stats.projects, '项目')}
       ${card(stats.connections, 'API 连接')}
-      ${card(stats.agents, 'Agents')}
-      ${card(stats.externalAgents, '外部 Agent')}
+      ${card(stats.agents, '智能体')}
+      ${card(stats.externalAgents, '外部智能体')}
       ${card(stats.conversations, '对话')}
       ${card(stats.mcpServers, 'MCP 服务器')}
     </div>
@@ -316,36 +319,31 @@ async function renderConnections(body) {
   body.querySelectorAll('[data-view]').forEach(b => b.onclick = () => modelManager(list.find(c => c.id === b.dataset.view)));
 }
 
-/** 模型管理弹窗 — P0: 查看模型列表、搜索、复制、手动添加、来源标签 */
+/** 模型管理弹窗 — v2.3.1: per-model source、真实来源筛选、收藏持久化(SQLite) */
 function modelManager(conn) {
   if (!conn) return;
-  let models = conn.models || [];
-  let modelSource = conn.model_source || 'remote';
-  let modelNote = conn.model_note || '';
+  // models 统一为对象数组 [{id, source, favorite, addedAt}]（store 已归一化）
+  let models = (conn.models || []).map(m => (typeof m === 'string' ? { id: m, source: 'cached', favorite: false } : m));
   let filter = 'all';
   let search = '';
-  let favorites = new Set(); // 可以从 localStorage 恢复
+  const mid = (m) => (typeof m === 'string' ? m : (m && m.id) || '');
 
-  // 从 localStorage 恢复收藏
-  try {
-    const saved = JSON.parse(localStorage.getItem('model-favorites') || '{}');
-    if (saved[conn.id]) favorites = new Set(saved[conn.id]);
-  } catch {}
-
-  function saveFavorites() {
-    try {
-      const all = JSON.parse(localStorage.getItem('model-favorites') || '{}');
-      all[conn.id] = [...favorites];
-      localStorage.setItem('model-favorites', JSON.stringify(all));
-    } catch {}
+  // 统一渲染状态：从当前 conn 拉最新（收藏以 SQLite 为准，不用 localStorage）
+  async function reload(connId) {
+    const list = await api.connections();
+    const c = list.find(x => x.id === connId);
+    state.connections = list;
+    if (c) models = (c.models || []).map(m => (typeof m === 'string' ? { id: m, source: 'cached', favorite: false } : m));
+    return c;
   }
 
   function renderModelList() {
     const box = $('#mm-list');
     if (!box) return;
     let filtered = models;
-    if (search) filtered = filtered.filter(m => m.toLowerCase().includes(search.toLowerCase()));
-    if (filter === 'fav') filtered = filtered.filter(m => favorites.has(m));
+    if (search) filtered = filtered.filter(m => mid(m).toLowerCase().includes(search.toLowerCase()));
+    if (filter === 'fav') filtered = filtered.filter(m => m.favorite);
+    else if (filter !== 'all') filtered = filtered.filter(m => (m.source || 'cached') === filter);
 
     if (!filtered.length) {
       box.innerHTML = `<div class="empty">没有匹配的模型</div>`;
@@ -353,13 +351,15 @@ function modelManager(conn) {
     }
 
     box.innerHTML = filtered.map(m => {
-      const isFav = favorites.has(m);
+      const id = mid(m);
+      const src = m.source || 'cached';
+      const isFav = !!m.favorite;
       return `<div class="mm-item">
-        <div class="mm-name mono">${esc(m)}</div>
-        <div class="mm-source"><span class="chip">${esc(sourceName(modelSource))}</span></div>
+        <div class="mm-name mono">${esc(id)}</div>
+        <div class="mm-source"><span class="chip src-${esc(src)}">${esc(sourceName(src))}</span></div>
         <div class="mm-actions">
-          <button class="btn tiny" data-copy="${esc(m)}" title="复制模型 ID">复制</button>
-          <button class="btn tiny ${isFav ? 'fav-active' : ''}" data-fav="${esc(m)}" title="${isFav ? '取消收藏' : '收藏'}">${isFav ? '★' : '☆'}</button>
+          <button class="btn tiny" data-copy="${esc(id)}" title="复制模型 ID">复制</button>
+          <button class="btn tiny ${isFav ? 'fav-active' : ''}" data-fav="${esc(id)}" title="${isFav ? '取消收藏' : '收藏'}">${isFav ? '★' : '☆'}</button>
         </div>
       </div>`;
     }).join('');
@@ -367,28 +367,36 @@ function modelManager(conn) {
     box.querySelectorAll('[data-copy]').forEach(b => b.onclick = () => {
       navigator.clipboard.writeText(b.dataset.copy).then(() => toast('已复制：' + b.dataset.copy, 'ok')).catch(() => toast('复制失败', 'error'));
     });
-    box.querySelectorAll('[data-fav]').forEach(b => b.onclick = () => {
+    box.querySelectorAll('[data-fav]').forEach(b => b.onclick = async () => {
       const m = b.dataset.fav;
-      if (favorites.has(m)) { favorites.delete(m); b.textContent = '☆'; b.classList.remove('fav-active'); }
-      else { favorites.add(m); b.textContent = '★'; b.classList.add('fav-active'); }
-      saveFavorites();
+      const old = models.find(x => mid(x) === m);
+      const nv = old ? !old.favorite : true;
+      try {
+        await window.api.invoke('connections:setModelFavorite', conn.id, m, nv);
+        await reload(conn.id);
+        window.dispatchEvent(new CustomEvent('models-updated', { detail: { connectionId: conn.id } }));
+        renderModelList();
+      } catch (e) { toast(e.message, 'error'); }
     });
   }
 
-  const noteHtml = modelSource === 'preset' ?
-    `<div class="warn-box">未能从服务端获得完整模型列表，以下为内置推荐模型，可能不是当前账号全部可用模型。</div>` : '';
+  const presetNote = models.some(m => m.source === 'preset')
+    ? `<div class="warn-box">以下包含内置推荐模型（可能不是当前账号全部可用模型）。</div>` : '';
 
   openModal(`模型管理 — ${conn.name}`, `
     <div class="mm-info">
       <span>已获取模型：<b>${models.length}</b> 个</span>
-      <span>来源：<b>${esc(sourceName(modelSource))}</b></span>
-      ${conn.last_model_fetch ? `<span class="muted">最近更新：${esc(fmtTime(conn.last_model_fetch))}</span>` : ''}
+      <span class="muted">每模型独立来源：API 获取 / 手动添加 / 内置推荐 / 本地缓存</span>
     </div>
-    ${noteHtml}
+    ${presetNote}
     <div class="mm-toolbar">
       <input id="mm-search" placeholder="搜索模型" autocomplete="off">
       <div class="mm-filter">
         <button class="btn tiny ${filter === 'all' ? 'active' : ''}" data-filter="all">全部</button>
+        <button class="btn tiny ${filter === 'remote' ? 'active' : ''}" data-filter="remote">API 获取</button>
+        <button class="btn tiny ${filter === 'manual' ? 'active' : ''}" data-filter="manual">手动添加</button>
+        <button class="btn tiny ${filter === 'preset' ? 'active' : ''}" data-filter="preset">内置推荐</button>
+        <button class="btn tiny ${filter === 'cached' ? 'active' : ''}" data-filter="cached">本地缓存</button>
         <button class="btn tiny ${filter === 'fav' ? 'active' : ''}" data-filter="fav">收藏</button>
       </div>
       <button class="btn tiny" id="mm-refresh">刷新模型</button>
@@ -408,33 +416,27 @@ function modelManager(conn) {
     const btn = $('#mm-refresh');
     btn.textContent = '获取中…'; btn.disabled = true;
     try {
+      // v2.3.1: merge 语义 —— 远端结果进 remote，手动添加的模型保留
       const r = await api.connModels(conn.id);
-      models = r.models;
-      modelSource = r.source || 'remote';
-      modelNote = r.note || '';
-      toast(`已成功获取 ${models.length} 个模型`, 'ok');
-      // 更新弹窗内的信息
-      open('connections'); // 刷新底层
-      modelManager({ ...conn, models, model_source: modelSource, model_note: modelNote });
+      await reload(conn.id);
+      toast(`已成功获取 ${r.models.length} 个模型（手动添加的模型已保留）`, 'ok');
       window.dispatchEvent(new CustomEvent('models-updated', { detail: { connectionId: conn.id } }));
+      closeModal();
+      open('connections');
     } catch (e) { toast(e.message, 'error'); btn.textContent = '刷新模型'; btn.disabled = false; }
   };
   $('#mm-add').onclick = () => {
     openModal('手动添加模型', `
       <label>模型 ID<input id="mm-add-input" placeholder="例如：gpt-4o-2024-08-06"></label>
-      <div class="muted small">手动添加的模型将标记为「手动添加」来源。</div>
+      <div class="muted small">手动添加的模型将标记为「手动添加」来源，刷新模型时不会被删除。</div>
     `, { okText: '添加' });
     onModalOk(async () => {
       const m = $('#mm-add-input').value.trim();
       if (!m) { toast('请输入模型 ID', 'warn'); return; }
-      if (models.includes(m)) { toast('该模型已存在', 'warn'); return; }
-      models.push(m);
-      // 通过 IPC 保存
       try {
         await window.api.invoke('connections:addModel', conn.id, m);
-        toast('已添加模型：' + m, 'ok');
+        await reload(conn.id);
         closeModal();
-        // 重新渲染
         modelManager({ ...conn, models });
         window.dispatchEvent(new CustomEvent('models-updated', { detail: { connectionId: conn.id } }));
       } catch (e) { toast(e.message, 'error'); }
@@ -556,14 +558,16 @@ function agentForm(agent, ctx) {
   $('#a-tool-all').onclick = () => $$('.a-tool').forEach(c => c.checked = true);
   $('#a-tool-none').onclick = () => $$('.a-tool').forEach(c => c.checked = false);
 
-  // 模型选择器 — 替代 datalist
+  // 模型选择器 — 替代 datalist（v2.3.1: models 为对象数组，统一取 id）
   const modelInput = $('#a-model');
   const modelDropdown = $('#a-model-dropdown');
   let currentModels = models;
+  const mid = (m) => (typeof m === 'string' ? m : (m && m.id) || '');
 
   function renderModelDropdown(filter = '') {
-    const filtered = filter
-      ? currentModels.filter(m => m.toLowerCase().includes(filter.toLowerCase()))
+    const f = (filter || '').toLowerCase();
+    const filtered = f
+      ? currentModels.filter(m => mid(m).toLowerCase().includes(f))
       : currentModels;
 
     if (!filtered.length) {
@@ -577,7 +581,7 @@ function agentForm(agent, ctx) {
       return;
     }
 
-    modelDropdown.innerHTML = filtered.slice(0, 100).map(m => `<div class="mm-option" data-model="${esc(m)}">${esc(m)}</div>`).join('');
+    modelDropdown.innerHTML = filtered.slice(0, 100).map(m => `<div class="mm-option" data-model="${esc(mid(m))}">${esc(mid(m))}${m.source ? `<span class="muted">（${esc(sourceName(m.source))}）</span>` : ''}</div>`).join('');
     modelDropdown.querySelectorAll('.mm-option').forEach(opt => opt.onclick = () => {
       modelInput.value = opt.dataset.model;
       modelDropdown.classList.add('hidden');
@@ -700,14 +704,21 @@ function extForm(agent, conns) {
   // Codex API 模式 — 模型选择器
   const eModelInput = $('#e-model');
   const eModelDropdown = $('#e-model-dropdown');
+  const mid2 = (m) => (typeof m === 'string' ? m : (m && m.id) || '');
   if (eModelInput) {
+    const renderEModels = (models, filter = '') => {
+      const f = (filter || '').toLowerCase();
+      const list = f ? models.filter(m => mid2(m).toLowerCase().includes(f)) : models;
+      if (!list.length) { eModelDropdown.innerHTML = '<div class="mm-empty">没有匹配的模型</div>'; return; }
+      eModelDropdown.innerHTML = list.slice(0, 100).map(m => `<div class="mm-option" data-model="${esc(mid2(m))}">${esc(mid2(m))}</div>`).join('');
+    };
     eModelInput.onfocus = () => {
       const connId = $('#e-conn').value;
       if (!connId) { eModelDropdown.innerHTML = '<div class="mm-empty">请先选择 API 连接</div>'; eModelDropdown.classList.remove('hidden'); return; }
       const conn = conns.find(c => c.id === connId);
       const models = conn ? (conn.models || []) : [];
       if (!models.length) { eModelDropdown.innerHTML = '<div class="mm-empty">该连接尚未获取模型</div>'; eModelDropdown.classList.remove('hidden'); return; }
-      eModelDropdown.innerHTML = models.slice(0, 100).map(m => `<div class="mm-option" data-model="${esc(m)}">${esc(m)}</div>`).join('');
+      renderEModels(models);
       eModelDropdown.classList.remove('hidden');
     };
     eModelInput.oninput = () => {
@@ -715,8 +726,7 @@ function extForm(agent, conns) {
       if (!connId) return;
       const conn = conns.find(c => c.id === connId);
       const models = (conn ? conn.models : []) || [];
-      const filtered = models.filter(m => m.toLowerCase().includes(eModelInput.value.toLowerCase()));
-      eModelDropdown.innerHTML = filtered.slice(0, 100).map(m => `<div class="mm-option" data-model="${esc(m)}">${esc(m)}</div>`).join('') || '<div class="mm-empty">没有匹配的模型</div>';
+      renderEModels(models, eModelInput.value);
       eModelDropdown.classList.remove('hidden');
     };
     eModelInput.onblur = () => setTimeout(() => eModelDropdown && eModelDropdown.classList.add('hidden'), 200);
@@ -792,7 +802,7 @@ async function renderMcp(body) {
   const list = await api.mcpList();
   body.innerHTML = `
     <div class="page-actions"><button class="btn primary" id="mcp-add">+ 添加 MCP 服务器</button>
-      <span class="muted">支持 stdio（本地进程）与 http（SSE）两种传输。连接后其工具会自动进入 Agent 可用工具列表。</span></div>
+      <span class="muted">支持 stdio（本地进程）与 http（SSE）两种传输。连接后其工具会自动进入智能体可用工具列表。</span></div>
     ${list.length ? list.map(s => `
       <section class="panel">
         <div class="panel-h"><b>${esc(s.name)}</b>
@@ -869,7 +879,7 @@ async function renderSettings(body) {
 
     <section class="panel">
       <h3>权限审计（最近 ${audit.length} 条）</h3>
-      ${audit.length ? `<table class="tbl"><thead><tr><th>时间</th><th>Agent</th><th>工具</th><th>目标</th><th>权限</th><th>结果</th></tr></thead><tbody>
+      ${audit.length ? `<table class="tbl"><thead><tr><th>时间</th><th>智能体</th><th>工具</th><th>目标</th><th>权限</th><th>结果</th></tr></thead><tbody>
         ${audit.slice(0, 60).map(a => `<tr><td class="muted small">${esc(fmtTime(a.time))}</td><td>${esc(a.agent)}</td><td>${esc(a.tool)}</td><td class="mono small">${esc(truncate(a.target, 40))}</td><td>${esc(a.permission)}</td><td>${a.result === 'ok' ? '<span class="chip ok">ok</span>' : '<span class="chip bad">fail</span>'}</td></tr>`).join('')}
       </tbody></table>` : '<div class="muted">暂无记录</div>'}
     </section>

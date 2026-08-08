@@ -46,7 +46,7 @@ function renderTerminal() {
   const pane = $('#bottom-terminal');
   pane.innerHTML = `
     <div class="term-wrap">
-      <div class="term-out" id="term-out"><div class="muted">终端输出会在 Agent 运行命令时实时显示。你也可以在下面直接执行命令（工作目录 = 项目根目录）。</div></div>
+      <div class="term-out" id="term-out"><div class="muted">终端输出会在智能体运行命令时实时显示。你也可以在下面直接执行命令（工作目录 = 项目根目录）。</div></div>
       <div class="term-in">
         <span class="prompt">&gt;</span>
         <input id="term-cmd" placeholder="例如：npm test（Enter 执行）" autocomplete="off">
@@ -197,7 +197,7 @@ async function renderComputer() {
         <button class="btn small" id="cp-shot">截屏</button>
         <span class="muted" id="cp-browser"></span>
       </div>
-      <div class="cp-out" id="cp-out"><div class="muted">用于查看主 Agent 的「电脑操作」能力：窗口列表、屏幕截图。Agent 执行 computer_* 工具时需要你授权。</div></div>
+      <div class="cp-out" id="cp-out"><div class="muted">用于查看主智能体的「电脑操作」能力：窗口列表、屏幕截图。智能体执行 computer_* 工具时需要你授权。</div></div>
     </div>`;
   $('#cp-win').onclick = async () => {
     $('#cp-out').innerHTML = '<div class="muted">读取中…</div>';

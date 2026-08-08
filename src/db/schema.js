@@ -295,6 +295,21 @@ CREATE TABLE IF NOT EXISTS settings (
   key TEXT PRIMARY KEY,
   value_json TEXT
 );
+
+CREATE TABLE IF NOT EXISTS runs (
+  id TEXT PRIMARY KEY,
+  conversation_id TEXT,
+  agent_id TEXT,
+  task_id TEXT,
+  status TEXT DEFAULT 'preparing',
+  stage TEXT DEFAULT 'preparing',
+  started_at TEXT,
+  updated_at TEXT,
+  last_activity_at TEXT,
+  terminal_at TEXT,
+  error TEXT DEFAULT '',
+  message TEXT DEFAULT ''
+);
 `;
 
 /**

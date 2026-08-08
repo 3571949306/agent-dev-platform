@@ -155,6 +155,7 @@ export const ZH = {
     run_failed: '运行失败',
     run_cancelled: '运行已取消',
     run_timeout: '运行超时',
+    run_interrupted: '运行已中断',
   },
   // 模型来源
   source: {

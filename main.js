@@ -3,6 +3,11 @@ const { app, BrowserWindow, shell } = require('electron');
 const path = require('path');
 const fs = require('fs');
 
+// v2.3.1 (GUI E2E)：独立 userData —— E2E 用临时目录跑真实 GUI，绝不污染真实用户数据。
+if (process.env.ADP_USER_DATA) {
+  try { app.setPath('userData', process.env.ADP_USER_DATA); } catch { /* 忽略非法路径 */ }
+}
+
 let mainWindow = null;
 let httpServer = null;
 

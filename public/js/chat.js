@@ -3,6 +3,7 @@ import { api } from './api.js';
 import { state, findAgent } from './state.js';
 import { $, esc, h, md, toast, renderDiff, prettyJson, truncate, fmtTime, confirmBox } from './util.js';
 import { toolName, eventName, runStatus, isTerminal } from './i18n.js';
+import { preflightCheck } from './preflight.js';
 import * as panels from './panels.js';
 import * as pages from './pages.js';
 
@@ -29,7 +30,7 @@ function renderChatList() {
     const active = state.conv && state.conv.id === c.id ? ' active' : '';
     return `<div class="chat-item${active}" data-id="${c.id}">
       <div class="ci-title">${esc(c.title || '新对话')}</div>
-      <div class="ci-sub">${esc(a ? a.name : '未指定 Agent')} · ${esc(fmtTime(c.updated_at))}</div>
+      <div class="ci-sub">${esc(a ? a.name : '未指定智能体')} · ${esc(fmtTime(c.updated_at))}</div>
       <button class="ci-del" data-del="${c.id}" title="删除">&times;</button>
     </div>`;
   }).join('');
@@ -53,7 +54,7 @@ function renderChatList() {
 function emptyChat() {
   return `<div class="chat-empty">
     <h2>开始一个任务</h2>
-    <p class="muted">用自然语言描述你要做的事，主 Agent 会自己读文件、改代码、跑命令、验证结果。</p>
+    <p class="muted">用自然语言描述你要做的事，主智能体会自己读文件、改代码、跑命令、验证结果。</p>
     <div class="samples">
       <button class="sample">分析这个项目的结构，告诉我它是干什么的</button>
       <button class="sample">运行构建，如果失败就修复直到通过</button>
@@ -66,7 +67,7 @@ function emptyChat() {
 export async function newChat() {
   if (!state.project) { toast('请先打开一个项目', 'warn'); return; }
   const agentId = state.agentId || (state.agents.find(a => a.is_main) || state.agents[0] || {}).id;
-  if (!agentId) { toast('请先在 Agents 页创建一个 Agent', 'warn'); return; }
+  if (!agentId) { toast('请先在「智能体」页面创建智能体', 'warn'); return; }
   const conv = await api.convCreate({ projectId: state.project.id, agentId, title: '新对话' });
   await loadConversations();
   await openConversation(conv.id);
@@ -134,7 +135,7 @@ function userBubble(text) {
 function assistantBubble(text) {
   const agent = findAgent(state.agentId);
   return h('div', { class: 'msg assistant' },
-    `<div class="avatar ai">AI</div><div class="bubble"><div class="who">${esc(agent ? agent.name : 'Agent')}</div><div class="md">${md(text)}</div></div>`);
+    `<div class="avatar ai">AI</div><div class="bubble"><div class="who">${esc(agent ? agent.name : '智能体')}</div><div class="md">${md(text)}</div></div>`);
 }
 
 function toolCard(name, args) {
@@ -240,36 +241,27 @@ export async function send() {
   }
   if (!agentId) { toast('请选择一个智能体', 'warn'); return; }
 
-  // ---- Agent Preflight ----
+  // ---- Agent Preflight（纯函数，models 作用域收敛在 preflight.js 内，杜绝 ReferenceError）----
   const agent = state.agents.find(a => a.id === agentId);
   if (!agent) { toast('智能体不存在', 'warn'); return; }
 
-  // 外部 Agent 不需要模型检查
+  // 外部智能体不需要模型检查
   if (agent.type !== 'external') {
-    // 检查 API Connection
-    if (!agent.api_connection_id) {
-      showPreflightBlock('no_conn');
-      return;
-    }
     // 确保 connections 已加载
     if (!state.connections.length) {
       try { state.connections = await api.connections(); } catch {}
     }
     const conn = state.connections.find(c => c.id === agent.api_connection_id);
-    if (!conn) {
-      showPreflightBlock('no_conn');
+    const pf = preflightCheck(agent, conn);
+    if (!pf.ok) {
+      if (pf.code === 'no_conn') showPreflightBlock('no_conn');
+      else if (pf.code === 'no_model') showPreflightBlock('no_model', { conn, models: pf.modelIds });
+      else showPreflightBlock('no_models_in_conn', { conn });
       return;
     }
-    // 检查模型
-    if (!agent.model || !agent.model.trim()) {
-      const models = (conn.models || []);
-      showPreflightBlock('no_model', { conn, models });
-      return;
-    }
-    // 检查连接是否有模型列表
-    if (!models.length) {
-      showPreflightBlock('no_models_in_conn', { conn });
-      return;
+    // Case D: 模型不在最新列表 — 允许继续，仅提示，不阻断
+    if (pf.hint === 'model_not_in_list') {
+      toast(`当前模型「${agent.model}」不在最新列表中，将继续使用。`, 'warn');
     }
   }
 
@@ -283,18 +275,17 @@ export async function send() {
 
   msgsEl().appendChild(userBubble(text));
   input.value = '';
-  const runId = crypto.randomUUID();
-  startRun(state.conv.id, runId);
+  // runId 以主进程 agent:send 返回的为准（本地不预生成，避免终态防重入误判）
+  startRun(state.conv.id);
   startWatchdog(state.conv.id);
   statusLine('准备中…');
   scrollBottom();
 
   try {
     const result = await api.send(state.conv.id, agentId, text);
-    // 如果返回了 runId，更新跟踪
-    if (result && result.runId && result.runId !== runId) {
-      activeRuns.get(state.conv.id).runId = result.runId;
-    }
+    // 主进程返回 runId，更新跟踪（终态防重入依赖它）
+    const tracked = activeRuns.get(state.conv.id);
+    if (result && result.runId && tracked) tracked.runId = result.runId;
     touchActivity(state.conv.id);
   } catch (e) {
     updateRunStatus(state.conv.id, 'failed', e.message);
@@ -363,12 +354,13 @@ export async function stop() {
   toast('已发送停止指令', 'warn');
 }
 
-function setRunning(v) {
+function setRunning(v, label) {
   state.running = v;
   $('#btn-stop').classList.toggle('hidden', !v);
   $('#btn-send').disabled = v;
   $('#status-dot').className = 'dot' + (v ? ' busy' : '');
-  $('#status-text').textContent = v ? '运行中' : '就绪';
+  // v2.3.1: 终态时状态栏显示中文终态标签（已完成/失败/已取消/超时/已中断），否则就绪
+  $('#status-text').textContent = v ? '运行中' : (label || '就绪');
 }
 
 // Run 状态管理 — P0: 绑定 Spinner 到 Run 终态
@@ -378,23 +370,27 @@ export function getRun(convId) { return activeRuns.get(convId) || null; }
 
 function startRun(convId, runId) {
   const now = Date.now();
-  const run = { runId, status: 'preparing', startedAt: now, lastActivityAt: now, watchdog: null };
+  // runId 主进程返回后才会填充；填充前不拦截任何终态事件（快任务可能先到终态）
+  const run = { runId: runId || null, status: 'preparing', startedAt: now, lastActivityAt: now, watchdog: null };
   activeRuns.set(convId, run);
   setRunning(true);
   return run;
 }
 
-function updateRunStatus(convId, status, message) {
+function updateRunStatus(convId, status, message, runId) {
   const run = activeRuns.get(convId);
   if (!run) return;
+  // P0-3: 一个 Run 只能进入一次终态。旧 Run 的迟到终态事件（runId 不匹配）
+  // 绝不能关掉新 Run 的 Spinner。
+  if (runId && run.runId && run.runId !== runId) return;
   run.status = status;
   run.lastActivityAt = Date.now();
   if (message) run.message = message;
-  // 终态 → 停止 Spinner
+  // 终态 → 停止 Spinner（唯一入口：正式 Run Terminal 事件）
   if (isTerminal(status)) {
     if (run.watchdog) { clearInterval(run.watchdog); run.watchdog = null; }
     activeRuns.delete(convId);
-    setRunning(false);
+    setRunning(false, runStatus(status));
     statusLine('');
   }
 }
@@ -406,11 +402,14 @@ function startWatchdog(convId) {
   run.watchdog = setInterval(() => {
     const elapsed = Date.now() - run.lastActivityAt;
     if (elapsed > 15000) {
-      // 超过 15 秒无活动 — 不立刻失败，显示等待提示
+      // 超过 15 秒无活动 — 只提示，不擅自把 Run 变成 failed（P0-12）
       const secs = Math.floor(elapsed / 1000);
       const sl = $('#status-line');
       if (sl && state.conv && state.conv.id === convId) {
-        sl.innerHTML = `<span class="spinner"></span>模型暂时没有返回。已经等待：${secs} 秒`;
+        sl.innerHTML = `<span class="spinner"></span>模型暂时没有返回。已经等待：${secs} 秒
+          <button class="btn tiny danger" id="wd-stop">停止任务</button>`;
+        const btn = sl.querySelector('#wd-stop');
+        if (btn) btn.onclick = () => { stop(); toast('正在停止…', 'warn'); };
       }
     }
   }, 5000);
@@ -437,19 +436,25 @@ export function handleEvent(ev) {
   // 更新活动时间
   if (mine && ev.conversationId) touchActivity(ev.conversationId);
 
-  // Run 状态事件 — 终态直接停止 Spinner
-  if (ev.type === 'run_state_changed' || ev.type === 'run_completed' || ev.type === 'run_failed' || ev.type === 'run_cancelled' || ev.type === 'run_timeout') {
+  // Run 状态事件 — 只有正式 Run Terminal 事件有权停 Spinner。
+  // assistant_message / task_complete / tool_result 一律无权完成 Run（P0-3）。
+  if (ev.type === 'run_state_changed' || ev.type === 'run_completed' || ev.type === 'run_failed' || ev.type === 'run_cancelled' || ev.type === 'run_timeout' || ev.type === 'run_interrupted') {
     if (mine && ev.conversationId) {
       const status = ev.type === 'run_completed' ? 'completed' :
                      ev.type === 'run_failed' ? 'failed' :
                      ev.type === 'run_cancelled' ? 'cancelled' :
                      ev.type === 'run_timeout' ? 'timeout' :
-                     ev.status || 'completed';
-      updateRunStatus(ev.conversationId, status, ev.message);
-      if (status === 'completed') { statusLine(''); loadConversations(); }
-      else if (status === 'failed') { statusLine(''); if (ev.message) errorCard(ev.message); }
-      else if (status === 'cancelled') { statusLine(''); appendNote('已停止'); loadConversations(); }
-      else if (status === 'timeout') { statusLine(''); errorCard('模型服务响应超时。'); }
+                     ev.type === 'run_interrupted' ? 'interrupted' :
+                     ev.status || 'running';
+      // 非终态只更新跟踪（不触发 Spinner 收尾）；终态才收尾
+      updateRunStatus(ev.conversationId, status, ev.message, ev.runId);
+      if (isTerminal(status)) {
+        if (status === 'completed') { statusLine(''); loadConversations(); }
+        else if (status === 'failed') { statusLine(''); if (ev.message) errorCard(ev.message); }
+        else if (status === 'cancelled') { statusLine(''); appendNote('已停止'); loadConversations(); }
+        else if (status === 'timeout') { statusLine(''); errorCard('模型服务响应超时。'); }
+        else if (status === 'interrupted') { statusLine(''); appendNote('运行已中断'); loadConversations(); }
+      }
     }
     return;
   }
@@ -487,11 +492,8 @@ export function handleEvent(ev) {
         const sl = $('#status-line');
         if (sl) msgsEl().insertBefore(b, sl); else msgsEl().appendChild(b);
       }
-      if (!ev.tool_calls || !ev.tool_calls.length) {
-        // 没有 tool_calls → 本次回复完成
-        if (mine) { updateRunStatus(ev.conversationId, 'completed'); loadConversations(); }
-        statusLine('');
-      }
+      // assistant_message 只是模型消息事件，不是 Run Terminal 事件（P0-3）。
+      // Run 是否结束只由主进程 Run Manager 的正式终态事件决定，这里不完成 Run。
       scrollBottom();
       break;
     }
@@ -561,12 +563,12 @@ export function handleEvent(ev) {
       panels.addTask({ id: ev.taskId, title: ev.title, status: 'running' });
       break;
     case 'task_complete':
+      // Task 与 Run 是不同层：task_complete 只更新 Task UI（P0-3）。
+      // Run 完成状态只由 Run Manager 统一发送。
       panels.updateTask(ev.taskId, ev.status || 'completed');
-      if (mine) { updateRunStatus(ev.conversationId, 'completed'); loadConversations(); }
       break;
     case 'task_cancelled':
       panels.updateTask(ev.taskId, 'cancelled');
-      if (mine) { updateRunStatus(ev.conversationId, 'cancelled'); appendNote('已停止'); loadConversations(); }
       break;
 
     case 'permission_request':
@@ -574,7 +576,10 @@ export function handleEvent(ev) {
       break;
 
     case 'error':
-      if (mine) { updateRunStatus(ev.conversationId, 'failed', ev.message); errorCard(ev.message); }
+      // v2.3.1 (P0-3): error 只是错误消息事件，不是 Run Terminal 事件。
+      // Run 终态（failed/timeout/cancelled）只由主进程 Run Manager 统一宣布，
+      // 否则 runtime 先发 error、后发 run_timeout 时，error 会抢先占据终态。
+      if (mine) { errorCard(ev.message); }
       panels.addProblem(ev.message);
       break;
 
@@ -598,7 +603,7 @@ const SCOPE_LABEL = {
   'terminal.write': '运行命令', 'terminal.dangerous': '运行高风险命令', 'terminal.admin': '以管理员运行',
   'git.read': '读取 Git', 'git.write': '写入 Git（提交/分支）', 'network': '访问网络',
   'browser': '控制浏览器', 'computer': '控制本机（键鼠/窗口）', 'clipboard': '访问剪贴板',
-  'mcp': '调用 MCP 工具', 'subagent': '调用子 Agent'
+  'mcp': '调用 MCP 工具', 'subagent': '调用子智能体'
 };
 
 function askPermission(ev) {
@@ -606,8 +611,8 @@ function askPermission(ev) {
   const argsText = prettyJson(ev.args || {});
   const body = `
     <div class="perm">
-      <div class="perm-title">Agent「${esc(ev.agent || '')}」请求：<b>${esc(label)}</b></div>
-      <div class="perm-tool">工具：<code>${esc(ev.tool)}</code>　权限域：<code>${esc(ev.scope)}</code></div>
+      <div class="perm-title">智能体「${esc(ev.agent || '')}」请求权限：<b>${esc(label)}</b></div>
+      <div class="perm-tool">详细信息：工具 <code>${esc(ev.tool)}</code>　权限域 <code>${esc(ev.scope)}</code></div>
       <pre class="perm-args">${esc(truncate(argsText, 1500))}</pre>
       <div class="perm-opts">
         <button class="btn" data-d="allow" data-r="once">仅本次允许</button>

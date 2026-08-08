@@ -179,7 +179,7 @@ test('Computer: 工具层把失败规范化为 {ok:false,error}', async () => {
 test('ExternalAgent: 未知适配器类型返回结构化失败', async () => {
   const out = JSON.parse(await extAgents.runExternalAgent({ adapter_type: 'nope' }, 'task', {}));
   assert.strictEqual(out.status, 'failed');
-  assert.match(out.errors[0], /未知外部 Agent 类型/);
+  assert.match(out.errors[0], /未知外部智能体类型/);
 });
 
 test('ExternalAgent: Codex 未配置时给出可操作的错误', async () => {

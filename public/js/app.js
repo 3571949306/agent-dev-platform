@@ -47,7 +47,7 @@ function wireShell() {
   });
   $('#input').addEventListener('input', e => {
     const v = e.target.value;
-    $('#composer-hint').textContent = v.startsWith('@') ? '用 @Agent名 前缀可把这条消息交给指定 Agent' : '';
+    $('#composer-hint').textContent = v.startsWith('@') ? '用 @智能体名 前缀可把这条消息交给指定智能体' : '';
   });
 
   $$('.ltab').forEach(b => b.onclick = async () => {
@@ -143,7 +143,7 @@ async function refreshAgents() {
   state.agents = await api.agents();
   const sel = $('#agent-select');
   if (!state.agents.length) {
-    sel.innerHTML = `<option value="">（无 Agent，请到 Agents 页创建）</option>`;
+    sel.innerHTML = `<option value="">（无智能体，请到「智能体」页创建）</option>`;
     return;
   }
   const main = state.agents.find(a => a.is_main) || state.agents[0];
@@ -175,7 +175,8 @@ async function renderModelSelect() {
     const conns = state.connections.length ? state.connections : (state.connections = await api.connections());
     const c = conns.find(x => x.id === a.api_connection_id);
     connName = c ? c.name : '';
-    models = (c && c.models) || [];
+    // v2.3.1: models 统一为对象数组 [{id,...}]，归一化为 id
+    models = ((c && c.models) || []).map(m => (typeof m === 'string' ? m : (m && m.id) || '')).filter(Boolean);
   } catch {}
   if (a.model && !models.includes(a.model)) models = [a.model, ...models];
   if (!models.length) models = [a.model || '未设置模型'];

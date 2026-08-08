@@ -22,6 +22,7 @@ const { createComputerTools } = require('../services/computer');
 const extAgents = require('../services/externalAgents');
 const { DesktopAgentBridge } = require('../services/desktopBridge');
 const { pickVisionModel } = require('../services/visionReader');
+const { RunManager } = require('../agent/runManager');
 
 const mcpManager = new McpManager();
 const browser = createBrowserTools();
@@ -36,6 +37,9 @@ let mainWindow = null;
 let currentProjectId = null;
 const activeRuns = new Map();
 const pendingPermissions = new Map();
+
+// v2.3.1 (P0-2/P0-3/P0-4) — 全应用唯一的 Run 状态机。只有它能宣布 Run 终态。
+const runManager = new RunManager({ store, emit });
 
 function emit(type, payload) {
   if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('agent:event', { ...(payload || {}), type });
@@ -85,7 +89,7 @@ function getAgentFull(id) { return store.agents.get(id) || store.externalAgents.
 
 async function buildProvider(agent) {
   const conn = store.connections.getDecrypted(agent.api_connection_id);
-  if (!conn) throw new Error(`Agent「${agent.name}」未绑定 API 连接`);
+  if (!conn) throw new Error(`智能体「${agent.name}」未绑定 API 连接`);
   return providers.getProvider(conn);
 }
 
@@ -191,18 +195,26 @@ async function sendChatTask({ toConversationId, message, depth = 0, messageId = 
   return reply;
 }
 
+/**
+ * Run 一个对话回合，返回正式业务结果：
+ *   { status: 'completed'|'failed'|'cancelled'|'timeout'|'interrupted', result, error, taskId }
+ *
+ * v2.3.1 (P0-2) — Promise resolve ≠ 业务成功。调用方（agent:send）必须根据
+ * 返回的 status 决定终态，禁止无条件 completed。
+ */
 async function runChatTurn(conversationId, agentId, userMessage, opts = {}) {
   const runId = opts.runId || null;
+  const rm = opts.runManager || runManager;
   const agent = getAgentFull(agentId);
   const conv = store.conversations.get(conversationId);
   const project = conv && conv.project_id ? store.projects.get(conv.project_id) : null;
   const projectRoot = project ? project.root_path : (currentProjectId ? store.projects.get(currentProjectId)?.root_path : null);
-  if (!agent) { emit('error', { conversationId, message: 'Agent 不存在' }); return; }
+  if (!agent) { emit('error', { conversationId, message: '智能体不存在' }); return { status: 'failed', result: null, error: '智能体不存在', taskId: null }; }
 
   if (agent.type === 'external') {
-    emit('run_state_changed', { conversationId, runId, status: 'waiting_external_agent', timestamp: Date.now() });
+    rm.updateRun(runId, 'waiting_external_agent', { conversationId });
     store.messages.create({ conversation_id: conversationId, role: 'user', content: userMessage });
-    emit('assistant_status', { conversationId, status: '调用外部 Agent ' + agent.name });
+    emit('assistant_status', { conversationId, status: '正在调用外部智能体 ' + agent.name });
     // v2.1.0: external runs are now cancellable and stream their state machine
     // progress, exactly like native agent turns do.
     const extAc = new AbortController();
@@ -239,25 +251,19 @@ async function runChatTurn(conversationId, agentId, userMessage, opts = {}) {
     } finally {
       activeRuns.delete(conversationId);
       emit('assistant_status', { conversationId, status: '' }); // never leave the spinner stuck
-      // v2.3.0: emit final run state for external agents
-      if (res && typeof res === 'string') {
-        try {
-          const parsed = JSON.parse(res);
-          if (parsed.status === 'failed' || parsed.status === 'timeout') {
-            emit('run_state_changed', { conversationId, runId, status: parsed.status, message: (parsed.errors || []).join('; ') || parsed.summary, timestamp: Date.now() });
-          }
-        } catch {}
-      }
     }
     store.messages.create({ conversation_id: conversationId, role: 'assistant', content: res, model: agent.name });
     emit('assistant_message', { conversationId, content: res });
-    return;
+    // v2.3.1 (P0-4) — External 四态（completed/failed/cancelled/timeout）统一映射为正式结果，
+    // 终态由 agent:send 的 finishRun 统一宣布，这里不再直接 emit 终态。
+    const mapped = extAgents.mapExternalResult(res);
+    return { status: mapped.status, result: res, error: mapped.error, taskId: null };
   }
-  if (!projectRoot) { emit('error', { conversationId, message: '未打开项目，无法执行本地工具' }); return; }
+  if (!projectRoot) { emit('error', { conversationId, message: '未打开项目，无法执行本地工具' }); return { status: 'failed', result: null, error: '未打开项目', taskId: null }; }
 
   const ac = new AbortController();
   activeRuns.set(conversationId, ac);
-  emit('run_state_changed', { conversationId, runId, status: 'requesting_model', timestamp: Date.now() });
+  rm.updateRun(runId, 'requesting_model', { conversationId });
   const pe = new PermissionEngine({ store, projectId: project?.id || null });
   const deps = {
     store, project, projectRoot, abortSignal: ac.signal,
@@ -280,8 +286,27 @@ async function runChatTurn(conversationId, agentId, userMessage, opts = {}) {
     pinnedFacts: store.memories.list('project', project?.id).map(m => m.value)
   };
   store.messages.create({ conversation_id: conversationId, role: 'user', content: userMessage });
-  try { await runAgentTurn(deps, { agent, conversationId, userMessage, history: store.messages.list(conversationId), toolDefs: buildToolDefsFor(agent) }); }
-  finally { activeRuns.delete(conversationId); }
+  try {
+    const r = await runAgentTurn(deps, { agent, conversationId, userMessage, history: store.messages.list(conversationId), toolDefs: buildToolDefsFor(agent) });
+    // r = { ok, aborted, error, content, taskId, model } (runtime 已捕获自己的异常)
+    if (r.aborted) return { status: 'cancelled', result: r.content || '', error: null, taskId: r.taskId || null };
+    if (!r.ok) return { status: classifyError(r.error).status, result: null, error: r.error || null, taskId: r.taskId || null };
+    return { status: 'completed', result: r.content || '', error: null, taskId: r.taskId || null };
+  } catch (e) {
+    const c = classifyError(e);
+    return { status: c.status, result: null, error: c.error, taskId: null };
+  } finally {
+    activeRuns.delete(conversationId);
+  }
+}
+
+/** 把异常归类为 Run 终态：Abort→cancelled，超时→timeout，其余→failed */
+function classifyError(err) {
+  const msg = (err && err.message) ? String(err.message) : String(err || '未知错误');
+  if (err && (err.aborted === true || err.name === 'AbortError')) return { status: 'cancelled', error: msg };
+  if (/\b(abort|aborted|cancelled|canceled)\b/i.test(msg)) return { status: 'cancelled', error: msg };
+  if (/超时|timed?out|ETIMEDOUT|timeout/i.test(msg)) return { status: 'timeout', error: msg };
+  return { status: 'failed', error: msg };
 }
 
 // ---------------- register ----------------
@@ -329,19 +354,20 @@ function register(window) {
       const list = await provider.listModels();
       result = { models: list, source: 'remote' };
     }
-    store.connections.setModels(id, result.models);
-    return { models: result.models, source: result.source || 'remote', note: result.note || null };
+    // v2.3.1 (P1-16): merge 而非覆盖 —— 远端结果进 remote，手动添加的模型保留
+    const updated = store.connections.mergeModels(id, result.models, result.source || 'remote');
+    return { models: updated.models, source: result.source || 'remote', note: result.note || null };
   });
-  // P0: 手动添加模型
+  // P0: 手动添加模型（source='manual'，幂等）
   reg('connections:addModel', (id, modelId) => {
-    const conn = store.connections.get(id);
-    if (!conn) throw new Error('连接不存在');
-    const models = conn.models || [];
-    if (!models.includes(modelId)) {
-      models.push(modelId);
-      store.connections.setModels(id, models);
-    }
-    return { ok: true, models };
+    if (!modelId || !String(modelId).trim()) throw new Error('模型 ID 不能为空');
+    const updated = store.connections.addModel(id, String(modelId).trim());
+    return { ok: true, models: updated.models };
+  });
+  // v2.3.1 (P1-18): 收藏统一持久化到 models_json.favorite（唯一真源，重启保留）
+  reg('connections:setModelFavorite', (id, modelId, fav) => {
+    const updated = store.connections.setModelFavorite(id, modelId, !!fav);
+    return { ok: true, models: updated.models };
   });
 
   // P1-5 — Diagnostics: probe each capability separately against the live
@@ -520,7 +546,7 @@ function register(window) {
     const { guard } = require('../security/pathguard');
     const abs = guard(proj.root_path, relPath);
     const st = fs.statSync(abs);
-    if (st.size > 2 * 1024 * 1024) return { path: relPath, truncated: true, content: '（文件过大，仅供 Agent 分段读取）' };
+    if (st.size > 2 * 1024 * 1024) return { path: relPath, truncated: true, content: '（文件过大，仅供智能体分段读取）' };
     const buf = fs.readFileSync(abs);
     if (buf.includes(0)) return { path: relPath, binary: true, content: '（二进制文件）' };
     return { path: relPath, content: buf.toString('utf8'), size: st.size };
@@ -563,32 +589,34 @@ function register(window) {
   });
 
   // agent runtime
-  ipcMain.handle('agent:send', (_e, { conversationId, agentId, message }) => {
-  // v2.3.0: agent:send now returns a runId and emits run_state_changed events
-  // so the renderer can track the Run lifecycle instead of guessing from scattered events.
-  const runId = crypto.randomUUID();
-  emit('run_state_changed', { conversationId, runId, status: 'preparing', stage: 'preparing', timestamp: Date.now() });
-  runChatTurn(conversationId, agentId, message, { runId })
-    .then(() => {
-      emit('run_state_changed', { conversationId, runId, status: 'completed', timestamp: Date.now() });
-      emit('run_completed', { conversationId, runId, timestamp: Date.now() });
-    })
-    .catch(err => {
-      emit('error', { conversationId, message: err.message });
-      emit('run_state_changed', { conversationId, runId, status: 'failed', message: err.message, timestamp: Date.now() });
-      emit('run_failed', { conversationId, runId, message: err.message, timestamp: Date.now() });
-    });
-  return { accepted: true, runId, conversationId, status: 'preparing' };
+  ipcMain.handle('agent:send', async (_e, { conversationId, agentId, message }) => {
+    // v2.3.1 (P0-2/P0-3): agent:send 通过 RunManager 创建 Run 并唯一宣布终态。
+    // Promise resolve ≠ 业务成功 —— 只有 runChatTurn 返回的 status 决定终态。
+    const run = runManager.createRun({ conversationId, agentId });
+    const runId = run.id;
+    try {
+      const result = await runChatTurn(conversationId, agentId, message, { runId, runManager });
+      const status = (result && result.status) || 'failed';
+      runManager.finishRun(runId, status, {
+        error: (result && result.error) || null,
+        message: (result && result.error) || null,
+        source: 'agent:send'
+      });
+    } catch (err) {
+      const c = classifyError(err);
+      emit('error', { conversationId, message: c.error });
+      runManager.finishRun(runId, c.status, { error: c.error, message: c.error, source: 'agent:send-catch' });
+    }
+    return { accepted: true, runId, conversationId, status: 'preparing' };
   });
   ipcMain.handle('agent:stop', (_e, { conversationId }) => {
     const ac = activeRuns.get(conversationId);
-    if (ac) {
-      ac.abort();
-      activeRuns.delete(conversationId);
-      emit('run_state_changed', { conversationId, status: 'cancelled', timestamp: Date.now() });
-      emit('run_cancelled', { conversationId, timestamp: Date.now() });
-    }
-    return { stopped: !!ac };
+    if (ac) ac.abort();
+    activeRuns.delete(conversationId);
+    // v2.3.1 (P0-3): 终态由 RunManager 唯一宣布；若 Run 已终态（例如刚好完成），
+    // cancel 会被忽略，保证 cancelled 后绝不出现 completed。
+    const run = runManager.cancelByConversation(conversationId);
+    return { stopped: !!ac || !!run };
   });
   ipcMain.handle('agent:permission-response', (_e, { reqId, decision, range }) => {
     const resolve = pendingPermissions.get(reqId);
@@ -599,6 +627,9 @@ function register(window) {
 
 // connect MCP servers marked connected at startup
 async function initServices() {
+  // v2.3.1 (P1-14): 应用上次被关闭 —— 数据库里所有非终态 Run 统一标记 interrupted，
+  // GUI 绝不恢复旧 Spinner。
+  try { runManager.interruptStale(); } catch (e) { console.log('[runManager] interruptStale 失败: ' + e.message); }
   const targets = store.mcpServers.list().filter(s => s.status === 'connected');
   // Reconnect in parallel: one dead server must not delay the others, and a
   // hung handshake is bounded by the client-side timeout.
@@ -614,4 +645,4 @@ async function initServices() {
   rebuildMcpToolMap();
 }
 
-module.exports = { register, initServices, runChatTurn, _internals: { getTool, mcpManager, browser: browser.manager, computer: computer.manager } };
+module.exports = { register, initServices, runChatTurn, runManager, _internals: { getTool, mcpManager, browser: browser.manager, computer: computer.manager } };

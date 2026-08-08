@@ -37,21 +37,36 @@ const projects = {
 };
 
 // ---------- api_connections ----------
+/**
+ * v2.3.1 (P1-5/P1-15/P1-19) — 模型列表统一为「每模型独立元数据」对象数组：
+ *   [{ id, source: 'remote'|'manual'|'preset'|'cached', favorite, addedAt }]
+ * 旧数据（string[]）读取时自动归一化迁移为 source='cached'，不破坏旧库。
+ */
+function normalizeModels(models) {
+  return (models || []).map(m => {
+    if (typeof m === 'string') return { id: m, source: 'cached', favorite: false, addedAt: null };
+    if (m && typeof m === 'object' && m.id) {
+      return { id: m.id, source: m.source || 'cached', favorite: !!m.favorite, addedAt: m.addedAt || null };
+    }
+    return null;
+  }).filter(Boolean);
+}
+
 const connections = {
   list() {
     return db().prepare('SELECT id,name,provider,base_url,api_key_masked,headers_json,models_json,tested,tested_at,last_error,latency_ms,created_at,updated_at FROM api_connections ORDER BY created_at').all()
-      .map(r => ({ ...r, headers: p(r.headers_json, {}), models: p(r.models_json, []), has_key: !!r.api_key_masked }));
+      .map(r => ({ ...r, headers: p(r.headers_json, {}), models: normalizeModels(p(r.models_json, [])), has_key: !!r.api_key_masked }));
   },
   get(id) {
     const r = db().prepare('SELECT * FROM api_connections WHERE id=?').get(id);
     if (!r) return null;
-    return { ...r, headers: p(r.headers_json, {}), models: p(r.models_json, []), has_key: !!r.api_key_masked };
+    return { ...r, headers: p(r.headers_json, {}), models: normalizeModels(p(r.models_json, [])), has_key: !!r.api_key_masked };
   },
   /** returns connection with decrypted key (main process only) */
   getDecrypted(id) {
     const r = db().prepare('SELECT * FROM api_connections WHERE id=?').get(id);
     if (!r) return null;
-    return { ...r, api_key: sec.decrypt(r.api_key_enc), headers: p(r.headers_json, {}), models: p(r.models_json, []) };
+    return { ...r, api_key: sec.decrypt(r.api_key_enc), headers: p(r.headers_json, {}), models: normalizeModels(p(r.models_json, [])) };
   },
   create(body) {
     const id = uuid(); const t = now();
@@ -89,6 +104,49 @@ const connections = {
     return connections.get(id);
   },
   setModels(id, models) {
+    db().prepare('UPDATE api_connections SET models_json=? WHERE id=?').run(j(normalizeModels(models)), id);
+    return connections.get(id);
+  },
+  /**
+   * v2.3.1 (P1-16) — 刷新模型时保留手动添加的模型 + 收藏状态。
+   * freshModels 来自 Provider（string[] 或 {id}[]，视为 source 指定的远端结果）。
+   * 已有模型里的 source='manual' 且不在 fresh 里的条目保留；fresh 条目的 favorite/addedAt 从旧数据继承。
+   */
+  mergeModels(id, freshModels, source = 'remote') {
+    const cur = connections.get(id);
+    const existing = cur ? normalizeModels(cur.models) : [];
+    const fresh = normalizeModels(freshModels).map(m => ({ ...m, source }));
+    const byId = new Map(existing.map(m => [m.id, m]));
+    const merged = fresh.map(m => {
+      const old = byId.get(m.id);
+      return { ...m, favorite: old ? old.favorite : false, addedAt: old ? old.addedAt : null };
+    });
+    // 保留手动添加、且远端本次没有返回的模型
+    for (const m of existing) {
+      if (m.source === 'manual' && !fresh.some(f => f.id === m.id)) merged.push(m);
+    }
+    // 去重（理论上不会重复，防御一下）
+    const seen = new Set(); const dedup = [];
+    for (const m of merged) { if (!seen.has(m.id)) { seen.add(m.id); dedup.push(m); } }
+    db().prepare('UPDATE api_connections SET models_json=? WHERE id=?').run(j(dedup), id);
+    return connections.get(id);
+  },
+  /** 手动添加模型（source='manual'），重复添加幂等。 */
+  addModel(id, modelId) {
+    const cur = connections.get(id);
+    if (!cur) throw new Error('连接不存在');
+    const models = normalizeModels(cur.models);
+    if (!models.some(m => m.id === modelId)) {
+      models.push({ id: modelId, source: 'manual', favorite: false, addedAt: now() });
+      db().prepare('UPDATE api_connections SET models_json=? WHERE id=?').run(j(models), id);
+    }
+    return connections.get(id);
+  },
+  /** 收藏/取消收藏（唯一真源：models_json 里的 favorite）。 */
+  setModelFavorite(id, modelId, fav) {
+    const cur = connections.get(id);
+    if (!cur) throw new Error('连接不存在');
+    const models = normalizeModels(cur.models).map(m => m.id === modelId ? { ...m, favorite: !!fav } : m);
     db().prepare('UPDATE api_connections SET models_json=? WHERE id=?').run(j(models), id);
     return connections.get(id);
   },
@@ -503,6 +561,47 @@ const settings = {
   all() { const rows = db().prepare('SELECT key,value_json FROM settings').all(); const o = {}; rows.forEach(r => o[r.key] = p(r.value_json, null)); return o; }
 };
 
+// ---------- runs (v2.3.1: Run 持久化，重启后把非终态标记为 interrupted) ----------
+const runs = {
+  upsert(run) {
+    const ex = db().prepare('SELECT id FROM runs WHERE id=?').get(run.id);
+    const t = now();
+    if (ex) {
+      db().prepare(`UPDATE runs SET conversation_id=?,agent_id=?,task_id=?,status=?,stage=?,
+        started_at=?,updated_at=?,last_activity_at=?,terminal_at=?,error=?,message=? WHERE id=?`)
+        .run(run.conversationId || null, run.agentId || null, run.taskId || null, run.status, run.stage,
+          run.startedAt ? new Date(run.startedAt).toISOString() : t, t,
+          run.lastActivityAt ? new Date(run.lastActivityAt).toISOString() : t,
+          run.terminalAt ? new Date(run.terminalAt).toISOString() : null,
+          run.error || '', run.message || '', run.id);
+    } else {
+      db().prepare(`INSERT INTO runs (id,conversation_id,agent_id,task_id,status,stage,
+        started_at,updated_at,last_activity_at,terminal_at,error,message)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`)
+        .run(run.id, run.conversationId || null, run.agentId || null, run.taskId || null, run.status, run.stage,
+          new Date(run.startedAt || Date.now()).toISOString(), t, t,
+          run.terminalAt ? new Date(run.terminalAt).toISOString() : null,
+          run.error || '', run.message || '');
+    }
+    return runs.get(run.id);
+  },
+  get(id) { return db().prepare('SELECT * FROM runs WHERE id=?').get(id); },
+  list(limit) { return db().prepare('SELECT * FROM runs ORDER BY started_at DESC LIMIT ?').all(limit || 100); },
+  /** 尚未终态的 Run（应用启动时用于恢复 interrupted）。 */
+  listNonTerminal() {
+    return db().prepare("SELECT * FROM runs WHERE status NOT IN ('completed','failed','cancelled','timeout','interrupted')").all();
+  },
+  updateStatus(id, patch) {
+    const ex = db().prepare('SELECT id FROM runs WHERE id=?').get(id); if (!ex) return null;
+    db().prepare(`UPDATE runs SET status=?,stage=?,terminal_at=?,updated_at=?,error=?,message=? WHERE id=?`)
+      .run(patch.status ?? ex.status, patch.stage ?? ex.stage,
+        patch.terminalAt ? new Date(patch.terminalAt).toISOString() : ex.terminal_at, now(),
+        patch.error ?? ex.error, patch.message ?? ex.message, id);
+    return runs.get(id);
+  },
+  remove(id) { db().prepare('DELETE FROM runs WHERE id=?').run(id); return true; }
+};
+
 // ---------- v1 JSON migration ----------
 function migrateFromJson(jsonPath) {
   if (!jsonPath || !require('fs').existsSync(jsonPath)) return false;
@@ -558,6 +657,6 @@ function migrateFromJson(jsonPath) {
 module.exports = {
   db, init: dbm.initDb, getDb: dbm.getDb,
   projects, connections, models, prompts, skills, agents, externalAgents,
-  conversations, messages, events, tasks, agentMessages, tools, mcpServers,
+  conversations, messages, events, tasks, runs, agentMessages, tools, mcpServers,
   memories, checkpoints, fileChanges, usage, modelCalls, permissionGrants, audit, settings, migrateFromJson
 };

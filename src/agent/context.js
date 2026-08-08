@@ -28,7 +28,7 @@ function buildToolDefs(agent, opts = {}) {
   for (const sub of (opts.subAgents || [])) {
     defs.push({
       name: 'agent_' + sub.id.replace(/-/g, '_'),
-      description: `调用子 Agent「${sub.name}」：${sub.description || '专用 Agent'}。把要交给它处理的具体任务描述传给它，它会返回结构化结果。`,
+      description: `调用子智能体「${sub.name}」：${sub.description || '专用智能体'}。把要交给它处理的具体任务描述传给它，它会返回结构化结果。`,
       parameters: { type: 'object', properties: { task: { type: 'string', description: `交给「${sub.name}」的具体任务或问题` } }, required: ['task'] }
     });
   }
@@ -106,7 +106,7 @@ function summarizeHistory(older) {
   if (wroteFiles.size) lines.push('· 已修改文件：' + [...wroteFiles].slice(0, 12).join('、'));
   if (readFiles.size) lines.push('· 已读取/检索：' + [...readFiles].slice(0, 12).join('、'));
   if (commands.length) lines.push('· 已执行命令：' + commands.slice(-6).join(' ; '));
-  if (subAgents.size) lines.push('· 已委派子 Agent：' + [...subAgents].join('、'));
+  if (subAgents.size) lines.push('· 已委派子智能体：' + [...subAgents].join('、'));
   lines.push(`· 统计：工具调用 ${toolCallCount} 次，其中失败 ${failures} 次。`);
   if (conclusions.length) lines.push('· 最近结论：' + conclusions.slice(-2).join(' | '));
   return lines.join('\n');

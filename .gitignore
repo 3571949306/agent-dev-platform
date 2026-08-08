@@ -1,0 +1,17 @@
+# Dependencies
+node_modules/
+
+# Build output (large installer, not source)
+dist-electron/
+
+# Local data / secrets
+data.json
+*.bak
+
+# Agent working memory (not project source)
+.workbuddy/
+
+# OS / logs
+.DS_Store
+npm-debug.log*
+*.log

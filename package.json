@@ -1,0 +1,47 @@
+{
+  "name": "agent-dev-platform",
+  "version": "1.0.0",
+  "description": "Personal Agent Development Platform",
+  "main": "main.js",
+  "scripts": {
+    "start": "node server.js",
+    "electron": "electron .",
+    "dist": "electron-builder --win"
+  },
+  "dependencies": {
+    "express": "^4.21.0"
+  },
+  "devDependencies": {
+    "electron": "^31.7.7",
+    "electron-builder": "^24.13.3"
+  },
+  "build": {
+    "appId": "com.agentdev.platform",
+    "productName": "Agent Dev Platform",
+    "directories": {
+      "output": "dist-electron"
+    },
+    "asar": false,
+    "win": {
+      "target": "nsis"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Agent Dev Platform"
+    },
+    "files": [
+      "main.js",
+      "server.js",
+      "store.js",
+      "llm.js",
+      "public/**/*",
+      "node_modules/**/*",
+      "!node_modules/**/{*.md,*.markdown,LICENSE,CHANGELOG,test,tests,__tests__,docs,example,examples}",
+      "!node_modules/electron/**",
+      "!node_modules/electron-builder/**"
+    ]
+  }
+}

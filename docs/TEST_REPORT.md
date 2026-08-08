@@ -1,7 +1,7 @@
-# Test Report — Agent Dev Platform v2.0.0
+# Test Report — Agent Dev Platform v2.1.0
 
 > **来源**：`npm test`（`scripts/run-tests.js`，`ELECTRON_RUN_AS_NODE=1` 以匹配 better-sqlite3 的 Electron ABI 125）。
-> **结论**：本机最后一次完整运行 **83 用例 / 83 通过 / 0 失败 / 0 跳过**，耗时 ~8.8s。
+> **结论**：本机最后一次完整运行 **164 用例 / 164 通过 / 0 失败 / 0 跳过**，耗时 ~5.6s。
 > 本文件不含任何编造结果，所有断言均来源于真实执行。
 
 ---
@@ -16,14 +16,14 @@ npm test
 最终输出摘要：
 
 ```
-# tests 83
+# tests 164
 # suites 0
-# pass 83
+# pass 164
 # fail 0
 # cancelled 0
 # skipped 0
 # todo 0
-# duration_ms 8755.9153
+# duration_ms 5649.1245
 ```
 
 ## 2. 测试覆盖
@@ -36,8 +36,14 @@ npm test
 | `test/providers.test.js` | 13 | 协议路由 / authHeaders / baseUrlOf / interpretError / toChatMessages / 流式 SSE / Mock 脚本 + abort / guessCapabilities |
 | `test/db.test.js` | 12 | WAL / 重复 init / 项目 CRUD / 密钥不落明文 + 不泄露 / secret.mask / Agent 关联 / 消息配对 / 任务流转 / 设置 / 记忆去重 / 可选参数绑定 / v1 迁移 |
 | `test/agentloop.test.js` | 10 | 端到端：读 → 补丁 → 终端 → 完成 / 权限拒绝 / 读放行 / 防死循环 / 未知工具 / maxSteps / 连续失败中止 / Stop 真取消 / system prompt 注入 / 历史压缩 |
-| `test/services.test.js` | 19 | MCP（std-io 真实 JSON-RPC 客户端/服务器、超时、错误恢复）/ Browser（真实启动+回退链+导航+截图+交互）/ Computer（真实 PowerShell 列表窗口+截图+结构化失败）/ External Agents（codex / http / workbuddy bridge） |
-| **合计** | **83** | |
+| `test/services.test.js` | 21 | MCP（std-io 真实 JSON-RPC 客户端/服务器、超时、错误恢复）/ Browser / Computer / External Agents（含 P0-2 诚实失败契约：不可读窗口 → failed、可读+UIA → completed 带回真实回答） |
+| `test/modelrouting.test.js` | 12 | P0-1：Agent 指定模型真正下发，不被 `models[0]` 覆盖；`model_calls` 记录请求/实际/来源/回退 |
+| `test/runtimerouting.test.js` | 7 | P0-1：运行时解析模型路径与回退边界 |
+| `test/desktopbridge.test.js` | 19 | P0-2 Test Harness：状态机全分支（找不到窗口/聚焦失败/sentinel/稳定/busy 消失/超时/不可读/Stop 取消/UIA→剪贴板→SendKeys 降级与三路全失败/提交失败/短回答失败/截图带回/标题精确匹配） |
+| `test/capabilities.test.js` | 18 | P1-5：逐能力独立探测（text/streaming/tools/vision），真请求体断言、传输错误记 unknown、工具探测真发 schema、模型真调工具、视觉探测真发 base64、orchestrator 独立不污染、onProgress 顺序、classify 五类 |
+| `test/chats.test.js` | 16 | P1-4：4 个跨聊工具 + `agent_messages` 落库 + 深度防递归 + 主 Agent 自动启用 + 跨项目/自委派/无 Agent 拒绝 |
+| `test/mcpprotocol.test.js` | 8 | MCP 协议版本协商：首选/未来版本通过、未知版本拒绝、`checkProtocol` 单元、集成连接记录协商版本、未知版本直接抛错 |
+| **合计** | **164** | |
 
 ## 3. 真实端到端测试（P1 服务）
 
@@ -108,8 +114,9 @@ npm test
 ```bash
 npm run smoke
 # 输出：
-Agent Dev Platform ready on http://127.0.0.1:5350
-SMOKE_PROBE {"hasApi":true,"title":"Agent Dev Platform","agentOptions":5,"chatItems":0,"messages":0,"fatal":false,"bodyLen":5803}
+Agent Dev Platform ready on http://127.0.0.1:3733
+SMOKE_PROBE {"hasApi":true,"title":"Agent Dev Platform","agentOptions":5,"chatItems":0,"messages":0,"fatal":false,"bodyLen":5855}
+SMOKE_DIAG {"title":"能力诊断","hasRunBtn":true,"hasMatrix":true,"hasEmpty":false,"hasErr":false}
 SMOKE_OK
 ```
 
@@ -118,7 +125,8 @@ SMOKE_OK
 - `title:"Agent Dev Platform"` — 渲染层正确读 title
 - `agentOptions:5` — 5 个种子 Agent 都已注册（Main Agent + Reviewer + Computer + 2 个外部模板）
 - `fatal:false` — 没有"必须在 Agent Dev Platform Desktop 中打开"错误
-- `bodyLen:5803` — 主 DOM 正常渲染
+- `bodyLen:5855` — 主 DOM 正常渲染
+- `SMOKE_DIAG` — v2.1.0 新增：自动点击导航「诊断」页，断言能力矩阵渲染（`hasRunBtn`/`hasMatrix` 为真、无 `.err`）
 
 > `chatItems:0`、`messages:0` 是预期：首次启动没有项目，自然也没有对话。
 
@@ -150,10 +158,29 @@ SMOKE_OK
 ## 9. 复现
 
 ```bash
-git clone https://github.com/<user>/agent-dev-platform
+git clone https://github.com/3571949306/agent-dev-platform
 cd agent-dev-platform
 npm install
 npm run rebuild              # 重新按 Electron ABI 编译 better-sqlite3
-npm test                     # 应当看到 83/83 PASS
-npm run smoke                # 应当看到 SMOKE_OK
+npm test                     # 应当看到 164/164 PASS
+npm run smoke                # 应当看到 SMOKE_OK（含 SMOKE_DIAG 诊断页校验）
 ```
+
+> **注意**：在 WorkBuddy 宿主内运行时，宿主会向环境注入 `ELECTRON_RUN_AS_NODE=1`，会让 Electron 以 Node 模式启动而打不开 GUI。运行 `npm test` / `npm run smoke` / `npm run dist` 前需先 `env -u ELECTRON_RUN_AS_NODE` 取消该变量。
+
+## 10. v2.1.0 测试驱动修复与变更
+
+| # | 问题 | 修复位置 | 验证 |
+| --- | --- | --- | --- |
+| 1 | `store.externalAgents.setRunStatus` 未定义，`externalAgents.js` 调用即崩 | `src/db/store.js` 新增 `setRunStatus`（含 `online` 可选参数） | 单测 + 集成 |
+| 2 | `desktopBridge.waitForCompletion` 在窗口无 UIA 文本时仍空耗 180s | 方法开头早期短路返回 `unreadable` | desktopbridge 19 用例 |
+| 3 | sentinel 检测脆弱（"出现 ≥2 次"在对方清空输入框时不命中） | 改为判定「存在一整行恰好等于 sentinel」 | desktopbridge 用例 |
+| 4 | `services.test.js` 旧测试断言 `sleep(3000)` 后 `completed`（假完成） | 改写为：不可读 → `failed`（错误匹配「未暴露 UI 自动化文本」）；可读+UIA → `completed` 带回真实回答 | services 21 用例 |
+| 5 | v2.0.0 能力探测缺失：连接测试通过即默认"全支持" | `capabilities.js` 逐项独立探测，传输错误记 `unknown`、不污染其他能力 | capabilities 18 用例 |
+| 6 | 多模态视觉未真正进 Model Request | `content.js` 多模态 `ContentPart` + 各 Provider 真实转换（image_url/input_image/source.base64/images[]） | capabilities 视觉用例 |
+| 7 | MCP `initialize` 回报版本被忽略，坏版本静默成功 | `mcp.js` `checkProtocol` + 协商，不支持版本直接抛错 | mcpprotocol 8 用例 |
+| 8 | 多聊天互联未落地（`agent_messages` 不落库、可无限递归） | `chats.js` 4 工具 + 落库 + `maxChatDelegationDepth=2` | chats 16 用例 |
+| 9 | 模型路由被 `conn.models[0]` 静默覆盖且不可追溯 | `providers.resolveModel` 单一决策点 + `model_calls` 留痕 | modelrouting 12 用例 |
+| 10 | Computer SendKeys 路径对 `+ ^ % ~ ( ) { } [ ]` 未转义（潜在注入/丢失） | `desktopBridge.js` 回退路径包 `{}` | input 链路 |
+
+> 以上均为在 v2.0.0 既有骨架上补全真实闭环，未删除任何旧功能；测试由 83 增至 164，全部真实执行通过。

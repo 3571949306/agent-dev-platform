@@ -11,6 +11,7 @@ const path = require('path');
 const store = require('../db/store');
 const registry = require('../tools/registry');
 const providers = require('../providers');
+const capabilities = require('../providers/capabilities');
 const { runAgentTurn } = require('../agent/runtime');
 const { runSubAgent } = require('../agent/subagent');
 const { buildToolDefs, subAgentIdFromToolName } = require('../agent/context');
@@ -58,10 +59,23 @@ function getTool(name) {
 
 function subAgentsFor(agent) { return (agent.sub_agent_ids || []).map(id => store.agents.get(id) || store.externalAgents.get(id)).filter(Boolean); }
 
+// P1-4 — the four cross-chat tools. Main agents get them automatically (they are
+// the orchestrators); any other agent can still opt in via its `tools` list.
+const CHAT_TOOL_NAMES = ['list_project_chats', 'get_chat_summary', 'send_message_to_chat', 'get_chat_status'];
+
 function buildToolDefsFor(agent) {
   const mcpDefs = [...mcpToolMap.values()].map(m => m.def);
   const defs = buildToolDefs(agent, { mcpDefs, subAgents: subAgentsFor(agent) });
-  if (agent.is_main || agent.type === 'computer' || /main/i.test(agent.name || '')) defs.push(...browser.defs, ...computer.defs);
+  const isMain = agent.is_main || agent.type === 'computer' || /main/i.test(agent.name || '');
+  if (isMain) defs.push(...browser.defs, ...computer.defs);
+  if (isMain) {
+    const have = new Set(defs.map(d => d.name));
+    for (const name of CHAT_TOOL_NAMES) {
+      if (have.has(name)) continue;
+      const b = registry.getBuiltin(name);
+      if (b) defs.push({ name: b.def.name, description: b.def.description, parameters: b.def.input_schema });
+    }
+  }
   return defs;
 }
 
@@ -73,6 +87,44 @@ async function buildProvider(agent) {
   return providers.getProvider(conn);
 }
 
+/**
+ * P0-1 — the single place that decides which model id goes on the wire.
+ * Providers are NOT allowed to substitute conn.models[0] on their own any more;
+ * every fallback that happens here is reported (source / fellBack) and recorded
+ * in the model_calls table so "why did it use that model?" is answerable.
+ */
+function resolveModelFor(agent, override) {
+  const raw = agent && agent.api_connection_id ? store.connections.get(agent.api_connection_id) : null;
+  const r = providers.resolveModel({ agent, conn: raw, override });
+  return {
+    ...r,
+    provider: raw ? raw.provider : (agent && agent.provider) || null,
+    connectionId: raw ? raw.id : null,
+    connectionName: raw ? raw.name : null
+  };
+}
+
+/** Does the model this Agent will actually use accept image input? */
+function visionSupportFor(agent) {
+  const info = resolveModelFor(agent);
+  if (!info.model) return false;
+  // A tested probe (Diagnostics page) always beats a guess from the model id.
+  if (info.connectionId) {
+    const caps = store.models.caps(info.connectionId, info.model);
+    if (caps && caps.vision && typeof caps.vision.value === 'boolean' && caps.vision.state === 'tested') return caps.vision.value;
+    if (caps && typeof caps.vision === 'boolean') return caps.vision;
+  }
+  return providers.inferVision(info.model).value === true;
+}
+
+function artifactsDirFor(project) {
+  const base = project && project.root_path
+    ? path.join(project.root_path, '.adp', 'artifacts')
+    : path.join(app.getPath('userData'), 'artifacts');
+  try { fs.mkdirSync(base, { recursive: true }); } catch { /* best effort */ }
+  return base;
+}
+
 function requestPermission(req) {
   return new Promise(resolve => {
     const reqId = crypto.randomUUID();
@@ -81,16 +133,36 @@ function requestPermission(req) {
   });
 }
 
-async function sendChatTask({ toConversationId, message }) {
+/** Hard ceiling on chat→chat delegation so A→B→A can never loop forever. */
+const MAX_CHAT_DELEGATION_DEPTH = 2;
+
+/**
+ * P1-4 — run one turn in ANOTHER conversation on behalf of the caller and hand
+ * the answer back. `messageId` (when present) is the agent_messages row that
+ * tracks this delegation, so async (wait:false) deliveries also reach a
+ * terminal status instead of sitting on `pending` forever.
+ */
+async function sendChatTask({ toConversationId, message, depth = 0, messageId = null }) {
   const conv = store.conversations.get(toConversationId);
-  if (!conv) throw new Error('目标聊天不存在');
-  await runChatTurn(toConversationId, conv.agent_id, message);
+  if (!conv) {
+    if (messageId) store.agentMessages.update(messageId, { status: 'failed', payload: { error: '目标聊天不存在' } });
+    throw new Error('目标聊天不存在');
+  }
+  if (messageId) store.agentMessages.update(messageId, { status: 'running' });
+  try {
+    await runChatTurn(toConversationId, conv.agent_id, message, { chatDepth: depth });
+  } catch (e) {
+    if (messageId) store.agentMessages.update(messageId, { status: 'failed', payload: { error: e.message } });
+    throw e;
+  }
   const msgs = store.messages.list(toConversationId);
   const last = msgs.filter(m => m.role === 'assistant').pop();
-  return last ? last.content : '';
+  const reply = last ? last.content : '';
+  if (messageId) store.agentMessages.update(messageId, { status: 'completed', payload: { reply } });
+  return reply;
 }
 
-async function runChatTurn(conversationId, agentId, userMessage) {
+async function runChatTurn(conversationId, agentId, userMessage, opts = {}) {
   const agent = getAgentFull(agentId);
   const conv = store.conversations.get(conversationId);
   const project = conv && conv.project_id ? store.projects.get(conv.project_id) : null;
@@ -100,7 +172,31 @@ async function runChatTurn(conversationId, agentId, userMessage) {
   if (agent.type === 'external') {
     store.messages.create({ conversation_id: conversationId, role: 'user', content: userMessage });
     emit('assistant_status', { conversationId, status: '调用外部 Agent ' + agent.name });
-    const res = await extAgents.runExternalAgent(agent, userMessage, { store, computerManager: computer.manager });
+    // v2.1.0: external runs are now cancellable and stream their state machine
+    // progress, exactly like native agent turns do.
+    const extAc = new AbortController();
+    activeRuns.set(conversationId, extAc);
+    const STATE_LABEL = {
+      locating: '定位目标窗口', focusing: '聚焦窗口', inputting: '输入任务',
+      submitted: '已提交，等待对方开始', waiting: '等待对方完成', reading: '读取回答',
+      completed: '已完成', failed: '失败', timeout: '超时', cancelled: '已取消'
+    };
+    let res;
+    try {
+      res = await extAgents.runExternalAgent(agent, userMessage, {
+        store,
+        computerManager: computer.manager,
+        signal: extAc.signal,
+        onState: (state, detail) => emit('assistant_status', {
+          conversationId,
+          status: `${agent.name}：${STATE_LABEL[state] || state}${detail && detail.error ? ' — ' + detail.error : ''}`
+        }),
+        onChunk: (text) => emit('assistant_text', { conversationId, chunk: text })
+      });
+    } finally {
+      activeRuns.delete(conversationId);
+      emit('assistant_status', { conversationId, status: '' }); // never leave the spinner stuck
+    }
     store.messages.create({ conversation_id: conversationId, role: 'assistant', content: res, model: agent.name });
     emit('assistant_message', { conversationId, content: res });
     return;
@@ -109,14 +205,19 @@ async function runChatTurn(conversationId, agentId, userMessage) {
 
   const ac = new AbortController();
   activeRuns.set(conversationId, ac);
-  const pe = new PermissionEngine();
+  const pe = new PermissionEngine({ store, projectId: project?.id || null });
   const deps = {
     store, project, projectRoot, abortSignal: ac.signal,
     permissionEngine: pe, buildProvider, getTool,
+    resolveModel: resolveModelFor,
+    visionSupport: visionSupportFor,
+    artifactsDir: artifactsDirFor(project),
     subAgentTool: (name) => { const id = subAgentIdFromToolName(name); return id ? getAgentFull(id) : null; },
     buildToolDefs: buildToolDefsFor,
     runSubAgent: (subDef, args, ctx) => runSubAgent(deps, subDef, args, ctx),
     sendChatTask, requestPermission, computerManager: computer.manager, emit,
+    chatDepth: opts.chatDepth || 0,
+    maxChatDelegationDepth: MAX_CHAT_DELEGATION_DEPTH,
     pinnedFacts: store.memories.list('project', project?.id).map(m => m.value)
   };
   store.messages.create({ conversation_id: conversationId, role: 'user', content: userMessage });
@@ -163,6 +264,35 @@ function register(window) {
     store.connections.setModels(id, list);
     return { models: list };
   });
+
+  // P1-5 — Diagnostics: probe each capability separately against the live
+  // endpoint and persist the verdict, so the rest of the app can stop guessing.
+  reg('diagnostics:capabilities', async (connectionId, modelId, which) => {
+    const conn = store.connections.getDecrypted(connectionId);
+    if (!conn) throw new Error('连接不存在');
+    const provider = providers.getProvider(conn);
+    const model = modelId || providers.resolveModel({ conn }).model;
+    const report = await capabilities.detectCapabilities(provider, model, {
+      which: Array.isArray(which) && which.length ? which : undefined,
+      onProgress: (name, phase, result) =>
+        emit('diagnostics_progress', { connectionId, model, name, phase, result })
+    });
+    // Merge with the pre-probe description so declared/inferred entries survive
+    // for anything we did not actually test this round.
+    const merged = { ...providers.describeCapabilities(conn, model), ...report };
+    store.models.upsert(connectionId, model, merged);
+    return merged;
+  });
+  reg('diagnostics:known', (connectionId, modelId) => {
+    if (modelId) return store.models.caps(connectionId, modelId);
+    return store.models.listByConnection(connectionId);
+  });
+  reg('diagnostics:describe', (connectionId, modelId) => {
+    const conn = store.connections.get(connectionId);
+    return providers.describeCapabilities(conn, modelId);
+  });
+  reg('diagnostics:modelCalls', (limit) => store.modelCalls.list(limit || 100));
+  reg('diagnostics:mismatches', () => store.modelCalls.mismatches());
 
   // prompts / skills
   reg('prompts:list', () => store.prompts.list());

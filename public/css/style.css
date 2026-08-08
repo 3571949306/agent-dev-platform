@@ -248,6 +248,8 @@ pre.preview { max-height: 60vh; overflow: auto; }
 .chkgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 2px 10px; margin-top: 8px; max-height: 230px; overflow: auto; }
 .chkgrid .ck { font-family: var(--mono); font-size: 11px; }
 .warn-box { background: rgba(210,153,34,.1); border: 1px solid rgba(210,153,34,.35); border-radius: 6px; padding: 8px 10px; font-size: 11px; color: #e3c07b; }
+.row-warn { background: rgba(210,153,34,.08); }
+.cap-detail { max-width: 340px; }
 
 /* permission dialog */
 .perm-title { font-size: 14px; margin-bottom: 6px; }

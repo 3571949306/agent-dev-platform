@@ -11,8 +11,21 @@
  *  - structured Agent Events emitted live to the UI
  *  - true Stop: abortSignal kills the LLM request AND terminal process tree
  *  - sub-agents + multi-chat interconnect via injected deps
+ *
+ * v2.1.0:
+ *  - the model the Agent selected is passed explicitly to the provider and the
+ *    whole routing decision is recorded (model_calls table)
+ *  - screenshots returned by tools become real ImageParts in the next request
+ *    when the model can see (Vision loop), and are stored as artifact files so
+ *    neither the UI nor the DB carries megabytes of base64
+ *  - history compaction writes a factual summary instead of dropping messages
  */
 const crypto = require('crypto');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const { compressHistory } = require('./context');
+const { plainText, imagePart } = require('../providers/content');
 
 function withTimeout(p, ms) {
   if (!ms || ms <= 0) return p;
@@ -49,11 +62,25 @@ function buildSystemPrompt(agent, project, pinnedFacts, store) {
   return parts.join('\n');
 }
 
+/** Default routing info when the host did not inject a resolver (tests, sub-agents). */
+function defaultModelInfo(agent) {
+  const m = (agent && agent.model) || null;
+  return { requested: m, model: m, source: m ? 'agent' : 'none', fellBack: false, provider: agent && agent.provider, connectionId: null, connectionName: null };
+}
+
+function artifactsDir(deps) {
+  const base = deps.artifactsDir || path.join(os.tmpdir(), 'adp-artifacts');
+  try { fs.mkdirSync(base, { recursive: true }); } catch { /* ignore */ }
+  return base;
+}
+
 /**
  * Run a single conversation turn.
  * @param deps dependencies injected by the IPC layer (main process)
  *   - store, emit(event, payload), requestPermission(req)->{decision,range}
  *   - buildProvider(agent)->provider, getTool(name)->{def,exec?,permission,permissionFor,source}
+ *   - resolveModel(agent)->{requested,model,source,fellBack,connectionId,connectionName,provider}
+ *   - visionSupport(agent)->boolean
  *   - runSubAgent(subDef, argsStr, runCtx)->string, sendChatTask(opts)->string
  *   - permissionEngine, project, projectRoot
  * @param opts { agent, conversationId, userMessage, history, toolDefs }
@@ -70,13 +97,20 @@ async function runAgentTurn(deps, opts) {
   const abortController = new AbortController();
   const abortSignal = abortSignalFrom(deps, abortController);
 
+  const modelInfo = deps.resolveModel ? deps.resolveModel(agent) : defaultModelInfo(agent);
+  const visionEnabled = deps.visionSupport ? !!deps.visionSupport(agent) : false;
+
   const runCtx = {
     projectRoot, projectId: project?.id || null, agentId: agent.id, agentName: agent.name,
     conversationId, abortSignal, store, taskId: null,
     toolTimeoutMs: TOOL_TIMEOUT,
     permissionEngine: deps.permissionEngine,
     emit: deps.emit,
-    consecutiveFailures: {}, seenActions: new Set(), step: 0
+    chatDepth: deps.chatDepth || 0,
+    maxChatDelegationDepth: deps.maxChatDelegationDepth ?? 2,
+    sendChatTask: deps.sendChatTask,
+    consecutiveFailures: {}, seenActions: new Set(), step: 0,
+    pendingImages: [], artifactsDir: artifactsDir(deps), visionEnabled
   };
   deps.permissionEngine.setTask(null);
   if (project) deps.permissionEngine.setProject(project.id);
@@ -88,15 +122,8 @@ async function runAgentTurn(deps, opts) {
   store.tasks.addStep(task.id, '理解需求');
   deps.emit('task_start', { taskId: task.id, title: task.title, agentId: agent.id });
 
-  const loopMessages = toLoopMessages(history);
-  // compress: if too long, keep recent window + note
-  const WINDOW = 18;
-  if (loopMessages.length > WINDOW + 4) {
-    const recent = loopMessages.slice(-WINDOW);
-    loopMessages.length = 0;
-    loopMessages.push({ role: 'system', content: `（前面有 ${history.length - WINDOW} 条历史已压缩省略，关键结论请基于最近对话）` });
-    loopMessages.push(...recent);
-  }
+  // history → window + factual summary of what fell out of it
+  const loopMessages = compressHistory(toLoopMessages(history), 18);
 
   const pinnedFacts = (deps.pinnedFacts || []).map(f => (f && f.value) || f).filter(Boolean);
   const system = buildSystemPrompt(agent, project, pinnedFacts, store);
@@ -109,42 +136,64 @@ async function runAgentTurn(deps, opts) {
     while (runCtx.step < MAX_STEPS) {
       if (abortSignal.aborted) { aborted = true; break; }
       runCtx.step++;
-      deps.emit('assistant_status', { conversationId, status: `第 ${runCtx.step}/${MAX_STEPS} 步：调用模型` });
+      deps.emit('assistant_status', { conversationId, status: `第 ${runCtx.step}/${MAX_STEPS} 步：调用模型（${modelInfo.model || '未指定模型'}）` });
 
       const provider = await deps.buildProvider(agent);
       const t0 = Date.now();
       let toolCallsAcc = null;
       const buf = [];
       const usage = { total_tokens: 0 };
+      const imageParts = loopMessages.reduce((n, m) => n + (Array.isArray(m.content) ? m.content.filter(p => p && p.type === 'image').length : 0), 0);
 
-      const result = await provider.streamResponse({
-        system,
-        messages: loopMessages,
-        tools: toolDefs,
-        temperature: agent.temperature ?? 0.7,
-        maxTokens: agent.max_tokens ?? 4096,
-        signal: abortSignal,
-        onChunk: (t) => { buf.push(t); deps.emit('assistant_text', { conversationId, taskId: task.id, chunk: t }); },
-        onToolCall: (tcs) => { toolCallsAcc = tcs; }
+      let result;
+      try {
+        result = await provider.streamResponse({
+          model: modelInfo.model,
+          system,
+          messages: loopMessages,
+          tools: toolDefs,
+          temperature: agent.temperature ?? 0.7,
+          maxTokens: agent.max_tokens ?? 4096,
+          signal: abortSignal,
+          onChunk: (t) => { buf.push(t); deps.emit('assistant_text', { conversationId, taskId: task.id, chunk: t }); },
+          onToolCall: (tcs) => { toolCallsAcc = tcs; }
+        });
+      } catch (err) {
+        traceModelCall(store, {
+          ...modelInfo, agent, conversationId, taskId: task.id, provider,
+          latencyMs: Date.now() - t0, ok: false, error: err.message, imageParts
+        });
+        throw err;
+      }
+
+      traceModelCall(store, {
+        ...modelInfo, agent, conversationId, taskId: task.id, provider,
+        actualModel: result.responseModel || result.model || modelInfo.model,
+        latencyMs: Date.now() - t0, ok: true, imageParts
       });
 
       finalContent = buf.join('') || result.content || '';
       if (result.usage) Object.assign(usage, result.usage);
 
-      // usage record
+      // usage record — estimated cost stays NULL unless we can actually price it
       store.usage.create({
-        provider: agent.provider || 'unknown', model: agent.model || 'unknown',
+        provider: modelInfo.provider || agent.provider || 'unknown',
+        model: result.responseModel || modelInfo.model || 'unknown',
+        requestedModel: modelInfo.requested || null,
+        agentId: agent.id, connectionId: modelInfo.connectionId || null,
+        protocol: provider.protocol || null,
         inputTokens: usage.prompt_tokens || usage.input_tokens || 0,
         outputTokens: usage.completion_tokens || usage.output_tokens || 0,
-        totalTokens: usage.total_tokens || 0, latencyMs: Date.now() - t0, estimatedCost: 0
+        totalTokens: usage.total_tokens || 0, latencyMs: Date.now() - t0,
+        estimatedCost: null
       });
 
       // save assistant message
       const saved = store.messages.create({
         conversation_id: conversationId, role: 'assistant', content: finalContent,
-        tool_calls: toolCallsAcc || null, model: agent.model, tokens: usage.total_tokens || null
+        tool_calls: toolCallsAcc || null, model: modelInfo.model, tokens: usage.total_tokens || null
       });
-      deps.emit('assistant_message', { id: saved.id, conversationId, content: finalContent, tool_calls: toolCallsAcc, taskId: task.id });
+      deps.emit('assistant_message', { id: saved.id, conversationId, content: finalContent, tool_calls: toolCallsAcc, taskId: task.id, model: modelInfo.model });
 
       if (!toolCallsAcc || !toolCallsAcc.length) {
         store.tasks.update(task.id, { status: 'completed', summary: finalContent.slice(0, 200) });
@@ -165,6 +214,29 @@ async function runAgentTurn(deps, opts) {
         }
         if (abortSignal.aborted) { aborted = true; break; }
       }
+
+      // Vision loop: images produced by tools this step become a real image
+      // message so the model SEES the screen instead of reading about it.
+      if (runCtx.pendingImages.length) {
+        const imgs = runCtx.pendingImages.splice(0, runCtx.pendingImages.length);
+        if (visionEnabled) {
+          loopMessages.push({
+            role: 'user',
+            content: [
+              { type: 'text', text: `以下是刚才工具返回的 ${imgs.length} 张截图，请直接根据画面内容判断下一步操作。` },
+              ...imgs.map(i => imagePart(i.data, i.mime))
+            ]
+          });
+          deps.emit('vision_input', { conversationId, taskId: task.id, count: imgs.length, files: imgs.map(i => i.file) });
+        } else {
+          loopMessages.push({
+            role: 'user',
+            content: `工具已截图 ${imgs.length} 张（保存在 ${imgs.map(i => i.file).join('、')}），但当前模型「${modelInfo.model}」不具备视觉能力，无法查看图片内容。请改用 computer_get_ui_tree 等文本方式获取界面信息。`
+          });
+          deps.emit('vision_skipped', { conversationId, taskId: task.id, model: modelInfo.model, count: imgs.length });
+        }
+      }
+
       if (aborted || stopped) break;
     }
   } catch (e) {
@@ -196,7 +268,59 @@ async function runAgentTurn(deps, opts) {
     deps.emit('task_complete', { taskId: task.id, status: why });
   }
   deps.emit('assistant_status', { conversationId, status: '' });
-  return { ok: true, content: finalContent, taskId: task.id };
+  return { ok: true, content: finalContent, taskId: task.id, model: modelInfo.model };
+}
+
+/** Persist one model invocation so "why did it use that model?" is answerable. */
+function traceModelCall(store, r) {
+  if (!store || !store.modelCalls) return;
+  try {
+    store.modelCalls.record({
+      agentId: r.agent?.id, agentName: r.agent?.name,
+      conversationId: r.conversationId, taskId: r.taskId,
+      connectionId: r.connectionId, connectionName: r.connectionName,
+      provider: r.provider?.protocol ? (r.providerName || r.agent?.provider || null) : (r.agent?.provider || null),
+      protocol: r.provider?.protocol || null,
+      endpoint: r.provider?.endpoint || null,
+      requestedModel: r.requested || null,
+      actualModel: r.actualModel || r.model || null,
+      modelSource: r.source || null,
+      fellBack: !!r.fellBack,
+      imageParts: r.imageParts || 0,
+      latencyMs: r.latencyMs,
+      ok: r.ok !== false,
+      error: r.error || ''
+    });
+  } catch { /* telemetry must never break a run */ }
+}
+
+const IMAGE_FIELDS = ['data_url', 'image_data_url', 'screenshot'];
+
+/**
+ * Pull any base64 image out of a tool result: store it as a file, hand the model
+ * a short reference, and queue the bytes for the Vision loop.
+ */
+function extractImages(data, runCtx, toolName) {
+  if (!data || typeof data !== 'object') return data;
+  const out = { ...data };
+  for (const key of IMAGE_FIELDS) {
+    const v = out[key];
+    if (typeof v !== 'string' || !/^data:image\//.test(v)) continue;
+    const m = /^data:([^;]+);base64,(.*)$/s.exec(v);
+    if (!m) continue;
+    const [, mime, b64] = m;
+    const ext = (mime.split('/')[1] || 'png').replace(/[^a-z0-9]/gi, '');
+    const file = path.join(runCtx.artifactsDir, `${toolName}_${Date.now()}_${Math.random().toString(36).slice(2, 7)}.${ext}`);
+    try { fs.writeFileSync(file, Buffer.from(b64, 'base64')); } catch { /* keep going */ }
+    runCtx.pendingImages.push({ mime, data: b64, file });
+    delete out[key];
+    out.image_file = file;
+    out.image_bytes = Math.round(b64.length * 0.75);
+    out.note = runCtx.visionEnabled
+      ? '截图已作为图片输入发送给模型，可直接描述画面。'
+      : '当前模型不支持视觉，无法查看该截图。';
+  }
+  return out;
 }
 
 async function executeToolCall(tc, deps, runCtx, agent, conversationId, task, store) {
@@ -260,7 +384,8 @@ async function executeToolCall(tc, deps, runCtx, agent, conversationId, task, st
   let resultStr;
   try {
     const r = await withTimeout(tool.exec(runCtx, args), runCtx.toolTimeoutMs);
-    resultStr = JSON.stringify(r.ok ? r.data : { ok: false, error: r.error });
+    const payload = r.ok ? extractImages(r.data, runCtx, name) : { ok: false, error: r.error };
+    resultStr = JSON.stringify(payload);
     if (!r.ok) runCtx.consecutiveFailures[name] = (runCtx.consecutiveFailures[name] || 0) + 1;
     else runCtx.consecutiveFailures[name] = 0;
   } catch (e) {
@@ -297,4 +422,4 @@ function abortSignalFrom(deps, controller) {
   return controller.signal;
 }
 
-module.exports = { runAgentTurn };
+module.exports = { runAgentTurn, extractImages, defaultModelInfo };

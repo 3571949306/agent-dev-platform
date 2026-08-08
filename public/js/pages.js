@@ -16,6 +16,37 @@ const PROVIDERS = [
 let overlay = null;
 let current = null;
 
+// P1-5 — Diagnostics page: holds the live body + the (conn,model) being probed
+// so streaming `diagnostics_progress` events from the main process can update
+// the right rows without a full re-render.
+let diagBody = null;
+let diagActive = null;
+
+const CAP_LABELS = { text: '文本生成', streaming: '流式输出', tools: '工具调用', vision: '视觉 / 多模态' };
+const CAP_ORDER = ['text', 'streaming', 'tools', 'vision'];
+const stateShort = s => ({ tested: '测', inferred: '推', declared: '声', unknown: '?' }[s] || s);
+
+function stateBadge(state) {
+  const map = { tested: ['ok', '已探测'], inferred: ['', '推断'], declared: ['', '声明'], unknown: ['warn', '未知'] };
+  const [cls, label] = map[state] || ['', state];
+  return `<span class="chip ${cls}">${label}</span>`;
+}
+function resultChip(cap) {
+  if (!cap || cap.value === null || cap.value === undefined) return '<span class="muted">—</span>';
+  if (cap.value === true) return '<span class="chip ok">✓ 支持</span>';
+  return '<span class="chip bad">✗ 不支持</span>';
+}
+function fillCapsRows(rows, caps) {
+  for (const name of CAP_ORDER) {
+    const c = caps && caps[name];
+    const tr = rows.querySelector(`[data-cap="${name}"]`);
+    if (!tr) continue;
+    tr.querySelector('.cap-state').innerHTML = c ? stateBadge(c.state) : '<span class="chip">未探测</span>';
+    tr.querySelector('.cap-result').innerHTML = c ? resultChip(c) : '<span class="muted">—</span>';
+    tr.querySelector('.cap-detail').textContent = c && c.detail ? c.detail : '';
+  }
+}
+
 function ensureOverlay() {
   if (overlay) return overlay;
   overlay = h('div', { class: 'page-overlay hidden' });
@@ -29,7 +60,144 @@ function ensureOverlay() {
 export function close() {
   if (overlay) overlay.classList.add('hidden');
   current = null;
+  diagActive = null;
   $$('.topnav button').forEach(b => b.classList.remove('active'));
+}
+
+/**
+ * P1-5 — live capability diagnostics page.
+ * Lets the user pick a (connection, model) pair, fire a real probe against the
+ * endpoint, watch each capability flip from 探测中 → 已探测 as the main process
+ * streams `diagnostics_progress` events, and inspect the persisted probe log
+ * plus the model-call audit (requested vs actual model, fallbacks).
+ */
+export function handleDiagEvent(ev) {
+  if (!ev || ev.type !== 'diagnostics_progress') return;
+  if (!diagBody || !diagActive) return;
+  if (ev.connectionId !== diagActive.connectionId || ev.model !== diagActive.model) return;
+  const rows = $('#diag-rows', diagBody);
+  if (!rows) return;
+  const tr = rows.querySelector(`[data-cap="${ev.name}"]`);
+  if (!tr) return;
+  if (ev.phase === 'running') {
+    tr.querySelector('.cap-state').innerHTML = '<span class="chip run">探测中…</span>';
+  } else if (ev.phase === 'done') {
+    const c = ev.result;
+    tr.querySelector('.cap-state').innerHTML = c ? stateBadge(c.state) : '<span class="chip">未探测</span>';
+    tr.querySelector('.cap-result').innerHTML = c ? resultChip(c) : '<span class="muted">—</span>';
+    tr.querySelector('.cap-detail').textContent = c && c.detail ? c.detail : '';
+  }
+}
+
+async function renderDiagnostics(body) {
+  diagActive = null;
+  const connections = await api.connections();
+  if (!connections.length) {
+    body.innerHTML = `<div class="empty">还没有 API 连接。<a href="#" id="diag-goto-api">先到 API 页创建一个连接</a>。</div>`;
+    const g = $('#diag-goto-api', body);
+    if (g) g.onclick = e => { e.preventDefault(); open('connections'); };
+    return;
+  }
+  body.innerHTML = `
+    <div class="page-actions">
+      <select id="diag-conn">${connections.map(c => `<option value="${c.id}">${esc(c.name)}（${esc(c.provider)}）</option>`).join('')}</select>
+      <select id="diag-model"></select>
+      <button class="btn primary" id="diag-run">开始探测</button>
+      <span id="diag-status" class="muted small"></span>
+    </div>
+    <div class="warn-box">探测会对选中的连接发起真实请求：一段短文本、一次流式计数、一个工具定义、一张 1×1 图片。结果写入本地数据库，供运行时判断模型能力（如是否支持视觉）。</div>
+    <section class="panel">
+      <h3>能力矩阵</h3>
+      <table class="tbl" id="diag-matrix"><thead><tr><th>能力</th><th>状态</th><th>结果</th><th>说明</th></tr></thead>
+        <tbody id="diag-rows"><tr><td colspan="4" class="muted">选择连接与模型后点击「开始探测」。</td></tr></tbody></table>
+    </section>
+    <div class="grid2">
+      <section class="panel">
+        <h3>已探测记录（本地）</h3>
+        <div id="diag-known"><div class="muted small">尚未加载。</div></div>
+      </section>
+      <section class="panel">
+        <h3>模型调用记录</h3>
+        <div id="diag-calls"><div class="muted small">尚未加载。</div></div>
+        <h3 style="margin-top:12px">模型回退 / 不匹配</h3>
+        <div id="diag-mismatch"><div class="muted small">尚无记录。</div></div>
+      </section>
+    </div>`;
+
+  const connSel = $('#diag-conn', body), modelSel = $('#diag-model', body);
+  function fillModels() {
+    const c = connections.find(x => x.id === connSel.value);
+    const models = (c && c.models && c.models.length) ? c.models : (c && c.default_model ? [c.default_model] : []);
+    modelSel.innerHTML = models.map(m => `<option value="${esc(m)}">${esc(m)}</option>`).join('') || '<option value="">（该连接无模型，先去 API 页拉取）</option>';
+  }
+  fillModels();
+  connSel.onchange = fillModels;
+
+  diagBody = body;
+  await loadDiagExtras(body, connSel.value);
+  $('#diag-run', body).onclick = () => runDiag(body);
+}
+
+async function runDiag(body) {
+  const connId = $('#diag-conn', body).value;
+  const model = $('#diag-model', body).value;
+  if (!connId || !model) { toast('请先选择连接和模型', 'warn'); return; }
+  diagActive = { connectionId: connId, model };
+  const rows = $('#diag-rows', body);
+  rows.innerHTML = CAP_ORDER.map(name => `<tr data-cap="${name}"><td><b>${CAP_LABELS[name]}</b></td><td class="cap-state"><span class="chip run">就绪</span></td><td class="cap-result"><span class="muted">—</span></td><td class="cap-detail muted small"></td></tr>`).join('');
+  $('#diag-status', body).textContent = '探测中…（每个能力依次发起真实请求）';
+  const btn = $('#diag-run', body);
+  btn.disabled = true;
+  try {
+    const final = await api.diagCapabilities(connId, model);
+    fillCapsRows(rows, final);
+    $('#diag-status', body).textContent = `完成 · 耗时 ${final.durationMs != null ? final.durationMs : '?'}ms`;
+    await loadDiagExtras(body, connId);
+    toast('探测完成', 'ok');
+  } catch (e) {
+    $('#diag-status', body).textContent = '探测失败：' + e.message;
+    toast(e.message, 'error');
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function loadDiagExtras(body, connId) {
+  const knownBox = $('#diag-known', body);
+  const callsBox = $('#diag-calls', body);
+  const misBox = $('#diag-mismatch', body);
+  const fmtCap = (cap) => cap ? `${cap.value ? '✓' : '✗'}(${stateShort(cap.state)})` : '—';
+
+  try {
+    const known = await api.diagKnown(connId);
+    knownBox.innerHTML = (known && known.length) ? `<table class="tbl"><thead><tr><th>模型</th><th>文本</th><th>流式</th><th>工具</th><th>视觉</th><th>探测时间</th></tr></thead><tbody>
+      ${known.map(r => { const c = r.capabilities || {}; return `<tr><td class="mono small">${esc(r.model_id)}</td><td>${fmtCap(c.text)}</td><td>${fmtCap(c.streaming)}</td><td>${fmtCap(c.tools)}</td><td>${fmtCap(c.vision)}</td><td class="muted small">${esc(fmtTime(r.created_at))}</td></tr>`; }).join('')}</tbody></table>`
+      : '<div class="muted small">该连接还没有任何探测记录。</div>';
+  } catch (e) { knownBox.innerHTML = `<div class="muted small">加载失败：${esc(e.message)}</div>`; }
+
+  try {
+    const calls = await api.diagModelCalls(60);
+    callsBox.innerHTML = calls.length ? `<table class="tbl"><thead><tr><th>时间</th><th>Agent</th><th>连接</th><th>请求模型</th><th>实际模型</th><th>来源</th><th>回退</th><th>图</th><th>延迟</th><th>结果</th></tr></thead><tbody>
+      ${calls.map(r => `<tr class="${r.fell_back ? 'row-warn' : ''}">
+        <td class="muted small">${esc(fmtTime(r.created_at))}</td>
+        <td>${esc(r.agent_name || '—')}</td>
+        <td>${esc(r.connection_name || '—')}</td>
+        <td class="mono small">${esc(r.requested_model || '—')}</td>
+        <td class="mono small">${esc(r.actual_model || '—')}</td>
+        <td class="muted small">${esc(r.model_source || '—')}</td>
+        <td>${r.fell_back ? '<span class="chip warn">回退</span>' : '—'}</td>
+        <td class="muted small">${r.image_parts || 0}</td>
+        <td class="muted small">${r.latency_ms != null ? r.latency_ms + 'ms' : '—'}</td>
+        <td>${r.ok ? '<span class="chip ok">ok</span>' : '<span class="chip bad">fail</span>'}</td>
+      </tr>`).join('')}</tbody></table>` : '<div class="muted small">暂无调用记录。</div>';
+  } catch (e) { callsBox.innerHTML = `<div class="muted small">加载失败：${esc(e.message)}</div>`; }
+
+  try {
+    const mis = await api.diagMismatches();
+    misBox.innerHTML = mis.length ? `<table class="tbl"><thead><tr><th>时间</th><th>Agent</th><th>请求</th><th>实际</th><th>来源</th></tr></thead><tbody>
+      ${mis.map(r => `<tr><td class="muted small">${esc(fmtTime(r.created_at))}</td><td>${esc(r.agent_name || '—')}</td><td class="mono small">${esc(r.requested_model)}</td><td class="mono small">${esc(r.actual_model)}</td><td class="muted small">${esc(r.model_source)}</td></tr>`).join('')}</tbody></table>`
+      : '<div class="muted small">没有模型回退或不匹配。</div>';
+  } catch (e) { misBox.innerHTML = `<div class="muted small">加载失败：${esc(e.message)}</div>`; }
 }
 
 export async function open(page) {
@@ -37,7 +205,7 @@ export async function open(page) {
   current = page;
   overlay.classList.remove('hidden');
   $$('.topnav button').forEach(b => b.classList.toggle('active', b.dataset.page === page));
-  const title = { dashboard: '总览', connections: 'API 连接', agents: 'Agents', mcp: 'MCP 服务器', settings: '设置' }[page] || page;
+  const title = { dashboard: '总览', connections: 'API 连接', agents: 'Agents', mcp: 'MCP 服务器', diagnostics: '能力诊断', settings: '设置' }[page] || page;
   $('#page-title').textContent = title;
   const body = $('#page-body');
   body.innerHTML = '<div class="muted">加载中…</div>';
@@ -46,6 +214,7 @@ export async function open(page) {
     else if (page === 'connections') await renderConnections(body);
     else if (page === 'agents') await renderAgents(body);
     else if (page === 'mcp') await renderMcp(body);
+    else if (page === 'diagnostics') await renderDiagnostics(body);
     else if (page === 'settings') await renderSettings(body);
   } catch (e) { body.innerHTML = `<div class="err">${esc(e.message)}</div>`; }
 }

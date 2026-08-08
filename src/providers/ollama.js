@@ -4,6 +4,7 @@
  * Software auto-detects http://localhost:11434 but must not fail if Ollama absent.
  */
 const { baseUrlOf, NODE_TIMEOUT } = require('./http');
+const { partsOf, plainText } = require('./content');
 
 function headers(conn) {
   const h = { 'Content-Type': 'application/json' };
@@ -11,15 +12,30 @@ function headers(conn) {
   return h;
 }
 
+/** `opts.model` wins; no hard-coded substitution (see providers/index resolveModel). */
+function wireModel(opts, conn) {
+  const m = (opts && opts.model) || conn.default_model || conn.model || (conn.models && conn.models[0]) || null;
+  if (!m) throw new Error('未指定模型：请在 Agent 或 API 连接中选择一个 Ollama 模型');
+  return m;
+}
+
+/**
+ * Ollama /api/chat carries images out-of-band: message.images is an array of
+ * raw base64 strings (no data: prefix), while content stays plain text.
+ */
 function toOllamaMessages(messages) {
   const out = [];
   for (const m of messages || []) {
     if (m.role === 'assistant' && m.tool_calls && m.tool_calls.length) {
-      out.push({ role: 'assistant', content: m.content || '', tool_calls: m.tool_calls.map(t => ({ function: { name: t.name, arguments: t.arguments || '{}' } })) });
+      out.push({ role: 'assistant', content: plainText(m.content) || '', tool_calls: m.tool_calls.map(t => ({ function: { name: t.name, arguments: t.arguments || '{}' } })) });
     } else if (m.role === 'tool') {
-      out.push({ role: 'tool', content: m.content });
+      out.push({ role: 'tool', content: typeof m.content === 'string' ? m.content : plainText(m.content) });
     } else {
-      out.push({ role: m.role, content: m.content });
+      const parts = partsOf(m.content);
+      const images = parts.filter(p => p.type === 'image').map(p => p.data);
+      const msg = { role: m.role, content: parts.filter(p => p.type === 'text').map(p => p.text).join('\n') };
+      if (images.length) msg.images = images;
+      out.push(msg);
     }
   }
   return out;
@@ -43,12 +59,14 @@ function createOllama(conn) {
     const json = await resp.json();
     return (json.models || []).map(m => m.name).filter(Boolean);
   }
-  async function streamResponse({ system, messages, tools, temperature, maxTokens, signal, onChunk, onToolCall }) {
+  async function streamResponse(opts) {
+    const { system, messages, tools, temperature, maxTokens, signal, onChunk, onToolCall } = opts;
+    const model = wireModel(opts, conn);
     const url = baseUrlOf(conn) + '/api/chat';
     const omsg = toOllamaMessages(messages);
     if (system) omsg.unshift({ role: 'system', content: system });
     const body = {
-      model: conn.model || (conn.models && conn.models[0]) || 'qwen2.5:7b',
+      model,
       messages: omsg,
       stream: true,
       options: { temperature: temperature ?? 0.7 }
@@ -91,9 +109,9 @@ function createOllama(conn) {
       if (signal && signal.aborted) throw new Error('aborted');
     }
     if (toolCalls.length && onToolCall) onToolCall(toolCalls);
-    return { content: full, toolCalls: toolCalls.length ? toolCalls : null, usage: null };
+    return { content: full, toolCalls: toolCalls.length ? toolCalls : null, usage: null, model, responseModel: model };
   }
-  return { protocol: 'ollama', testConnection, listModels, streamResponse };
+  return { protocol: 'ollama', endpoint: '/api/chat', supportsVision: true, testConnection, listModels, streamResponse };
 }
 
-module.exports = { createOllama };
+module.exports = { createOllama, toOllamaMessages };

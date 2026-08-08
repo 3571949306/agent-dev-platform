@@ -72,6 +72,25 @@ async function runSmoke(port) {
   } catch (e) { smokeErrors.push('[probe] ' + e.message); }
 
   console.log('SMOKE_PROBE ' + JSON.stringify(probe || null));
+
+  // Exercise the Diagnostics page (P1-5) so render-time errors surface here
+  // instead of only in the user's face. Clicks the nav button, waits for the
+  // async connection load, then checks the capability matrix rendered.
+  try {
+    await wc.executeJavaScript(`(() => { const b = document.querySelector('[data-page="diagnostics"]'); if (b) b.click(); return !!b; })()`);
+    await new Promise(r => setTimeout(r, 700));
+    const diag = await wc.executeJavaScript(`(() => ({
+      title: document.querySelector('#page-title')?.textContent || null,
+      hasRunBtn: !!document.querySelector('#diag-run'),
+      hasMatrix: !!document.querySelector('#diag-matrix'),
+      hasEmpty: !!document.querySelector('#diag-goto-api'),
+      hasErr: !!document.querySelector('#page-body .err')
+    }))()`);
+    console.log('SMOKE_DIAG ' + JSON.stringify(diag));
+    if (diag.hasErr) smokeErrors.push('[diag] 诊断页渲染抛错');
+    else if (!((diag.hasRunBtn && diag.hasMatrix) || diag.hasEmpty)) smokeErrors.push('[diag] 诊断页未正确渲染: ' + JSON.stringify(diag));
+  } catch (e) { smokeErrors.push('[diag] ' + e.message); }
+
   if (smokeErrors.length) {
     console.error('SMOKE_FAIL\n' + smokeErrors.join('\n'));
     app.exit(1);

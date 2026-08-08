@@ -24,9 +24,17 @@ async function runSubAgent(deps, subDef, argsStr, parentRunCtx) {
   const conv = store.conversations.create({ projectId: parentRunCtx.projectId, agentId: subDef.id, title: taskText.slice(0, 40) });
   store.messages.create({ conversation_id: conv.id, role: 'user', content: taskText });
 
-  // autonomous permission engine for delegated work (audit still recorded)
-  const subPE = new PermissionEngine();
-  ['filesystem.read', 'filesystem.write', 'terminal.read', 'terminal.write', 'git.read', 'git.write', 'network', 'mcp', 'search'].forEach(s => subPE.grant(s, 'always'));
+  // Delegated work runs semi-autonomously, but it may NEVER be more privileged
+  // than the parent: `parent` makes evaluate() return strictest(sub, parent), so
+  // anything the user denied (or never granted) upstream stays blocked here.
+  const parentPE = deps.permissionEngine || parentRunCtx.permissionEngine || null;
+  const subPE = new PermissionEngine({
+    store,
+    projectId: parentRunCtx.projectId || deps.project?.id || null,
+    parent: parentPE
+  });
+  ['filesystem.read', 'filesystem.write', 'terminal.read', 'terminal.write', 'git.read', 'git.write', 'network', 'mcp']
+    .forEach(s => subPE.grantSession(s));    // in-memory only — never written to the user's saved policy
 
   const subDeps = {
     store,
@@ -35,10 +43,20 @@ async function runSubAgent(deps, subDef, argsStr, parentRunCtx) {
     permissionEngine: subPE,
     buildProvider: deps.buildProvider,
     getTool: deps.getTool,
+    resolveModel: deps.resolveModel,
+    visionSupport: deps.visionSupport,
+    artifactsDir: deps.artifactsDir,
     subAgentTool: () => null,           // no nested sub-agents (prevents recursion)
     runSubAgent: () => Promise.resolve(JSON.stringify({ ok: false, error: { code: 'NO_NESTED_SUBAGENT', message: '子 Agent 不可再派生子 Agent' } })),
     sendChatTask: deps.sendChatTask,
-    requestPermission: async () => ({ decision: 'allow', range: 'always' }),
+    chatDepth: parentRunCtx.chatDepth || 0,
+    maxChatDelegationDepth: parentRunCtx.maxChatDelegationDepth ?? 2,
+    // The parent already answered the permission prompt; asking again here would
+    // pop a second dialog for the same scope. A scope the parent DENIED never
+    // reaches this point (strictest() short-circuits it to 'deny').
+    requestPermission: deps.requestPermission
+      ? (req) => deps.requestPermission({ ...req, viaSubAgent: subDef.name })
+      : async () => ({ decision: 'allow', range: 'once' }),
     // surface sub-agent activity inside the parent chat (shadow), DB stays in sub conversation
     emit: (type, payload) => deps.emit(type, { ...payload, conversationId: parentRunCtx.conversationId, subAgentId: subDef.id }),
     pinnedFacts: []

@@ -9,8 +9,9 @@ const patchTools = require('./patch').tools;
 const terminalTools = require('./terminal').tools;
 const gitTools = require('./git').tools;
 const checkpointTools = require('./checkpoint').tools;
+const chatTools = require('./chats').tools;
 
-const BUILTIN = [...fsTools, ...searchTools, ...patchTools, ...terminalTools, ...gitTools, ...checkpointTools];
+const BUILTIN = [...fsTools, ...searchTools, ...patchTools, ...terminalTools, ...gitTools, ...checkpointTools, ...chatTools];
 
 const registry = new Map();
 for (const t of BUILTIN) {

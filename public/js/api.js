@@ -46,6 +46,13 @@ export const api = {
   connTest: (id) => call('connections:test', id),
   connModels: (id) => call('connections:models', id),
 
+  // diagnostics (P1-5) — live capability probing + call-record audit
+  diagCapabilities: (connId, modelId, which) => call('diagnostics:capabilities', connId, modelId, which),
+  diagKnown: (connId, modelId) => call('diagnostics:known', connId, modelId),
+  diagDescribe: (connId, modelId) => call('diagnostics:describe', connId, modelId),
+  diagModelCalls: (limit) => call('diagnostics:modelCalls', limit),
+  diagMismatches: () => call('diagnostics:mismatches'),
+
   // prompts / skills
   prompts: () => call('prompts:list'),
   promptCreate: (b) => call('prompts:create', b),

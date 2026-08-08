@@ -9,6 +9,32 @@ const crypto = require('crypto');
 
 const PROTOCOL_VERSION = '2024-11-05';
 
+/**
+ * Revisions we know how to speak. v2.0.0 sent a version and then ignored
+ * whatever came back, so a server answering with an incompatible revision looked
+ * exactly like a healthy one — right up until tools/call started failing in ways
+ * nobody could explain.
+ */
+const SUPPORTED_PROTOCOLS = ['2024-11-05', '2025-03-26', '2025-06-18'];
+
+/**
+ * @returns {{ok:boolean, negotiated:string, warning?:string}}
+ */
+function checkProtocol(serverVersion) {
+  if (!serverVersion) {
+    return { ok: true, negotiated: PROTOCOL_VERSION, warning: '服务端未回报 protocolVersion，按 ' + PROTOCOL_VERSION + ' 处理' };
+  }
+  if (serverVersion === PROTOCOL_VERSION) return { ok: true, negotiated: serverVersion };
+  if (SUPPORTED_PROTOCOLS.includes(serverVersion)) {
+    return { ok: true, negotiated: serverVersion, warning: `服务端使用 MCP ${serverVersion}（本机首选 ${PROTOCOL_VERSION}），已按服务端版本继续` };
+  }
+  return {
+    ok: false,
+    negotiated: serverVersion,
+    warning: `不支持的 MCP 协议版本 ${serverVersion}（本机支持 ${SUPPORTED_PROTOCOLS.join(' / ')}）`
+  };
+}
+
 class McpClient {
   constructor(server) {
     this.server = server;
@@ -68,10 +94,24 @@ class McpClient {
     const init = await this.call('initialize', {
       protocolVersion: PROTOCOL_VERSION,
       capabilities: { tools: {} },
-      clientInfo: { name: 'Agent-Dev-Platform', version: '2.0.0' }
+      clientInfo: { name: 'Agent-Dev-Platform', version: '2.1.0' }
     });
+
+    // Protocol negotiation — refuse loudly rather than half-work silently.
+    const reported = init && init.result ? init.result.protocolVersion : null;
+    const check = checkProtocol(reported);
+    this.protocolVersion = check.negotiated;
+    this.protocolWarning = check.warning || null;
+    this.serverInfo = (init && init.result && init.result.serverInfo) || null;
+    if (!check.ok) {
+      try { this.proc?.kill(); } catch { /* nothing to kill on http */ }
+      this.connected = false;
+      throw new Error(check.warning);
+    }
+
     await this.call('notifications/initialized', {}, true);
     this.connected = true;
+    this.serverCapabilities = (init && init.result && init.result.capabilities) || {};
     if (init && init.result && init.result.capabilities && init.result.capabilities.tools !== undefined) {
       const list = await this.call('tools/list', {});
       this.tools = (list.result?.tools || []).map(t => ({
@@ -144,4 +184,4 @@ class McpManager {
   disconnect(id) { this.clients.get(id)?.disconnect(); this.clients.delete(id); }
 }
 
-module.exports = { McpManager, McpClient };
+module.exports = { McpManager, McpClient, checkProtocol, PROTOCOL_VERSION, SUPPORTED_PROTOCOLS };

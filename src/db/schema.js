@@ -250,6 +250,36 @@ CREATE TABLE IF NOT EXISTS usage_records (
   created_at TEXT
 );
 
+CREATE TABLE IF NOT EXISTS model_calls (
+  id TEXT PRIMARY KEY,
+  created_at TEXT,
+  agent_id TEXT,
+  agent_name TEXT,
+  conversation_id TEXT,
+  task_id TEXT,
+  connection_id TEXT,
+  connection_name TEXT,
+  provider TEXT,
+  protocol TEXT,
+  endpoint TEXT,
+  requested_model TEXT,
+  actual_model TEXT,
+  model_source TEXT,
+  fell_back INTEGER DEFAULT 0,
+  image_parts INTEGER DEFAULT 0,
+  latency_ms INTEGER,
+  ok INTEGER DEFAULT 1,
+  error TEXT DEFAULT ''
+);
+
+CREATE TABLE IF NOT EXISTS permission_grants (
+  id TEXT PRIMARY KEY,
+  scope TEXT NOT NULL,
+  grant_range TEXT NOT NULL,
+  project_id TEXT,
+  created_at TEXT
+);
+
 CREATE TABLE IF NOT EXISTS permissions_audit (
   id TEXT PRIMARY KEY,
   time TEXT,
@@ -273,7 +303,19 @@ CREATE TABLE IF NOT EXISTS settings (
  * column introduced after the first release must be listed here.
  */
 const COLUMN_MIGRATIONS = [
-  ['memories', 'updated_at', 'TEXT']
+  ['memories', 'updated_at', 'TEXT'],
+  // v2.1.0 — model routing telemetry on every usage record
+  ['usage_records', 'agent_id', 'TEXT'],
+  ['usage_records', 'connection_id', 'TEXT'],
+  ['usage_records', 'requested_model', 'TEXT'],
+  ['usage_records', 'protocol', 'TEXT'],
+  // v2.1.0 — cross-chat delegation bookkeeping
+  ['agent_messages', 'from_conversation_id', 'TEXT'],
+  ['agent_messages', 'to_conversation_id', 'TEXT'],
+  ['agent_messages', 'depth', 'INTEGER'],
+  // v2.1.0 — external agent run state
+  ['external_agents', 'last_status', 'TEXT'],
+  ['external_agents', 'last_run_at', 'TEXT']
 ];
 
 function ensureColumns(db) {

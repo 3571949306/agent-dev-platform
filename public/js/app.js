@@ -17,7 +17,10 @@ async function boot() {
 
   panels.init();
   wireShell();
-  onEvent(ev => { try { chat.handleEvent(ev); } catch (err) { console.error('event error', err, ev); } });
+  onEvent(ev => {
+    try { chat.handleEvent(ev); } catch (err) { console.error('event error', err, ev); }
+    try { pages.handleDiagEvent(ev); } catch (err) { console.error('diag event error', err, ev); }
+  });
 
   await refreshAgents();
   await restoreProject();

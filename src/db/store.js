@@ -97,7 +97,12 @@ const connections = {
 
 // ---------- models ----------
 const models = {
-  listByConnection(connId) { return db().prepare('SELECT * FROM models WHERE connection_id=?').all(connId); },
+  listByConnection(connId) { return db().prepare('SELECT * FROM models WHERE connection_id=?').all(connId).map(r => ({ ...r, capabilities: p(r.capabilities_json, {}) })); },
+  /** Capabilities recorded by a real probe (Diagnostics), or null if never probed. */
+  caps(connId, modelId) {
+    const r = db().prepare('SELECT capabilities_json FROM models WHERE connection_id=? AND model_id=?').get(connId, modelId);
+    return r ? p(r.capabilities_json, {}) : null;
+  },
   upsert(connId, modelId, caps) {
     const ex = db().prepare('SELECT id FROM models WHERE connection_id=? AND model_id=?').get(connId, modelId);
     if (ex) { db().prepare('UPDATE models SET capabilities_json=? WHERE id=?').run(j(caps || {}), ex.id); return ex.id; }
@@ -197,6 +202,20 @@ const externalAgents = {
     return externalAgents.get(id);
   },
   setOnline(id, online) { db().prepare('UPDATE external_agents SET online=? WHERE id=?').run(online ? 1 : 0, id); },
+  // v2.1.0: 外部 Agent 统一状态记账。status 为 running/completed/failed/timeout/cancelled 之一。
+  // error 为可选文本；online 为可选布尔（不传则不动 online 列）。
+  setRunStatus(id, { status, error = null, online = undefined } = {}) {
+    const t = now();
+    const payload = error ? `${status}: ${String(error).slice(0, 500)}` : status;
+    if (typeof online === 'boolean') {
+      db().prepare('UPDATE external_agents SET last_status=?, last_run_at=?, online=?, updated_at=? WHERE id=?')
+        .run(payload, t, online ? 1 : 0, t, id);
+    } else {
+      db().prepare('UPDATE external_agents SET last_status=?, last_run_at=?, updated_at=? WHERE id=?')
+        .run(payload, t, t, id);
+    }
+    return externalAgents.get(id);
+  },
   remove(id) { db().prepare('DELETE FROM external_agents WHERE id=?').run(id); return true; }
 };
 
@@ -291,22 +310,34 @@ const tasks = {
 
 // ---------- agent_messages (bus) ----------
 const agentMessages = {
-  send({ projectId, taskId, fromAgentId, toAgentId, type, content, payload }) {
+  send({ projectId, taskId, fromAgentId, toAgentId, fromConversationId, toConversationId, depth, type, content, payload }) {
     const id = uuid();
-    db().prepare('INSERT INTO agent_messages (id,project_id,task_id,from_agent_id,to_agent_id,type,content,payload_json,status,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)')
-      .run(id, projectId || null, taskId || null, fromAgentId || null, toAgentId || null, type || 'message', content || '', j(payload || {}), 'pending', now());
+    db().prepare(`INSERT INTO agent_messages
+      (id,project_id,task_id,from_agent_id,to_agent_id,from_conversation_id,to_conversation_id,depth,type,content,payload_json,status,created_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+      .run(id, projectId || null, taskId || null, fromAgentId || null, toAgentId || null,
+        fromConversationId || null, toConversationId || null, depth ?? 0,
+        type || 'message', content || '', j(payload || {}), 'pending', now());
     return id;
   },
+  get(id) { const r = db().prepare('SELECT * FROM agent_messages WHERE id=?').get(id); return r ? { ...r, payload: p(r.payload_json, {}) } : null; },
   list(filter) {
     let sql = 'SELECT * FROM agent_messages';
     const where = []; const params = [];
     if (filter && filter.toAgentId) { where.push('to_agent_id=?'); params.push(filter.toAgentId); }
+    if (filter && filter.toConversationId) { where.push('to_conversation_id=?'); params.push(filter.toConversationId); }
+    if (filter && filter.fromConversationId) { where.push('from_conversation_id=?'); params.push(filter.fromConversationId); }
     if (filter && filter.status) { where.push('status=?'); params.push(filter.status); }
     if (where.length) sql += ' WHERE ' + where.join(' AND ');
     sql += ' ORDER BY created_at';
-    return db().prepare(sql).all(...params);
+    return db().prepare(sql).all(...params).map(r => ({ ...r, payload: p(r.payload_json, {}) }));
   },
-  update(id, patch) { db().prepare('UPDATE agent_messages SET status=?,content=? WHERE id=?').run(patch.status ?? 'pending', patch.content ?? '', id); }
+  update(id, patch) {
+    const cur = db().prepare('SELECT * FROM agent_messages WHERE id=?').get(id); if (!cur) return null;
+    db().prepare('UPDATE agent_messages SET status=?,content=?,payload_json=? WHERE id=?')
+      .run(patch.status ?? cur.status, patch.content ?? cur.content, patch.payload ? j(patch.payload) : cur.payload_json, id);
+    return agentMessages.get(id);
+  }
 };
 
 // ---------- tools (registry) ----------
@@ -390,17 +421,70 @@ const fileChanges = {
   list(projectId) { return db().prepare('SELECT * FROM file_changes WHERE project_id=? ORDER BY created_at DESC').all(projectId); }
 };
 const usage = {
-  create({ provider, model, inputTokens, outputTokens, totalTokens, latencyMs, estimatedCost }) {
+  create({ provider, model, inputTokens, outputTokens, totalTokens, latencyMs, estimatedCost, agentId, connectionId, requestedModel, protocol }) {
     const id = uuid();
-    db().prepare('INSERT INTO usage_records (id,provider,model,input_tokens,output_tokens,total_tokens,latency_ms,estimated_cost,created_at) VALUES (?,?,?,?,?,?,?,?,?)')
-      .run(id, provider || '', model || '', inputTokens || 0, outputTokens || 0, totalTokens || 0, latencyMs || 0, estimatedCost || 0, now());
+    // estimated_cost stays NULL when we cannot price the model. Writing 0 would
+    // claim "this call was free", which is a lie the cost page then sums up.
+    const cost = (estimatedCost === undefined || estimatedCost === null || Number.isNaN(Number(estimatedCost))) ? null : Number(estimatedCost);
+    db().prepare('INSERT INTO usage_records (id,provider,model,input_tokens,output_tokens,total_tokens,latency_ms,estimated_cost,created_at,agent_id,connection_id,requested_model,protocol) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)')
+      .run(id, provider || '', model || '', inputTokens || 0, outputTokens || 0, totalTokens || 0, latencyMs || 0, cost, now(),
+        agentId || null, connectionId || null, requestedModel || null, protocol || null);
     return id;
   },
   list(limit) { return db().prepare('SELECT * FROM usage_records ORDER BY created_at DESC LIMIT ?').all(limit || 200); },
   summary() {
-    const row = db().prepare('SELECT COALESCE(SUM(total_tokens),0) AS total, COALESCE(SUM(estimated_cost),0) AS cost FROM usage_records').get();
-    return row;
+    const row = db().prepare(`SELECT COALESCE(SUM(total_tokens),0) AS total,
+        SUM(estimated_cost) AS cost,
+        SUM(CASE WHEN estimated_cost IS NULL THEN 1 ELSE 0 END) AS unpriced,
+        COUNT(*) AS calls
+      FROM usage_records`).get();
+    // cost is NULL when nothing was priced — the UI must render 未知, not ¥0.00
+    return { total: row.total, cost: row.cost === null ? null : row.cost, unpriced: row.unpriced, calls: row.calls };
   }
+};
+
+// ---------- model_calls (v2.1.0 model routing trace) ----------
+const modelCalls = {
+  record(r) {
+    const id = uuid();
+    db().prepare(`INSERT INTO model_calls
+      (id,created_at,agent_id,agent_name,conversation_id,task_id,connection_id,connection_name,provider,protocol,endpoint,requested_model,actual_model,model_source,fell_back,image_parts,latency_ms,ok,error)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+      .run(id, now(), r.agentId || null, r.agentName || null, r.conversationId || null, r.taskId || null,
+        r.connectionId || null, r.connectionName || null, r.provider || null, r.protocol || null, r.endpoint || null,
+        r.requestedModel || null, r.actualModel || null, r.modelSource || null, r.fellBack ? 1 : 0,
+        r.imageParts || 0, r.latencyMs ?? null, r.ok === false ? 0 : 1, r.error || '');
+    return id;
+  },
+  list(limit) { return db().prepare('SELECT * FROM model_calls ORDER BY created_at DESC LIMIT ?').all(limit || 200); },
+  /** Rows where the model on the wire was not what the Agent asked for. */
+  mismatches(limit) {
+    return db().prepare(`SELECT * FROM model_calls
+      WHERE requested_model IS NOT NULL AND actual_model IS NOT NULL AND requested_model <> actual_model
+      ORDER BY created_at DESC LIMIT ?`).all(limit || 50);
+  },
+  clear() { db().prepare('DELETE FROM model_calls').run(); return true; }
+};
+
+// ---------- permission_grants (persisted project/always decisions) ----------
+const permissionGrants = {
+  list(projectId) {
+    const rows = projectId
+      ? db().prepare('SELECT * FROM permission_grants WHERE project_id IS NULL OR project_id=? ORDER BY created_at').all(projectId)
+      : db().prepare('SELECT * FROM permission_grants ORDER BY created_at').all();
+    return rows.map(r => ({ id: r.id, scope: r.scope, range: r.grant_range, project_id: r.project_id, created_at: r.created_at }));
+  },
+  save({ scope, range, projectId }) {
+    if (range !== 'project' && range !== 'always' && range !== 'deny') return null;
+    const pid = range === 'project' ? (projectId || null) : null;
+    const ex = db().prepare('SELECT id FROM permission_grants WHERE scope=? AND (project_id IS ? OR project_id=?)').get(scope, pid, pid);
+    if (ex) { db().prepare('UPDATE permission_grants SET grant_range=?,created_at=? WHERE id=?').run(range, now(), ex.id); return ex.id; }
+    const id = uuid();
+    db().prepare('INSERT INTO permission_grants (id,scope,grant_range,project_id,created_at) VALUES (?,?,?,?,?)').run(id, scope, range, pid, now());
+    return id;
+  },
+  remove(id) { db().prepare('DELETE FROM permission_grants WHERE id=?').run(id); return true; },
+  clear() { db().prepare('DELETE FROM permission_grants').run(); return true; }
 };
 const audit = {
   record({ agent, task, tool, target, permission, result }) {
@@ -475,5 +559,5 @@ module.exports = {
   db, init: dbm.initDb, getDb: dbm.getDb,
   projects, connections, models, prompts, skills, agents, externalAgents,
   conversations, messages, events, tasks, agentMessages, tools, mcpServers,
-  memories, checkpoints, fileChanges, usage, audit, settings, migrateFromJson
+  memories, checkpoints, fileChanges, usage, modelCalls, permissionGrants, audit, settings, migrateFromJson
 };

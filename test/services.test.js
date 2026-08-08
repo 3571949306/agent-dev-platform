@@ -232,7 +232,9 @@ test('ExternalAgent: WorkBuddy 桥接找不到窗口时提示先打开桌面应�
   assert.match(out.errors[0], /未找到 WorkBuddy 窗口/);
 });
 
-test('ExternalAgent: WorkBuddy 桥接命中窗口时聚焦、发送并回传截图', async () => {
+// v2.1.0 契约变更：v2.0.0 在这里 sleep(3000) 然后无条件 completed。现在若目标窗口
+// 不暴露 UI 自动化文本，我们无法验证结果，就必须诚实地失败并给出可操作建议。
+test('ExternalAgent: WorkBuddy 桥接无法读取窗口文本时诚实失败（不再假装完成）', async () => {
   const calls = [];
   const fakeComputer = {
     listWindows: async () => ({ ok: true, windows: [{ pid: 7, title: 'WorkBuddy — 工作台' }] }),
@@ -240,9 +242,42 @@ test('ExternalAgent: WorkBuddy 桥接命中窗口时聚焦、发送并回传截�
     pressKeys: async (k) => { calls.push('keys:' + k); return { ok: true }; },
     screenshot: async () => ({ ok: true, data_url: 'data:image/png;base64,AAAA' })
   };
-  const out = JSON.parse(await extAgents.runExternalAgent({ adapter_type: 'workbuddy', config: {} }, '整理周报', { computerManager: fakeComputer }));
+  const out = JSON.parse(await extAgents.runExternalAgent(
+    { adapter_type: 'workbuddy', config: {} }, '整理周报',
+    { computerManager: fakeComputer, sleep: async () => {} }
+  ));
+  assert.strictEqual(out.status, 'failed', '不可读窗口绝不能报 completed');
+  assert.ok(calls.some(c => c.startsWith('focus:WorkBuddy')), '仍应先聚焦窗口');
+  assert.match(out.errors[0], /未暴露 UI 自动化文本/);
+});
+
+test('ExternalAgent: WorkBuddy 桥接读到真实回答时返回内容而非"请自己去看"', async () => {
+  let turn = 0;
+  const answer = '周报已整理完成：本周合并 3 个 PR，修复 5 个缺陷。';
+  // 捕获桥接生成的 sentinel：它会随提示词一起通过 UIA 写入输入框
+  const SENT = { value: '' };
+  const fakeComputer = {
+    listWindows: async () => ({ ok: true, windows: [{ pid: 7, title: 'WorkBuddy — 工作台' }] }),
+    focusWindow: async () => ({ ok: true }),
+    setControlValue: async (_t, text) => {
+      const m = /ADP-[A-Z0-9]{6}/.exec(text);
+      if (m) SENT.value = m[0];
+      return { ok: true };
+    },
+    pressKeys: async () => ({ ok: true }),
+    getWindowText: async () => {
+      turn++;
+      // 第 1 次是 baseline（提交前），之后模拟对方把回答和结束标记打了出来
+      if (turn <= 1) return { ok: true, text: '历史对话\n整理周报' };
+      return { ok: true, text: `历史对话\n整理周报\n${answer}\n${SENT.value}` };
+    }
+  };
+  const out = JSON.parse(await extAgents.runExternalAgent(
+    { adapter_type: 'workbuddy', config: { pollIntervalMs: 1, timeoutMs: 5000 } }, '整理周报',
+    { computerManager: fakeComputer, sleep: async () => {} }
+  ));
   assert.strictEqual(out.status, 'completed');
-  assert.ok(calls.some(c => c.startsWith('focus:WorkBuddy')));
-  assert.ok(calls.some(c => c === 'keys:整理周报~'), '任务文本后应追加回车');
-  assert.strictEqual(out.screenshot, 'data:image/png;base64,AAAA');
+  assert.strictEqual(out.detection, 'sentinel');
+  assert.strictEqual(out.inputVia, 'uia-value');
+  assert.match(out.summary, /本周合并 3 个 PR/, '必须回传对方真实产出的文本');
 });

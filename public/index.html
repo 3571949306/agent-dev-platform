@@ -16,13 +16,13 @@
       <div class="project-switch">
         <button id="btn-project" class="pill">未打开项目</button>
       </div>
-      <div class="topbar-status"><span class="dot" id="status-dot"></span><span id="status-text">Ready</span></div>
+      <div class="topbar-status"><span class="dot" id="status-dot"></span><span id="status-text">就绪</span></div>
       <nav class="topnav">
         <button data-page="dashboard">总览</button>
-        <button data-page="connections">API</button>
-        <button data-page="agents">Agents</button>
+        <button data-page="connections">API 连接</button>
+        <button data-page="agents">智能体</button>
         <button data-page="mcp">MCP</button>
-        <button data-page="diagnostics">诊断</button>
+        <button data-page="diagnostics">能力诊断</button>
         <button data-page="settings">设置</button>
       </nav>
     </header>
@@ -30,8 +30,8 @@
     <div id="body">
       <aside id="left">
         <div class="left-tabs">
-          <button class="ltab active" data-ltab="chats">Chats</button>
-          <button class="ltab" data-ltab="files">Files</button>
+          <button class="ltab active" data-ltab="chats">对话</button>
+          <button class="ltab" data-ltab="files">文件</button>
         </div>
         <div id="left-chats" class="left-pane"></div>
         <div id="left-files" class="left-pane hidden"></div>
@@ -48,7 +48,7 @@
           <textarea id="input" placeholder="输入自然语言需求，例如：分析这个项目为什么构建失败并修复…（Enter 发送，Shift+Enter 换行）"></textarea>
           <div class="composer-actions">
             <span class="hint" id="composer-hint"></span>
-            <button id="btn-stop" class="btn danger hidden">■ Stop</button>
+            <button id="btn-stop" class="btn danger hidden">■ 停止</button>
             <button id="btn-send" class="btn primary">发送 ▸</button>
           </div>
         </div>
@@ -56,11 +56,11 @@
 
       <aside id="right">
         <div class="right-section">
-          <div class="section-title">AGENTS</div>
+          <div class="section-title">智能体</div>
           <div id="agents-list"></div>
         </div>
         <div class="right-section">
-          <div class="section-title">TASKS</div>
+          <div class="section-title">任务</div>
           <div id="tasks-list"></div>
         </div>
       </aside>
@@ -68,13 +68,13 @@
 
     <footer id="bottom">
       <div class="bottom-tabs">
-        <button class="btab active" data-btab="terminal">Terminal</button>
-        <button class="btab" data-btab="diff">Diff</button>
-        <button class="btab" data-btab="problems">Problems</button>
-        <button class="btab" data-btab="tasks">Tasks</button>
-        <button class="btab" data-btab="computer">Computer</button>
-        <button class="btab" data-btab="logs">Logs</button>
-        <button class="btab" data-btab="usage">Usage</button>
+        <button class="btab active" data-btab="terminal">终端</button>
+        <button class="btab" data-btab="diff">文件更改</button>
+        <button class="btab" data-btab="problems">问题</button>
+        <button class="btab" data-btab="tasks">任务</button>
+        <button class="btab" data-btab="computer">电脑控制</button>
+        <button class="btab" data-btab="logs">日志</button>
+        <button class="btab" data-btab="usage">用量</button>
       </div>
       <div id="bottom-terminal" class="bottom-pane"></div>
       <div id="bottom-diff" class="bottom-pane hidden"></div>

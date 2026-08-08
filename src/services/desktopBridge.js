@@ -233,20 +233,23 @@ class DesktopAgentBridge {
     let sawBusy = false;
     let polls = 0;
     let latest = baseline;
+    let emptyCount = 0; // P0: 连续空文本计数，避免单次空就误降级
 
     while (this.now() < deadline) {
       if (this.aborted()) return { done: false, reason: 'cancelled', text: latest, polls };
       await this.sleep(this.cfg.pollIntervalMs);
       polls++;
       const text = await this.readWindowText(title);
-      if (text == null) {
-        // No UIA text available (some Electron apps expose nothing). Fall back to
-        // a bounded wait and report honestly that we could not verify.
-        if (this.now() >= deadline - this.cfg.pollIntervalMs) {
+      if (text == null || (typeof text === 'string' && text.trim() === '')) {
+        // P0: UIA 可能返回 null、空字符串 ""、或纯空白 "   "
+        // 不一次空就降级，连续达到阈值才认为 unreadable
+        emptyCount++;
+        if (emptyCount >= 3) {
           return { done: false, reason: 'unreadable', text: null, polls };
         }
         continue;
       }
+      emptyCount = 0; // 拿到有效文本，重置计数
       latest = text;
 
       // A. sentinel — the remote agent echoed our unique marker back.

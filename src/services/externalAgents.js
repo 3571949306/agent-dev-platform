@@ -89,23 +89,80 @@ function resolveCodexCwd(cfg, ctx) {
   return process.cwd();
 }
 
+/**
+ * P0: resolve whether a CLI command exists in PATH.
+ * On Windows uses `where`, on POSIX uses `which`.
+ * NEVER use fs.existsSync("codex") — that checks the CWD, not PATH.
+ */
+function resolveCliInPath(cmd) {
+  return new Promise((resolve) => {
+    const checker = process.platform === 'win32' ? 'where' : 'which';
+    const child = spawn(checker, [cmd], { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
+    let out = '';
+    child.stdout.on('data', d => { out += d.toString(); });
+    child.on('error', () => resolve(null));
+    child.on('close', code => {
+      if (code === 0 && out.trim()) resolve(out.trim().split(/\r?\n/)[0]);
+      else resolve(null);
+    });
+  });
+}
+
+/**
+ * P0: detect Codex CLI path.
+ * - cliMode='auto': search PATH for 'codex'
+ * - cliMode='path': use cfg.cliPath (absolute path or bare command — resolve via PATH if bare)
+ * - cliMode='api': return null (no CLI needed)
+ */
+async function resolveCodexCli(cfg) {
+  const mode = cfg.cliMode || (cfg.cliPath ? 'path' : 'auto');
+  if (mode === 'api') return null;
+  if (mode === 'auto') return resolveCliInText('codex');
+  // mode === 'path'
+  const p = cfg.cliPath;
+  if (!p) return resolveCliInText('codex');
+  // If it looks like a path (has separator or .exe), check fs
+  if (p.includes('/') || p.includes('\\') || p.toLowerCase().endsWith('.exe')) {
+    return fs.existsSync(p) ? p : null;
+  }
+  // Bare command like "codex" — resolve via PATH
+  return resolveCliInText(p);
+}
+
+function resolveCliInText(cmd) {
+  return resolveCliInPath(cmd);
+}
+
 // -------------------------------------------------------------------- Codex
 async function runCodex(adapter, taskText, store, ctx = {}) {
   const cfg = adapter.config || {};
   const timeoutMs = Number(cfg.timeoutMs) || 600000;
 
+  // P0: resolve CLI path properly (auto-detect / PATH resolution)
+  const cliPath = await resolveCodexCli(cfg);
+  // Also handle old data: if cfg.cliPath is empty but adapter.command exists, migrate
+  const fallbackPath = cliPath || (adapter.command && adapter.command.trim() ? (await resolveCliInText(adapter.command.trim().split(/\s+/)[0])) : null);
+
   // Option A: official CLI
-  if (cfg.cliPath && fs.existsSync(cfg.cliPath)) {
+  if (fallbackPath || (cfg.cliPath && fs.existsSync(cfg.cliPath))) {
+    const actualPath = fallbackPath || cfg.cliPath;
     const cwd = resolveCodexCwd(cfg, ctx);
     const cwdSource = cfg.cwd ? 'adapter.cwd' : (ctx.projectRoot ? 'projectRoot' : 'process.cwd');
     return new Promise((resolve) => {
       const args = Array.isArray(cfg.args) && cfg.args.length ? [...cfg.args, taskText] : ['exec', '--', taskText];
-      const child = spawn(cfg.cliPath, args, {
-        windowsHide: true,
-        cwd,
-        // POSIX: become a process-group leader so killTree() can take the group down.
-        detached: process.platform !== 'win32'
-      });
+      let child;
+      try {
+        child = spawn(actualPath, args, {
+          windowsHide: true,
+          cwd,
+          // POSIX: become a process-group leader so killTree() can take the group down.
+          detached: process.platform !== 'win32'
+        });
+      } catch (e) {
+        // Windows 直接 spawn .cmd/.bat 会同步抛出 EINVAL；必须捕获，否则异常会
+        // 击穿 Promise 让整次运行卡死（#44 的 Spinner 永不收尾）。
+        return resolve(structured('failed', '', { errors: ['Codex CLI 启动失败: ' + e.message], cwd, cwdSource }));
+      }
       let out = '', errOut = '', settled = false;
       const done = (v) => {
         if (settled) return;

@@ -1,0 +1,216 @@
+// i18n — 轻量中文显示层
+// 内部 IPC channel / Tool ID / Event ID / 数据库字段保持英文不变。
+// 这里只负责把用户可见的 Display Layer 统一中文化。
+
+export const ZH = {
+  // 顶部导航
+  nav: {
+    dashboard: '总览',
+    connections: 'API 连接',
+    agents: '智能体',
+    mcp: 'MCP',
+    diagnostics: '能力诊断',
+    settings: '设置',
+  },
+  // 左侧栏
+  left: {
+    chats: '对话',
+    files: '文件',
+  },
+  // 右侧栏
+  right: {
+    agents: '智能体',
+    tasks: '任务',
+  },
+  // 底部面板
+  bottom: {
+    terminal: '终端',
+    diff: '文件更改',
+    problems: '问题',
+    tasks: '任务',
+    computer: '电脑控制',
+    logs: '日志',
+    usage: '用量',
+  },
+  // 状态
+  status: {
+    ready: '就绪',
+    running: '运行中',
+    completed: '已完成',
+    failed: '失败',
+    cancelled: '已取消',
+    timeout: '超时',
+    interrupted: '已中断',
+    preparing: '准备中',
+    streaming: '正在生成',
+    requesting_model: '正在请求模型',
+    executing_tool: '正在执行工具',
+    waiting_permission: '等待权限',
+    waiting_subagent: '等待子智能体',
+    waiting_external_agent: '等待外部智能体',
+    testing: '正在测试',
+    stopped: '已停止',
+    queued: '排队中',
+    max_steps: '已达步数上限',
+  },
+  // 按钮
+  btn: {
+    stop: '停止',
+    retry: '重试',
+    save: '保存',
+    cancel: '取消',
+    delete: '删除',
+    edit: '编辑',
+    add: '添加',
+    refresh: '刷新',
+    test: '测试',
+    run: '运行',
+    open: '打开',
+    close: '关闭',
+    copy: '复制',
+    send: '发送',
+    newchat: '新建对话',
+  },
+  // Run 状态中文
+  run: {
+    preparing: '准备中',
+    requesting_model: '正在请求模型',
+    streaming: '正在生成',
+    executing_tool: '正在执行工具',
+    waiting_permission: '等待权限确认',
+    waiting_subagent: '等待子智能体',
+    waiting_external_agent: '等待外部智能体',
+    testing: '正在测试',
+    completed: '已完成',
+    failed: '失败',
+    cancelled: '已取消',
+    timeout: '超时',
+    interrupted: '已中断',
+  },
+  // Tool Display Names
+  tool: {
+    list_directory: '查看目录',
+    read_file: '读取文件',
+    read_file_range: '读取文件片段',
+    create_file: '创建文件',
+    write_file: '写入文件',
+    move_file: '移动文件',
+    copy_file: '复制文件',
+    delete_file: '删除文件',
+    file_exists: '检查文件',
+    get_file_metadata: '查看文件信息',
+    search_files: '搜索文件',
+    search_text: '搜索代码',
+    search_symbols: '搜索符号',
+    apply_patch: '修改代码',
+    terminal_run: '运行命令',
+    terminal_cancel: '停止命令',
+    terminal_status: '查看命令状态',
+    git_status: '查看 Git 状态',
+    git_diff: '查看 Git 更改',
+    git_log: '查看 Git 历史',
+    git_show: '查看 Git 内容',
+    git_branch: '查看 Git 分支',
+    git_add: '暂存更改',
+    git_commit: 'Git 提交',
+    checkpoint_create: '创建检查点',
+    checkpoint_restore: '恢复检查点',
+    browser_launch: '启动浏览器',
+    browser_navigate: '打开网页',
+    browser_click: '点击网页',
+    browser_type: '输入网页内容',
+    browser_screenshot: '网页截图',
+    computer_list_windows: '查看窗口',
+    computer_focus_window: '切换窗口',
+    computer_screenshot: '屏幕截图',
+    computer_screenshot_window: '窗口截图',
+    computer_click_at: '点击屏幕',
+    computer_get_ui_tree: '读取界面结构',
+    send_message_to_chat: '向其他对话派发任务',
+    list_project_chats: '查看项目对话',
+    get_chat_summary: '查看对话摘要',
+    get_chat_status: '查看委派状态',
+  },
+  // Event Display Names
+  event: {
+    assistant_status: '智能体状态',
+    assistant_text: '模型输出',
+    assistant_message: '智能体回复',
+    tool_call: '调用工具',
+    tool_result: '工具执行完成',
+    subagent_start: '子智能体开始工作',
+    subagent_result: '子智能体返回结果',
+    file_changed: '文件已更改',
+    terminal_start: '终端开始执行',
+    terminal_output: '终端输出',
+    terminal_exit: '终端执行完成',
+    task_start: '任务开始',
+    task_complete: '任务完成',
+    task_cancelled: '任务已取消',
+    permission_request: '权限请求',
+    error: '错误',
+    diagnostics_progress: '诊断进度',
+    run_state_changed: '运行状态变更',
+    run_completed: '运行完成',
+    run_failed: '运行失败',
+    run_cancelled: '运行已取消',
+    run_timeout: '运行超时',
+  },
+  // 模型来源
+  source: {
+    remote: 'API 获取',
+    manual: '手动添加',
+    preset: '内置推荐',
+    cached: '本地缓存',
+  },
+  // 能力
+  cap: {
+    text: '文本生成',
+    streaming: '流式输出',
+    tools: '工具调用',
+    vision: '视觉 / 多模态',
+  },
+  // 错误信息
+  err: {
+    conn_refused: '无法连接到模型服务。',
+    auth_failed: '身份验证失败，请检查 API Key。',
+    aborted: '请求已取消。',
+    timeout: '模型服务响应超时。',
+    no_model: '主智能体尚未选择模型。',
+    no_conn: '主智能体尚未配置 API 连接。',
+    no_models_in_conn: '当前 API 连接尚未获取模型列表。',
+    vision_required: 'WorkBuddy 的界面无法直接读取，需要配置支持图片输入的视觉模型。',
+    ext_not_found: '未找到 WorkBuddy 窗口，请先启动 WorkBuddy。',
+  },
+  // Agent 类型
+  agentType: {
+    native: '编码',
+    computer: '电脑操作',
+    external: '外部',
+  },
+};
+
+/** 查找 Tool 的中文名，找不到时返回原始 ID */
+export function toolName(rawId) {
+  return ZH.tool[rawId] || rawId;
+}
+
+/** 查找 Event 的中文名 */
+export function eventName(rawType) {
+  return ZH.event[rawType] || rawType;
+}
+
+/** 查找 Run 状态的中文名 */
+export function runStatus(rawStatus) {
+  return ZH.run[rawStatus] || rawStatus;
+}
+
+/** 查找模型来源的中文名 */
+export function sourceName(src) {
+  return ZH.source[src] || src || '';
+}
+
+/** 终态判断 */
+export function isTerminal(status) {
+  return ['completed', 'failed', 'cancelled', 'timeout', 'interrupted'].includes(status);
+}

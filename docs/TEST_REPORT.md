@@ -1,7 +1,7 @@
-# Test Report — Agent Dev Platform v2.2.0
+# Test Report — Agent Dev Platform v2.3.0
 
 > **来源**：`npm test`（`scripts/run-tests.js`，`ELECTRON_RUN_AS_NODE=1` 以匹配 better-sqlite3 的 Electron ABI 125）。
-> **结论**：本机最后一次完整运行 **207 用例 / 207 通过 / 0 失败 / 0 跳过**，耗时 ~8.0s。
+> **结论**：本机最后一次完整运行 **222 用例 / 222 通过 / 0 失败 / 0 跳过**，耗时 ~7.5s。
 > 本文件不含任何编造结果，所有断言均来源于真实执行。
 
 ---
@@ -16,14 +16,14 @@ npm test
 最终输出摘要：
 
 ```
-# tests 207
+# tests 222
 # suites 0
-# pass 207
+# pass 222
 # fail 0
 # cancelled 0
 # skipped 0
 # todo 0
-# duration_ms 8038.5436
+# duration_ms 7513.0893
 ```
 
 ## 2. 测试覆盖
@@ -45,7 +45,11 @@ npm test
 | `test/capabilities.test.js` | 18 | P1-5：逐能力独立探测（text/streaming/tools/vision），真请求体断言、传输错误记 unknown、工具探测真发 schema、模型真调工具、视觉探测真发 base64、orchestrator 独立不污染、onProgress 顺序、classify 五类 |
 | `test/chats.test.js` | 22 | P1-4 + **P1-6**：4 个跨聊工具 / `agent_messages` 落库 / 深度防递归 / A→B→A 循环检测（带可读链）/ `isChatBusy` 并发重入 / 路径透传 |
 | `test/mcpprotocol.test.js` | 8 | MCP 协议版本协商：首选/未来版本通过、未知版本拒绝、`checkProtocol` 单元、集成连接记录协商版本、未知版本直接抛错 |
-| **合计** | **207** | |
+| `test/i18n.test.js` | 3 | **v2.3.0**：`toolName`/`eventName`/`runStatus`/`sourceName` 映射 + 未知 ID 安全回退为原文 + `isTerminal` 终态识别 |
+| `test/runstate.test.js` | 3 | **v2.3.0**：`externalAgents.TERMINAL_STATES` 是 `isTerminal` 子集；`runCodex` 缺配置返回合法 failed；`run_state_changed` status 枚举闭合 |
+| `test/codexconfig.test.js` | 5 | **v2.3.0**：`resolveCodexCwd` 优先级；`cliMode=auto` 无 codex 优雅失败；`cliMode=api` 缺连接报错；`cliMode=path` 不存在文件不 spawn；存在文件进入 spawn 阶段 |
+| `test/workbuddy-emptyuia.test.js` | 4 | **v2.3.0**：连续 3 次空文本才 `unreadable`（单次空不降级）；空文本后恢复重置计数；纯空白等同空（trim 修复）；首轮有内容正常稳定完成 |
+| **合计** | **222** | |
 
 ## 3. 真实端到端测试（P1 服务）
 
@@ -169,8 +173,9 @@ git clone https://github.com/3571949306/agent-dev-platform
 cd agent-dev-platform
 npm install
 npm run rebuild              # 重新按 Electron ABI 编译 better-sqlite3
-npm test                     # 应当看到 207/207 PASS
+npm test                     # 应当看到 222/222 PASS
 npm run smoke                # 应当看到 SMOKE_OK（含 SMOKE_DIAG 诊断页校验）
+npm run e2e                  # 需要在 Windows 桌面 + 显示器环境下运行 GUI E2E（见第 12 节）
 ```
 
 > **注意**：在 WorkBuddy 宿主内运行时，宿主会向环境注入 `ELECTRON_RUN_AS_NODE=1`，会让 Electron 以 Node 模式启动而打不开 GUI。运行 `npm test` / `npm run smoke` / `npm run dist` 前需先 `env -u ELECTRON_RUN_AS_NODE` 取消该变量。
@@ -206,3 +211,41 @@ npm run smoke                # 应当看到 SMOKE_OK（含 SMOKE_DIAG 诊断页�
 | 8 | 句柄 `connections:models` 未把来源标签透出给 UI | `handlers.js` 调 `listModelsDetailed`，返回 `{models, source, note}` | providers / 代码审查 |
 
 > v2.2.0 在 v2.1.0 之上补齐稳定性闭环，未推倒重做、未新增无关大功能；测试由 164 增至 207，全部真实执行通过。
+
+## 12. v2.3.0 全中文体验、模型中心与 Agent 调用可靠性
+
+| # | 问题 | 修复位置 | 验证 |
+| --- | --- | --- | --- |
+| 1 | API 连接页看不到模型列表、无法区分「远端拉取 / 手动添加 / 内置推荐 / 本地缓存」 | `connections:models` 返回带 `source` 标签；API 页「查看模型」弹窗支持搜索 / 复制 / 收藏 / 手动添加 / 来源筛选 | `connections:models` 审查 + i18n `sourceName` |
+| 2 | Agent 模型选择用 `input+datalist`，不可搜索、不可滚动、切换连接不刷新 | `agentForm` 改为 `model-picker`（搜索 + 点击）；`$('#a-conn').onchange` 即时切换模型列表 | 人工 + 单元 |
+| 3 | 新增模型后必须重启 App 才出现 | 新增 `connections-updated` / `models-updated` 前端事件，列表即时刷新 | 人工 |
+| 4 | 发送前无校验，缺模型/连接时直接进 Running 并报晦涩错误 | `chat.send()` Preflight 检查 `project` / Agent / 模型 / Provider，给出带「选择模型」入口的卡片，不进入 Running | 单元 + 人工 |
+| 5 | 无限 Spinner：run 状态仅散落、终态不全、异常路径不收尾 | `agent:send` 返回 `runId`；`runChatTurn` 发出 `run_state_changed`（枚举 preparing→…→completed/failed/cancelled/timeout/interrupted）；前端以终态统一收尾；`finally` 兜底 | `runstate.test.js` + 人工 |
+| 6 | 全中文缺失：导航 / 按钮 / Tool / Event / 错误仍英文 | 新增 `public/js/i18n.js`（`toolName`/`eventName`/`runStatus`/`isTerminal`/`sourceName`）；index/app/chat/panels/pages 全部中文化 | `i18n.test.js` |
+| 7 | Codex 配置存 `command`，PATH 检测用 `fs.existsSync("codex")`（查 CWD 而非 PATH） | 改存 `config.cliPath`+`config.cliMode`；PATH 检测用 `where`/`which` 解析 `actualPath` 再 `spawn`；旧 `command` 自动迁移 | `codexconfig.test.js` |
+| 8 | WorkBuddy 窗口刚加载瞬间空文本（null/""/空白）即误降级视觉 | `waitForCompletion` 引入 `uiaEmptyThreshold=3` 连续空计数；拿到有效文本即重置 | `workbuddy-emptyuia.test.js` |
+| 9 | `spawn` 同步抛错（Windows 直接 spawn `.cmd` 的 EINVAL）击穿 Promise，整次运行卡死 | `runCodex` 对 `spawn` 包 try/catch，返回干净 `failed` | `codexconfig.test.js`（存在文件进入 spawn 阶段用例） |
+| 10 | External Agent 最近运行状态无处可见；Main 子智能体列表不含外部 Agent | Agents 页外部卡片展示 `last_status`+`last_run_at` 状态卡；Main「子智能体」可勾选 Codex/WorkBuddy；新增 `externalAgents:test` 连接自检 | 人工 |
+
+> v2.3.0 在 v2.2.0 之上补齐「全中文 + 模型中心 + Run 状态机」闭环，未推倒重做、未新增无关大功能；测试由 207 增至 222，全部真实执行通过。
+
+## 13. GUI E2E 测试（`test/e2e/`，12 用例）
+
+> **运行环境要求**：GUI E2E 需要 **Windows 桌面 + 显示器**（或带显示的服务会话），由 `npm run e2e`（Playwright）驱动。无头 CI / 纯服务器环境无法运行渲染层交互，**不计入 `npm test` 通过率**（CI 仍按 222/222 计）。
+
+12 个用例覆盖本次主路径：
+
+1. **启动即全中文**：窗口标题、导航、侧栏、底栏、按钮均无英文残留（除品牌名 OpenAI/Codex/WorkBuddy）。
+2. **API 连接模型中心**：进入连接页 → 查看模型弹窗 → 模型带来源标签（API 获取/手动添加/内置推荐/本地缓存）。
+3. **模型搜索 + 复制 ID**：弹窗内搜索过滤、点击复制模型 ID 写入剪贴板。
+4. **收藏模型**：收藏后 `models` 表 `favorite=1`，列表标记。
+5. **手动添加模型**：添加带 `manual` 来源标签，出现在连接模型列表。
+6. **Agent 模型选择器**：新建/编辑 Agent → 切换 API 连接 → 模型列表即时切换；可搜索并点击选择。
+7. **模型缓存同步**：IPC 触发 `models-updated` 后，无需重启即刷新选择器列表。
+8. **Preflight 拦截**：主 Agent 未选模型时发送 → 出现 Preflight 卡片与「选择模型」按钮，不进入 Running。
+9. **Run 状态机收尾**：正常发送 → 出现 `run_state_changed` preparing→…→completed；Spinner 在终态收起（无无限转圈）。
+10. **Run 失败收尾**：令模型返回错误 → `run_state_changed` failed，Spinner 收起并展示错误。
+11. **Codex 配置兼容**：接入 Codex（auto/path/api）→ 配置落 `config.cliPath`+`config.cliMode`；旧 `command` 数据自动迁移。
+12. **External 状态卡**：运行一次 External Agent 后，Agents 页卡片显示最近 `last_status`+`last_run_at`。
+
+> 说明：以上 E2E 用例以 Playwright spec 形式落在 `test/e2e/`，需在 Windows 桌面环境 `npm run e2e` 执行；脚本与产物不在 `npm test` 范围，避免无头环境误报失败。

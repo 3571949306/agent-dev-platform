@@ -20,6 +20,7 @@ const { McpManager } = require('../services/mcp');
 const { createBrowserTools } = require('../services/browser');
 const { createComputerTools } = require('../services/computer');
 const extAgents = require('../services/externalAgents');
+const { DesktopAgentBridge } = require('../services/desktopBridge');
 const { pickVisionModel } = require('../services/visionReader');
 
 const mcpManager = new McpManager();
@@ -191,6 +192,7 @@ async function sendChatTask({ toConversationId, message, depth = 0, messageId = 
 }
 
 async function runChatTurn(conversationId, agentId, userMessage, opts = {}) {
+  const runId = opts.runId || null;
   const agent = getAgentFull(agentId);
   const conv = store.conversations.get(conversationId);
   const project = conv && conv.project_id ? store.projects.get(conv.project_id) : null;
@@ -198,6 +200,7 @@ async function runChatTurn(conversationId, agentId, userMessage, opts = {}) {
   if (!agent) { emit('error', { conversationId, message: 'Agent 不存在' }); return; }
 
   if (agent.type === 'external') {
+    emit('run_state_changed', { conversationId, runId, status: 'waiting_external_agent', timestamp: Date.now() });
     store.messages.create({ conversation_id: conversationId, role: 'user', content: userMessage });
     emit('assistant_status', { conversationId, status: '调用外部 Agent ' + agent.name });
     // v2.1.0: external runs are now cancellable and stream their state machine
@@ -236,6 +239,15 @@ async function runChatTurn(conversationId, agentId, userMessage, opts = {}) {
     } finally {
       activeRuns.delete(conversationId);
       emit('assistant_status', { conversationId, status: '' }); // never leave the spinner stuck
+      // v2.3.0: emit final run state for external agents
+      if (res && typeof res === 'string') {
+        try {
+          const parsed = JSON.parse(res);
+          if (parsed.status === 'failed' || parsed.status === 'timeout') {
+            emit('run_state_changed', { conversationId, runId, status: parsed.status, message: (parsed.errors || []).join('; ') || parsed.summary, timestamp: Date.now() });
+          }
+        } catch {}
+      }
     }
     store.messages.create({ conversation_id: conversationId, role: 'assistant', content: res, model: agent.name });
     emit('assistant_message', { conversationId, content: res });
@@ -245,6 +257,7 @@ async function runChatTurn(conversationId, agentId, userMessage, opts = {}) {
 
   const ac = new AbortController();
   activeRuns.set(conversationId, ac);
+  emit('run_state_changed', { conversationId, runId, status: 'requesting_model', timestamp: Date.now() });
   const pe = new PermissionEngine({ store, projectId: project?.id || null });
   const deps = {
     store, project, projectRoot, abortSignal: ac.signal,
@@ -319,6 +332,17 @@ function register(window) {
     store.connections.setModels(id, result.models);
     return { models: result.models, source: result.source || 'remote', note: result.note || null };
   });
+  // P0: 手动添加模型
+  reg('connections:addModel', (id, modelId) => {
+    const conn = store.connections.get(id);
+    if (!conn) throw new Error('连接不存在');
+    const models = conn.models || [];
+    if (!models.includes(modelId)) {
+      models.push(modelId);
+      store.connections.setModels(id, models);
+    }
+    return { ok: true, models };
+  });
 
   // P1-5 — Diagnostics: probe each capability separately against the live
   // endpoint and persist the verdict, so the rest of the app can stop guessing.
@@ -369,6 +393,31 @@ function register(window) {
   reg('externalAgents:create', (b) => store.externalAgents.create(b));
   reg('externalAgents:update', (id, b) => store.externalAgents.update(id, b));
   reg('externalAgents:remove', (id) => store.externalAgents.remove(id));
+  // v2.3.0: 轻量级连接自检 —— 只定位窗口并尝试读取一次 UI 文本，不真的发送任务。
+  // 前端「测试 WorkBuddy 桥接」按钮调用。body: { adapter_type, config }
+  reg('externalAgents:test', async (id, body) => {
+    const adapter = (id && id !== 'workbuddy-test') ? store.externalAgents.get(id) : null;
+    const adapterType = adapter ? adapter.adapter_type : ((body && body.adapter_type) || 'workbuddy');
+    if (adapterType !== 'workbuddy') return { ok: false, error: '仅 WorkBuddy 桥接支持连接测试。' };
+    const cfg = adapter ? (adapter.config || {}) : ((body && body.config) || {});
+    if (!computer.manager) return { ok: false, error: 'Computer 运行时不可用。' };
+    const bridge = new DesktopAgentBridge({
+      computer: computer.manager,
+      config: { windowMatch: /workbuddy/i, windowTitle: (cfg && cfg.windowTitle) || 'WorkBuddy', ...(cfg || {}) }
+    });
+    const started = Date.now();
+    const loc = await bridge.locateWindow();
+    if (!loc.ok) return { ok: false, error: loc.error, elapsed: ((Date.now() - started) / 1000).toFixed(1) };
+    const title = loc.window.title;
+    let readVia = 'Windows UI 自动化';
+    try {
+      const text = await bridge.readWindowText(title);
+      if (text == null || (typeof text === 'string' && text.trim() === '')) {
+        readVia = '窗口未暴露 UI 文本（可开启视觉降级）';
+      }
+    } catch { readVia = '窗口未暴露 UI 文本（可开启视觉降级）'; }
+    return { ok: true, readVia, window: title, elapsed: ((Date.now() - started) / 1000).toFixed(1) };
+  });
 
   // conversations
   reg('conversations:list', (projectId) => store.conversations.list(projectId));
@@ -515,12 +564,30 @@ function register(window) {
 
   // agent runtime
   ipcMain.handle('agent:send', (_e, { conversationId, agentId, message }) => {
-    runChatTurn(conversationId, agentId, message).catch(err => emit('error', { conversationId, message: err.message }));
-    return { accepted: true };
+  // v2.3.0: agent:send now returns a runId and emits run_state_changed events
+  // so the renderer can track the Run lifecycle instead of guessing from scattered events.
+  const runId = crypto.randomUUID();
+  emit('run_state_changed', { conversationId, runId, status: 'preparing', stage: 'preparing', timestamp: Date.now() });
+  runChatTurn(conversationId, agentId, message, { runId })
+    .then(() => {
+      emit('run_state_changed', { conversationId, runId, status: 'completed', timestamp: Date.now() });
+      emit('run_completed', { conversationId, runId, timestamp: Date.now() });
+    })
+    .catch(err => {
+      emit('error', { conversationId, message: err.message });
+      emit('run_state_changed', { conversationId, runId, status: 'failed', message: err.message, timestamp: Date.now() });
+      emit('run_failed', { conversationId, runId, message: err.message, timestamp: Date.now() });
+    });
+  return { accepted: true, runId, conversationId, status: 'preparing' };
   });
   ipcMain.handle('agent:stop', (_e, { conversationId }) => {
     const ac = activeRuns.get(conversationId);
-    if (ac) { ac.abort(); activeRuns.delete(conversationId); }
+    if (ac) {
+      ac.abort();
+      activeRuns.delete(conversationId);
+      emit('run_state_changed', { conversationId, status: 'cancelled', timestamp: Date.now() });
+      emit('run_cancelled', { conversationId, timestamp: Date.now() });
+    }
     return { stopped: !!ac };
   });
   ipcMain.handle('agent:permission-response', (_e, { reqId, decision, range }) => {

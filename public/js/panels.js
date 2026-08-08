@@ -2,6 +2,7 @@
 import { api } from './api.js';
 import { state } from './state.js';
 import { $, $$, esc, h, renderDiff, fmtTime, truncate, toast, prettyJson } from './util.js';
+import { eventName, ZH } from './i18n.js';
 
 let activeConv = null;
 const problems = [];
@@ -160,7 +161,7 @@ export async function refreshTasks() {
   renderRightTasks();
 }
 function statusChip(s) {
-  const map = { running: ['运行中', 'run'], completed: ['完成', 'ok'], failed: ['失败', 'bad'], cancelled: ['已停止', 'warn'], max_steps: ['达上限', 'warn'], queued: ['排队', ''], stopped: ['已中止', 'warn'] };
+  const map = { running: ['运行中', 'run'], completed: ['已完成', 'ok'], failed: ['失败', 'bad'], cancelled: ['已取消', 'warn'], max_steps: ['达上限', 'warn'], queued: ['排队中', ''], stopped: ['已中止', 'warn'] };
   const [txt, cls] = map[s] || [s, ''];
   return `<span class="chip ${cls}">${esc(txt)}</span>`;
 }
@@ -236,7 +237,7 @@ function renderLogs() {
   if (!pane) return;
   if (!state.logs.length) { pane.innerHTML = `<div class="empty">暂无事件</div>`; return; }
   pane.innerHTML = `<div class="logs">${state.logs.slice(0, 200).map(l =>
-    `<div class="log"><span class="lt">${esc(l.t.slice(11, 19))}</span><span class="lty">${esc(l.type)}</span><span class="lp">${esc(truncate(JSON.stringify(l.payload), 200))}</span></div>`).join('')}</div>`;
+    `<div class="log"><span class="lt">${esc(l.t.slice(11, 19))}</span><span class="lty">${esc(eventName(l.type))}</span><span class="lp">${esc(truncate(JSON.stringify(l.payload), 200))}</span></div>`).join('')}</div>`;
 }
 
 /* ---------------- Usage ---------------- */

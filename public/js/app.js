@@ -2,6 +2,7 @@
 import { api, onEvent } from './api.js';
 import { state } from './state.js';
 import { $, $$, esc, toast, openModal, closeModal, onModalOk, confirmBox, fmtTime } from './util.js';
+import { ZH } from './i18n.js';
 import * as chat from './chat.js';
 import * as panels from './panels.js';
 import * as files from './files.js';
@@ -149,6 +150,18 @@ async function refreshAgents() {
   if (!state.agentId || !state.agents.find(a => a.id === state.agentId)) state.agentId = main.id;
   sel.innerHTML = state.agents.map(a => `<option value="${a.id}" ${a.id === state.agentId ? 'selected' : ''}>${esc(a.name)}${a.is_main ? '（主）' : ''}${a.type === 'external' ? '（外部）' : ''}</option>`).join('');
   await renderModelSelect();
+
+  // 监听 connections-updated 事件，实时刷新模型列表
+  window.addEventListener('connections-updated', async () => {
+    state.connections = await api.connections();
+    await renderModelSelect();
+    if (pages.refreshIfOpen) pages.refreshIfOpen();
+  });
+  window.addEventListener('models-updated', async (e) => {
+    state.connections = await api.connections();
+    await renderModelSelect();
+    if (pages.refreshIfOpen) pages.refreshIfOpen();
+  });
 }
 
 async function renderModelSelect() {
@@ -157,24 +170,40 @@ async function renderModelSelect() {
   if (!a || a.type === 'external') { sel.innerHTML = `<option>—</option>`; sel.disabled = true; return; }
   sel.disabled = false;
   let models = [];
+  let connName = '';
   try {
     const conns = state.connections.length ? state.connections : (state.connections = await api.connections());
     const c = conns.find(x => x.id === a.api_connection_id);
+    connName = c ? c.name : '';
     models = (c && c.models) || [];
   } catch {}
   if (a.model && !models.includes(a.model)) models = [a.model, ...models];
   if (!models.length) models = [a.model || '未设置模型'];
   sel.innerHTML = models.map(m => `<option value="${esc(m)}" ${m === a.model ? 'selected' : ''}>${esc(m)}</option>`).join('');
+  // 更新 composer-hint 显示当前模型信息
+  const hint = $('#composer-hint');
+  if (hint) {
+    if (a.model && a.model !== '未设置模型') {
+      hint.textContent = `${a.name} · ${a.model} · ${connName || '未连接'}`;
+      hint.className = 'hint';
+    } else {
+      hint.textContent = `${a.name} · 尚未选择模型`;
+      hint.className = 'hint warn-text';
+    }
+  }
 }
 
 function renderAgentsPanel() {
   const box = $('#agents-list');
-  if (!state.agents.length) { box.innerHTML = `<div class="empty small">还没有 Agent</div>`; return; }
-  box.innerHTML = state.agents.slice(0, 10).map(a => `
-    <div class="ra ${a.id === state.agentId ? 'active' : ''}" data-a="${a.id}">
+  if (!state.agents.length) { box.innerHTML = `<div class="empty small">还没有智能体</div>`; return; }
+  box.innerHTML = state.agents.slice(0, 10).map(a => {
+    const typeLabel = a.type === 'external' ? '外部' : (a.type === 'computer' ? '电脑操作' : '编码');
+    const modelInfo = a.type === 'external' ? '' : (a.model ? ` · ${esc(a.model)}` : ' · 未设置模型');
+    return `<div class="ra ${a.id === state.agentId ? 'active' : ''}" data-a="${a.id}">
       <div class="ra-name">${esc(a.name)}</div>
-      <div class="ra-sub">${a.is_main ? '主 Agent · ' : ''}${a.type === 'external' ? '外部' : (a.type === 'computer' ? '电脑操作' : '编码')} · ${(a.tools || []).length} 工具</div>
-    </div>`).join('');
+      <div class="ra-sub">${a.is_main ? '主智能体 · ' : ''}${typeLabel} · ${(a.tools || []).length} 工具${modelInfo}</div>
+    </div>`;
+  }).join('');
   box.querySelectorAll('.ra').forEach(n => n.onclick = () => {
     state.agentId = n.dataset.a;
     $('#agent-select').value = n.dataset.a;

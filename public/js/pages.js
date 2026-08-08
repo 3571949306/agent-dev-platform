@@ -2,6 +2,15 @@
 import { api } from './api.js';
 import { state } from './state.js';
 import { $, $$, esc, h, toast, fmtTime, truncate, confirmBox, openModal, closeModal, onModalOk, prettyJson } from './util.js';
+import { ZH, sourceName } from './i18n.js';
+
+// v2.3.0: External Agent 状态卡 —— 把最近一次运行结果展示在列表卡片上
+function extStatusBase(s) { return String(s || '').split(':')[0].trim(); }
+function extStatusText(s) { return ZH.run[extStatusBase(s)] || extStatusBase(s) || '未知'; }
+function extStatusClass(s) {
+  const b = extStatusBase(s);
+  return b === 'completed' ? 'ok' : (b === 'failed' || b === 'timeout' ? 'bad' : '');
+}
 
 const PROVIDERS = [
   ['openai', 'OpenAI 兼容 /chat/completions'],
@@ -261,6 +270,7 @@ async function renderDashboard(body) {
 /* ------------------------------------------------------------------ */
 async function renderConnections(body) {
   const list = await api.connections();
+  state.connections = list;
   body.innerHTML = `
     <div class="page-actions"><button class="btn primary" id="conn-add">+ 新建连接</button>
       <span class="muted">API Key 使用 Windows DPAPI（safeStorage）加密后存入本地数据库，界面只显示掩码。</span></div>
@@ -273,8 +283,9 @@ async function renderConnections(body) {
         <td>${c.tested ? '<span class="chip ok">已连通</span>' : (c.last_error ? `<span class="chip bad" title="${esc(c.last_error)}">失败</span>` : '<span class="chip">未测试</span>')}</td>
         <td>${(c.models || []).length}</td>
         <td class="right">
-          <button class="btn tiny" data-test="${c.id}">测试</button>
           <button class="btn tiny" data-models="${c.id}">拉取模型</button>
+          <button class="btn tiny" data-view="${c.id}">查看模型</button>
+          <button class="btn tiny" data-test="${c.id}">测试</button>
           <button class="btn tiny" data-edit="${c.id}">编辑</button>
           <button class="btn tiny danger" data-del="${c.id}">删除</button>
         </td></tr>`).join('')}
@@ -283,7 +294,7 @@ async function renderConnections(body) {
   $('#conn-add').onclick = () => connForm(null);
   body.querySelectorAll('[data-edit]').forEach(b => b.onclick = () => connForm(list.find(c => c.id === b.dataset.edit)));
   body.querySelectorAll('[data-del]').forEach(b => b.onclick = async () => {
-    if (!await confirmBox('删除连接', '删除后使用该连接的 Agent 将无法运行，确定？')) return;
+    if (!await confirmBox('删除连接', '删除后使用该连接的智能体将无法运行，确定？')) return;
     await api.connRemove(b.dataset.del); toast('已删除'); open('connections');
   });
   body.querySelectorAll('[data-test]').forEach(b => b.onclick = async () => {
@@ -294,10 +305,143 @@ async function renderConnections(body) {
   });
   body.querySelectorAll('[data-models]').forEach(b => b.onclick = async () => {
     b.textContent = '拉取中…'; b.disabled = true;
-    try { const r = await api.connModels(b.dataset.models); toast(`拉取到 ${r.models.length} 个模型`, 'ok'); }
-    catch (e) { toast(e.message, 'error'); }
+    try {
+      const r = await api.connModels(b.dataset.models);
+      toast(`已成功获取 ${r.models.length} 个模型`, 'ok');
+      // 触发全局刷新
+      window.dispatchEvent(new CustomEvent('models-updated', { detail: { connectionId: b.dataset.models } }));
+    } catch (e) { toast(e.message, 'error'); }
     open('connections');
   });
+  body.querySelectorAll('[data-view]').forEach(b => b.onclick = () => modelManager(list.find(c => c.id === b.dataset.view)));
+}
+
+/** 模型管理弹窗 — P0: 查看模型列表、搜索、复制、手动添加、来源标签 */
+function modelManager(conn) {
+  if (!conn) return;
+  let models = conn.models || [];
+  let modelSource = conn.model_source || 'remote';
+  let modelNote = conn.model_note || '';
+  let filter = 'all';
+  let search = '';
+  let favorites = new Set(); // 可以从 localStorage 恢复
+
+  // 从 localStorage 恢复收藏
+  try {
+    const saved = JSON.parse(localStorage.getItem('model-favorites') || '{}');
+    if (saved[conn.id]) favorites = new Set(saved[conn.id]);
+  } catch {}
+
+  function saveFavorites() {
+    try {
+      const all = JSON.parse(localStorage.getItem('model-favorites') || '{}');
+      all[conn.id] = [...favorites];
+      localStorage.setItem('model-favorites', JSON.stringify(all));
+    } catch {}
+  }
+
+  function renderModelList() {
+    const box = $('#mm-list');
+    if (!box) return;
+    let filtered = models;
+    if (search) filtered = filtered.filter(m => m.toLowerCase().includes(search.toLowerCase()));
+    if (filter === 'fav') filtered = filtered.filter(m => favorites.has(m));
+
+    if (!filtered.length) {
+      box.innerHTML = `<div class="empty">没有匹配的模型</div>`;
+      return;
+    }
+
+    box.innerHTML = filtered.map(m => {
+      const isFav = favorites.has(m);
+      return `<div class="mm-item">
+        <div class="mm-name mono">${esc(m)}</div>
+        <div class="mm-source"><span class="chip">${esc(sourceName(modelSource))}</span></div>
+        <div class="mm-actions">
+          <button class="btn tiny" data-copy="${esc(m)}" title="复制模型 ID">复制</button>
+          <button class="btn tiny ${isFav ? 'fav-active' : ''}" data-fav="${esc(m)}" title="${isFav ? '取消收藏' : '收藏'}">${isFav ? '★' : '☆'}</button>
+        </div>
+      </div>`;
+    }).join('');
+
+    box.querySelectorAll('[data-copy]').forEach(b => b.onclick = () => {
+      navigator.clipboard.writeText(b.dataset.copy).then(() => toast('已复制：' + b.dataset.copy, 'ok')).catch(() => toast('复制失败', 'error'));
+    });
+    box.querySelectorAll('[data-fav]').forEach(b => b.onclick = () => {
+      const m = b.dataset.fav;
+      if (favorites.has(m)) { favorites.delete(m); b.textContent = '☆'; b.classList.remove('fav-active'); }
+      else { favorites.add(m); b.textContent = '★'; b.classList.add('fav-active'); }
+      saveFavorites();
+    });
+  }
+
+  const noteHtml = modelSource === 'preset' ?
+    `<div class="warn-box">未能从服务端获得完整模型列表，以下为内置推荐模型，可能不是当前账号全部可用模型。</div>` : '';
+
+  openModal(`模型管理 — ${conn.name}`, `
+    <div class="mm-info">
+      <span>已获取模型：<b>${models.length}</b> 个</span>
+      <span>来源：<b>${esc(sourceName(modelSource))}</b></span>
+      ${conn.last_model_fetch ? `<span class="muted">最近更新：${esc(fmtTime(conn.last_model_fetch))}</span>` : ''}
+    </div>
+    ${noteHtml}
+    <div class="mm-toolbar">
+      <input id="mm-search" placeholder="搜索模型" autocomplete="off">
+      <div class="mm-filter">
+        <button class="btn tiny ${filter === 'all' ? 'active' : ''}" data-filter="all">全部</button>
+        <button class="btn tiny ${filter === 'fav' ? 'active' : ''}" data-filter="fav">收藏</button>
+      </div>
+      <button class="btn tiny" id="mm-refresh">刷新模型</button>
+      <button class="btn tiny" id="mm-add">+ 手动添加</button>
+    </div>
+    <div id="mm-list" class="mm-list"></div>
+  `, { noFooter: true });
+
+  $('#mm-search').oninput = (e) => { search = e.target.value; renderModelList(); };
+  $$('.mm-filter button').forEach(b => b.onclick = () => {
+    filter = b.dataset.filter;
+    $$('.mm-filter button').forEach(x => x.classList.remove('active'));
+    b.classList.add('active');
+    renderModelList();
+  });
+  $('#mm-refresh').onclick = async () => {
+    const btn = $('#mm-refresh');
+    btn.textContent = '获取中…'; btn.disabled = true;
+    try {
+      const r = await api.connModels(conn.id);
+      models = r.models;
+      modelSource = r.source || 'remote';
+      modelNote = r.note || '';
+      toast(`已成功获取 ${models.length} 个模型`, 'ok');
+      // 更新弹窗内的信息
+      open('connections'); // 刷新底层
+      modelManager({ ...conn, models, model_source: modelSource, model_note: modelNote });
+      window.dispatchEvent(new CustomEvent('models-updated', { detail: { connectionId: conn.id } }));
+    } catch (e) { toast(e.message, 'error'); btn.textContent = '刷新模型'; btn.disabled = false; }
+  };
+  $('#mm-add').onclick = () => {
+    openModal('手动添加模型', `
+      <label>模型 ID<input id="mm-add-input" placeholder="例如：gpt-4o-2024-08-06"></label>
+      <div class="muted small">手动添加的模型将标记为「手动添加」来源。</div>
+    `, { okText: '添加' });
+    onModalOk(async () => {
+      const m = $('#mm-add-input').value.trim();
+      if (!m) { toast('请输入模型 ID', 'warn'); return; }
+      if (models.includes(m)) { toast('该模型已存在', 'warn'); return; }
+      models.push(m);
+      // 通过 IPC 保存
+      try {
+        await window.api.invoke('connections:addModel', conn.id, m);
+        toast('已添加模型：' + m, 'ok');
+        closeModal();
+        // 重新渲染
+        modelManager({ ...conn, models });
+        window.dispatchEvent(new CustomEvent('models-updated', { detail: { connectionId: conn.id } }));
+      } catch (e) { toast(e.message, 'error'); }
+    });
+  };
+
+  renderModelList();
 }
 
 function connForm(conn) {
@@ -333,41 +477,42 @@ async function renderAgents(body) {
   const native = agents.filter(a => a.type !== 'external');
   body.innerHTML = `
     <div class="page-actions">
-      <button class="btn primary" id="agent-add">+ 新建 Agent</button>
-      <button class="btn" id="ext-add">+ 接入外部 Agent</button>
+      <button class="btn primary" id="agent-add">+ 新建智能体</button>
+      <button class="btn" id="ext-add">+ 接入外部智能体</button>
     </div>
-    <h3>本地 Agent</h3>
+    <h3>本地智能体</h3>
     <div class="cards">${native.map(a => `
       <div class="acard">
-        <div class="acard-h"><b>${esc(a.name)}</b>${a.is_main ? '<span class="chip ok">主 Agent</span>' : ''}${a.type === 'computer' ? '<span class="chip">电脑操作</span>' : ''}</div>
+        <div class="acard-h"><b>${esc(a.name)}</b>${a.is_main ? '<span class="chip ok">主智能体</span>' : ''}${a.type === 'computer' ? '<span class="chip">电脑操作</span>' : ''}</div>
         <div class="muted small">${esc(truncate(a.description || '', 120))}</div>
         <div class="acard-meta">
           <span>模型：${esc(a.model || '未设置')}</span>
           <span>工具：${(a.tools || []).length}</span>
           <span>最大步数：${a.max_steps}</span>
-          <span>子 Agent：${(a.sub_agent_ids || []).length}</span>
+          <span>子智能体：${(a.sub_agent_ids || []).length}</span>
         </div>
         <div class="acard-f"><button class="btn tiny" data-ae="${a.id}">编辑</button><button class="btn tiny danger" data-ad="${a.id}">删除</button></div>
-      </div>`).join('') || '<div class="empty">还没有 Agent</div>'}</div>
-    <h3>外部 Agent（Codex / WorkBuddy Desktop / HTTP）</h3>
+      </div>`).join('') || '<div class="empty">还没有智能体</div>'}</div>
+    <h3>外部智能体（Codex / WorkBuddy / HTTP）</h3>
     <div class="cards">${ext.map(a => `
       <div class="acard">
-        <div class="acard-h"><b>${esc(a.name)}</b><span class="chip">${esc(a.adapter_type)}</span></div>
+        <div class="acard-h"><b>${esc(a.name)}</b><span class="chip">${esc(a.adapter_type)}</span>${a.online ? '<span class="chip ok">在线</span>' : ''}</div>
         <div class="muted small">${esc(truncate(a.description || '', 120))}</div>
-        <div class="acard-meta"><span class="mono small">${esc(a.command || a.endpoint || '')}</span></div>
+        <div class="acard-meta"><span class="mono small">${esc(a.command || a.endpoint || (a.config && a.config.cliPath) || '')}</span></div>
+        ${a.last_status ? `<div class="acard-meta"><span class="chip ${extStatusClass(a.last_status)}">${esc(extStatusText(a.last_status))}</span>${a.last_run_at ? `<span class="muted small">${esc(fmtTime(a.last_run_at))}</span>` : ''}</div>` : ''}
         <div class="acard-f"><button class="btn tiny" data-ee="${a.id}">编辑</button><button class="btn tiny danger" data-ed="${a.id}">删除</button></div>
-      </div>`).join('') || '<div class="empty">没有外部 Agent</div>'}</div>`;
+      </div>`).join('') || '<div class="empty">没有外部智能体</div>'}</div>`;
 
-  $('#agent-add').onclick = () => agentForm(null, { conns, prompts, tools, agents: native });
+  $('#agent-add').onclick = () => agentForm(null, { conns, prompts, tools, agents: native, extAgents: ext });
   $('#ext-add').onclick = () => extForm(null, conns);
-  body.querySelectorAll('[data-ae]').forEach(b => b.onclick = () => agentForm(native.find(a => a.id === b.dataset.ae), { conns, prompts, tools, agents: native }));
+  body.querySelectorAll('[data-ae]').forEach(b => b.onclick = () => agentForm(native.find(a => a.id === b.dataset.ae), { conns, prompts, tools, agents: native, extAgents: ext }));
   body.querySelectorAll('[data-ad]').forEach(b => b.onclick = async () => {
-    if (!await confirmBox('删除 Agent', '确定删除该 Agent？')) return;
+    if (!await confirmBox('删除智能体', '确定删除该智能体？')) return;
     await api.agentRemove(b.dataset.ad); toast('已删除'); open('agents');
   });
   body.querySelectorAll('[data-ee]').forEach(b => b.onclick = () => extForm(ext.find(a => a.id === b.dataset.ee), conns));
   body.querySelectorAll('[data-ed]').forEach(b => b.onclick = async () => {
-    if (!await confirmBox('删除外部 Agent', '确定删除？')) return;
+    if (!await confirmBox('删除外部智能体', '确定删除？')) return;
     await api.extRemove(b.dataset.ed); toast('已删除'); open('agents');
   });
 }
@@ -377,38 +522,92 @@ function agentForm(agent, ctx) {
   const conn = ctx.conns.find(c => c.id === a.api_connection_id);
   const models = conn ? (conn.models || []) : [];
   const toolNames = [...new Set(ctx.tools.map(t => t.name))].sort();
-  openModal(agent ? '编辑 Agent' : '新建 Agent', `
+  // 获取外部 Agent 列表，允许作为子智能体
+  const extAgentsList = ctx.extAgents || [];
+  openModal(agent ? '编辑智能体' : '新建智能体', `
     <div class="form2">
       <label>名称<input id="a-name" value="${esc(a.name)}"></label>
       <label>类型<select id="a-type"><option value="native" ${a.type !== 'computer' ? 'selected' : ''}>普通（编码）</option><option value="computer" ${a.type === 'computer' ? 'selected' : ''}>电脑操作</option></select></label>
       <label>API 连接<select id="a-conn"><option value="">未选择</option>${ctx.conns.map(c => `<option value="${c.id}" ${c.id === a.api_connection_id ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select></label>
-      <label>模型<input id="a-model" list="a-models" value="${esc(a.model || '')}" placeholder="gpt-4o-mini"><datalist id="a-models">${models.map(m => `<option value="${esc(m)}">`).join('')}</datalist></label>
+      <label>模型
+        <div class="model-picker" id="a-model-picker">
+          <input id="a-model" value="${esc(a.model || '')}" placeholder="点击选择或输入模型 ID" autocomplete="off">
+          <div class="model-dropdown hidden" id="a-model-dropdown"></div>
+        </div>
+      </label>
       <label>系统提示词<select id="a-prompt"><option value="">（用下面的描述）</option>${ctx.prompts.map(p => `<option value="${p.id}" ${p.id === a.system_prompt_id ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select></label>
       <label>最大步数<input id="a-steps" type="number" min="1" max="200" value="${a.max_steps ?? 40}"></label>
       <label>temperature<input id="a-temp" type="number" step="0.1" min="0" max="2" value="${a.temperature ?? 0.7}"></label>
       <label>max_tokens<input id="a-maxtok" type="number" min="256" max="128000" value="${a.max_tokens ?? 4096}"></label>
     </div>
     <label>描述 / 角色设定<textarea id="a-desc" rows="3">${esc(a.description || '')}</textarea></label>
-    <label class="ck"><input type="checkbox" id="a-main" ${a.is_main ? 'checked' : ''}> 设为主 Agent（新对话默认使用）</label>
+    <label class="ck"><input type="checkbox" id="a-main" ${a.is_main ? 'checked' : ''}> 设为主智能体（新对话默认使用）</label>
     <details open><summary>工具（${toolNames.length}）</summary>
       <div class="chkgrid">${toolNames.map(n => `<label class="ck"><input type="checkbox" class="a-tool" value="${esc(n)}" ${(a.tools || []).includes(n) ? 'checked' : ''}> ${esc(n)}</label>`).join('')}</div>
       <div class="row"><button class="btn tiny" id="a-tool-all">全选</button><button class="btn tiny" id="a-tool-none">全不选</button></div>
     </details>
-    <details><summary>子 Agent</summary>
+    <details><summary>子智能体</summary>
+      <div class="muted small">本地智能体：</div>
       <div class="chkgrid">${ctx.agents.filter(x => x.id !== a.id).map(x => `<label class="ck"><input type="checkbox" class="a-sub" value="${x.id}" ${(a.sub_agent_ids || []).includes(x.id) ? 'checked' : ''}> ${esc(x.name)}</label>`).join('') || '<span class="muted">无</span>'}</div>
+      ${extAgentsList.length ? `<div class="muted small" style="margin-top:8px">外部智能体：</div><div class="chkgrid">${extAgentsList.map(x => `<label class="ck"><input type="checkbox" class="a-sub-ext" value="${x.id}" ${(a.sub_agent_ids || []).includes(x.id) ? 'checked' : ''}> ${esc(x.name)}（${esc(x.adapter_type)}）</label>`).join('')}</div>` : ''}
     </details>
   `, { okText: '保存' });
 
   $('#a-tool-all').onclick = () => $$('.a-tool').forEach(c => c.checked = true);
   $('#a-tool-none').onclick = () => $$('.a-tool').forEach(c => c.checked = false);
+
+  // 模型选择器 — 替代 datalist
+  const modelInput = $('#a-model');
+  const modelDropdown = $('#a-model-dropdown');
+  let currentModels = models;
+
+  function renderModelDropdown(filter = '') {
+    const filtered = filter
+      ? currentModels.filter(m => m.toLowerCase().includes(filter.toLowerCase()))
+      : currentModels;
+
+    if (!filtered.length) {
+      modelDropdown.innerHTML = `<div class="mm-empty">${currentModels.length ? '没有匹配的模型' : '当前连接尚未获取模型。'} ${currentModels.length ? '' : '<button class="btn tiny" id="a-fetch-models">立即获取模型</button>'}</div>`;
+      const fetchBtn = $('#a-fetch-models');
+      if (fetchBtn) fetchBtn.onclick = async () => {
+        const connId = $('#a-conn').value;
+        if (!connId) return;
+        try { const r = await api.connModels(connId); toast(`已获取 ${r.models.length} 个模型`, 'ok'); currentModels = r.models; renderModelDropdown(filter); window.dispatchEvent(new CustomEvent('models-updated')); } catch (e) { toast(e.message, 'error'); }
+      };
+      return;
+    }
+
+    modelDropdown.innerHTML = filtered.slice(0, 100).map(m => `<div class="mm-option" data-model="${esc(m)}">${esc(m)}</div>`).join('');
+    modelDropdown.querySelectorAll('.mm-option').forEach(opt => opt.onclick = () => {
+      modelInput.value = opt.dataset.model;
+      modelDropdown.classList.add('hidden');
+    });
+  }
+
+  modelInput.onfocus = () => {
+    if (!currentModels.length && $('#a-conn').value) {
+      // 无模型时提示获取
+    }
+    renderModelDropdown(modelInput.value);
+    modelDropdown.classList.remove('hidden');
+  };
+  modelInput.oninput = () => renderModelDropdown(modelInput.value);
+  modelInput.onblur = () => setTimeout(() => modelDropdown.classList.add('hidden'), 200);
+
   $('#a-conn').onchange = async () => {
     const c = ctx.conns.find(x => x.id === $('#a-conn').value);
-    $('#a-models').innerHTML = (c ? c.models || [] : []).map(m => `<option value="${esc(m)}">`).join('');
+    currentModels = c ? (c.models || []) : [];
+    modelInput.value = '';
+    // 如果该连接没有模型，尝试提示获取
+    if (c && !currentModels.length) {
+      renderModelDropdown('');
+      modelDropdown.classList.remove('hidden');
+    }
   };
 
   onModalOk(async () => {
     const payload = {
-      name: $('#a-name').value.trim() || '新 Agent',
+      name: $('#a-name').value.trim() || '新智能体',
       type: $('#a-type').value,
       description: $('#a-desc').value,
       api_connection_id: $('#a-conn').value || null,
@@ -420,7 +619,7 @@ function agentForm(agent, ctx) {
       max_tokens: Number($('#a-maxtok').value) || 4096,
       is_main: $('#a-main').checked,
       tools: $$('.a-tool').filter(c => c.checked).map(c => c.value),
-      sub_agent_ids: $$('.a-sub').filter(c => c.checked).map(c => c.value)
+      sub_agent_ids: [...$$('.a-sub').filter(c => c.checked).map(c => c.value), ...$$('.a-sub-ext').filter(c => c.checked).map(c => c.value)]
     };
     try {
       if (agent) await api.agentUpdate(agent.id, payload); else await api.agentCreate(payload);
@@ -432,30 +631,152 @@ function agentForm(agent, ctx) {
 
 function extForm(agent, conns) {
   const a = agent || { name: '', description: '', adapter_type: 'codex', command: '', endpoint: '', config: {} };
-  openModal(agent ? '编辑外部 Agent' : '接入外部 Agent', `
+  const cfg = a.config || {};
+  // 旧数据迁移：如果 command 有值但 config.cliPath 为空，自动迁移
+  const cliPath = cfg.cliPath || a.command || '';
+  const cliMode = cfg.cliMode || (cliPath ? 'path' : 'auto');
+  openModal(agent ? '编辑外部智能体' : '接入外部智能体', `
     <label>名称<input id="e-name" value="${esc(a.name)}"></label>
     <label>适配器
       <select id="e-type">
         <option value="codex" ${a.adapter_type === 'codex' ? 'selected' : ''}>Codex CLI / OpenAI 兼容</option>
-        <option value="workbuddy" ${a.adapter_type === 'workbuddy' ? 'selected' : ''}>WorkBuddy Desktop 桥接（窗口自动化）</option>
+        <option value="workbuddy" ${a.adapter_type === 'workbuddy' ? 'selected' : ''}>WorkBuddy 桥接（窗口自动化）</option>
         <option value="http" ${a.adapter_type === 'http' ? 'selected' : ''}>HTTP 端点</option>
       </select></label>
-    <label>可执行命令（codex 适配器用，如 codex）<input id="e-cmd" value="${esc(a.command || '')}"></label>
+
+    <div id="e-codex-section" ${a.adapter_type !== 'codex' ? 'class="hidden"' : ''}>
+      <label>调用方式
+        <select id="e-cli-mode">
+          <option value="auto" ${cliMode === 'auto' ? 'selected' : ''}>自动检测 Codex CLI</option>
+          <option value="path" ${cliMode === 'path' ? 'selected' : ''}>指定 Codex CLI 路径</option>
+          <option value="api" ${cliMode === 'api' ? 'selected' : ''}>API 模式（通过 API 连接调用）</option>
+        </select></label>
+      <label id="e-cliPath-label">Codex CLI 路径<input id="e-cliPath" value="${esc(cliPath)}" placeholder="codex 或 C:\\...\\codex.exe"></label>
+      <div id="e-api-section" class="${cliMode === 'api' ? '' : 'hidden'}">
+        <label>API 连接<select id="e-conn"><option value="">不使用</option>${conns.map(c => `<option value="${c.id}" ${cfg.connectionId === c.id ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select></label>
+        <label>模型
+          <div class="model-picker" id="e-model-picker">
+            <input id="e-model" value="${esc(cfg.model || '')}" placeholder="点击选择模型" autocomplete="off">
+            <div class="model-dropdown hidden" id="e-model-dropdown"></div>
+          </div>
+        </label>
+      </div>
+    </div>
+
+    <div id="e-workbuddy-section" ${a.adapter_type !== 'workbuddy' ? 'class="hidden"' : ''}>
+      <label>窗口标题<input id="e-wb-title" value="${esc(cfg.windowTitle || 'WorkBuddy')}" placeholder="WorkBuddy"></label>
+      <label class="ck"><input type="checkbox" id="e-wb-vision" ${cfg.visionFallback !== false ? 'checked' : ''}> 视觉降级（UIA 读不到时自动截图+视觉模型）</label>
+      <label>超时时间（秒）<input id="e-wb-timeout" type="number" min="30" max="600" value="${cfg.timeoutSec || 180}"></label>
+      <details><summary>高级设置</summary>
+        <label>Input AutomationId<input id="e-wb-input" value="${esc(cfg.inputAutomationId || '')}" placeholder="（留空自动检测）"></label>
+        <label>Output AutomationId<input id="e-wb-output" value="${esc(cfg.outputAutomationId || '')}" placeholder="（留空自动检测）"></label>
+        <label>Submit AutomationId<input id="e-wb-submit" value="${esc(cfg.submitAutomationId || '')}" placeholder="（留空自动检测）"></label>
+        <label>Submit Keys<input id="e-wb-keys" value="${esc(cfg.submitKeys || '')}" placeholder="（留空使用回车）"></label>
+        <label>轮询间隔（毫秒）<input id="e-wb-poll" type="number" min="500" max="10000" value="${cfg.pollIntervalMs || 1200}"></label>
+      </details>
+      <div class="row"><button class="btn" id="e-wb-test">测试 WorkBuddy 桥接</button></div>
+      <div id="e-wb-test-result"></div>
+    </div>
+
     <label>HTTP 端点（http 适配器用）<input id="e-ep" value="${esc(a.endpoint || '')}" placeholder="http://127.0.0.1:8080/run"></label>
-    <label>绑定 API 连接（codex 走 OpenAI 兼容时用）
-      <select id="e-conn"><option value="">不使用</option>${conns.map(c => `<option value="${c.id}" ${(a.config || {}).connectionId === c.id ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select></label>
     <label>说明<textarea id="e-desc" rows="2">${esc(a.description || '')}</textarea></label>
-    <div class="warn-box">外部 Agent 通过命令行或窗口自动化调用，不会读取或转发你的 API 密钥；桥接不会递归调用本应用自身。</div>
+    <div class="warn-box">外部智能体通过命令行或窗口自动化调用，不会读取或转发你的 API 密钥；桥接不会递归调用本应用自身。</div>
   `, { okText: '保存' });
+
+  // 适配器切换
+  $('#e-type').onchange = (e) => {
+    const v = e.target.value;
+    $('#e-codex-section').classList.toggle('hidden', v !== 'codex');
+    $('#e-workbuddy-section').classList.toggle('hidden', v !== 'workbuddy');
+  };
+
+  // Codex CLI 模式切换
+  $('#e-cli-mode').onchange = (e) => {
+    const mode = e.target.value;
+    $('#e-cliPath-label').classList.toggle('hidden', mode === 'auto' || mode === 'api');
+    $('#e-api-section').classList.toggle('hidden', mode !== 'api');
+  };
+
+  // Codex API 模式 — 模型选择器
+  const eModelInput = $('#e-model');
+  const eModelDropdown = $('#e-model-dropdown');
+  if (eModelInput) {
+    eModelInput.onfocus = () => {
+      const connId = $('#e-conn').value;
+      if (!connId) { eModelDropdown.innerHTML = '<div class="mm-empty">请先选择 API 连接</div>'; eModelDropdown.classList.remove('hidden'); return; }
+      const conn = conns.find(c => c.id === connId);
+      const models = conn ? (conn.models || []) : [];
+      if (!models.length) { eModelDropdown.innerHTML = '<div class="mm-empty">该连接尚未获取模型</div>'; eModelDropdown.classList.remove('hidden'); return; }
+      eModelDropdown.innerHTML = models.slice(0, 100).map(m => `<div class="mm-option" data-model="${esc(m)}">${esc(m)}</div>`).join('');
+      eModelDropdown.classList.remove('hidden');
+    };
+    eModelInput.oninput = () => {
+      const connId = $('#e-conn').value;
+      if (!connId) return;
+      const conn = conns.find(c => c.id === connId);
+      const models = (conn ? conn.models : []) || [];
+      const filtered = models.filter(m => m.toLowerCase().includes(eModelInput.value.toLowerCase()));
+      eModelDropdown.innerHTML = filtered.slice(0, 100).map(m => `<div class="mm-option" data-model="${esc(m)}">${esc(m)}</div>`).join('') || '<div class="mm-empty">没有匹配的模型</div>';
+      eModelDropdown.classList.remove('hidden');
+    };
+    eModelInput.onblur = () => setTimeout(() => eModelDropdown && eModelDropdown.classList.add('hidden'), 200);
+    eModelDropdown.addEventListener('click', (e) => {
+      const opt = e.target.closest('.mm-option');
+      if (opt) { eModelInput.value = opt.dataset.model; eModelDropdown.classList.add('hidden'); }
+    });
+  }
+
+  // WorkBuddy 测试按钮
+  const wbTestBtn = $('#e-wb-test');
+  if (wbTestBtn) wbTestBtn.onclick = async () => {
+    const result = $('#e-wb-test-result');
+    result.innerHTML = '<div class="muted">正在查找 WorkBuddy…</div>';
+    try {
+      // 使用一个简单的测试命令
+      const r = await window.api.invoke('externalAgents:test', a.id || 'workbuddy-test', { adapter_type: 'workbuddy', config: { windowTitle: $('#e-wb-title').value, visionFallback: $('#e-wb-vision').checked } });
+      if (r.ok) result.innerHTML = `<div class="chip ok">WorkBuddy 桥接正常</div><div class="muted small">读取方式：${r.readVia || 'Windows UI 自动化'}　耗时：${r.elapsed || '?'} 秒</div>`;
+      else result.innerHTML = `<div class="chip bad">失败</div><div class="err small">${esc(r.error || r.message || '')}</div>`;
+    } catch (e) {
+      result.innerHTML = `<div class="chip bad">失败</div><div class="err small">${esc(e.message)}</div>`;
+    }
+  };
+
   onModalOk(async () => {
+    const adapterType = $('#e-type').value;
     const payload = {
-      name: $('#e-name').value.trim() || '外部 Agent',
-      adapter_type: $('#e-type').value,
-      command: $('#e-cmd').value.trim(),
+      name: $('#e-name').value.trim() || '外部智能体',
+      adapter_type: adapterType,
       endpoint: $('#e-ep').value.trim(),
       description: $('#e-desc').value,
-      config: { connectionId: $('#e-conn').value || null }
     };
+    // Codex: 保存到 config.cliPath，而非 command（修复配置不一致 Bug）
+    if (adapterType === 'codex') {
+      const cliMode = $('#e-cli-mode').value;
+      const config = { cliMode };
+      if (cliMode === 'path') config.cliPath = $('#e-cliPath').value.trim();
+      if (cliMode === 'api') {
+        config.connectionId = $('#e-conn').value || null;
+        config.model = $('#e-model').value.trim();
+      }
+      payload.config = config;
+      // 同时保留 command 字段以兼容旧 Runtime（如果存在）
+      payload.command = cliMode === 'path' ? config.cliPath : '';
+    } else if (adapterType === 'workbuddy') {
+      payload.config = {
+        windowTitle: $('#e-wb-title').value.trim() || 'WorkBuddy',
+        visionFallback: $('#e-wb-vision').checked,
+        timeoutSec: Number($('#e-wb-timeout').value) || 180,
+        inputAutomationId: $('#e-wb-input').value.trim(),
+        outputAutomationId: $('#e-wb-output').value.trim(),
+        submitAutomationId: $('#e-wb-submit').value.trim(),
+        submitKeys: $('#e-wb-keys').value.trim(),
+        pollIntervalMs: Number($('#e-wb-poll').value) || 1200,
+      };
+      payload.command = '';
+    } else {
+      payload.config = { connectionId: $('#e-conn').value || null };
+      payload.command = '';
+    }
     try {
       if (agent) await api.extUpdate(agent.id, payload); else await api.extCreate(payload);
       closeModal(); toast('已保存', 'ok'); open('agents');

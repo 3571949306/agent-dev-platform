@@ -1,5 +1,33 @@
 # Changelog
 
+## v2.3.0 — 2026-08-08
+
+> 全中文体验、模型中心与 Agent 调用可靠性闭环。在 v2.2.0 稳定性闭环基础上，把底层能力变成「全中文 Windows 桌面 Agent IDE」：**模型中心可视化、Agent 模型选择器、模型缓存同步、Agent Preflight + Run 状态机彻底修复无限 Spinner、全中文 UI、Codex 配置修复、WorkBuddy 空 UIA 阈值、External 状态卡、GUI E2E 测试骨架**。**不推倒重做、不盲目新增无关大功能。**
+
+### P0 — 模型中心与 Agent 调用可靠性
+
+* **模型中心可视化**：`connections:models` 现在携带 `source` 标签（`remote` API 获取 / `manual` 手动添加 / `preset` 内置推荐 / `cached` 本地缓存）。API 连接页每张卡片可「查看模型」——弹窗内支持搜索、点击复制模型 ID、收藏（写入 `models` 表 `favorite`）、手动添加（带来源标签）、按来源筛选；并可一键「刷新模型」（重新拉远端）。
+* **Agent 模型选择器**：`agentForm` 中的 `input + datalist` 替换为可搜索 / 滚动 / 点击的真实选择器（`model-picker`）。切换 API 连接立即切换该选择器内的模型列表（`$('#a-conn').onchange`）。
+* **模型缓存同步**：`agent:send` 返回 `runId`；`connections-updated` / `models-updated` 前端事件让模型列表即时刷新，**不再需要重启 App 才能看到新模型**。
+* **Agent Preflight + Run 状态机**：`chat.send()` 发送前检查 `state.project` / 主 Agent / 模型 / Provider，缺失时给出带「选择模型」等解决入口的 Preflight 卡片，不进入 Running。`runChatTurn` 现在发出真正的 `run_state_changed` 事件，状态枚举 `preparing → requesting_model → streaming → executing_tool → waiting_permission → waiting_subagent → waiting_external_agent → testing → completed / failed / cancelled / timeout / interrupted`。前端以 `run_state_changed` 终态统一收尾 Spinner，**彻底消除无限 Spinner**；`runChatTurn` 的 `finally` 兜底发出 `completed`/`failed`，防止任何路径卡死。新增 `externalAgents:test`（WorkBuddy 桥接连接自检）。
+
+### P1 — 全中文、配置修复与读屏稳健
+
+* **全中文 UI**：导航 / 侧栏 / 底栏 / 按钮 / Tool 显示名 / Event 显示名 / 错误信息全部中文化；新增 `public/js/i18n.js`（`toolName` / `eventName` / `runStatus` / `isTerminal` / `sourceName`）。品牌名（OpenAI / Codex / WorkBuddy 等）保留英文。
+* **Codex 配置修复**：GUI 改存 `config.cliPath` + `config.cliMode`（`auto` 自动检测 / `path` 指定路径 / `api` API 模式），旧数据 `command` 自动迁移；PATH 检测改用 `where`（Windows）/ `which`（POSIX）解析出 `actualPath` 再 `spawn`，废弃 `fs.existsSync("codex")` 误判；API 模式可复用模型选择器选模型。`runCodex` 对 `spawn` 同步抛错（如 Windows 直接 spawn `.cmd` 的 EINVAL）做 try/catch，返回干净 `failed` 而非击穿 Promise 卡死。
+* **WorkBuddy 空 UIA 阈值**：`DesktopAgentBridge.waitForCompletion` 引入 `uiaEmptyThreshold`（=3）连续空文本计数——窗口刚加载 / accessibility 未就绪瞬间返回的 `null` / `""` / 纯空白不再一次就误降级到视觉；拿到有效文本即重置。
+* **External 状态卡**：Agents 页外部智能体卡片展示最近一次运行结果（`last_status` + `last_run_at`，来自 `external_agents` 表迁移新增列），在线状态 chip；Main 智能体的「子智能体」列表可直接勾选外部 Agent（Codex / WorkBuddy）。
+
+### 测试 222 / 222 全过（原 207 + 新增 15）
+
+* 新增：`i18n`（显示层映射 + 未知 ID 回退）· `runstate`（Run 状态机枚举闭合 + `externalAgents.TERMINAL_STATES` 与 `isTerminal` 一致）· `codexconfig`（PATH 解析 / cwd 优先级 / api 模式 / 实际 spawn 进入）· `workbuddy-emptyuia`（空文本阈值，单次空不降级）。
+* 保留 v2.2.0 全部 207 个测试，未删除。
+* GUI E2E 测试骨架见 `test/e2e/`（12 个用例，需在 Windows 桌面 + 显示器环境下 `npm run e2e` 运行，详见 `docs/TEST_REPORT.md` 第 12 节）。
+
+### 打包
+
+* 生成 `Agent Dev Platform Setup 2.3.0.exe`（NSIS）与 `Agent Dev Platform 2.3.0 portable.exe`。
+
 ## v2.2.0 — 2026-08-08
 
 > 稳定性闭环与真实环境修复。在 v2.1.0 已打通的核心链路之上，把「基本能用」修到「真实环境稳定可用」：补齐真正的 HTTP Abort/Stop、外部 Agent 权限与中断继承、WorkBuddy 读屏失败时的视觉降级、Codex 项目目录、跨聊天循环检测、Anthropic 模型列表。**不推倒重做、不新增无关大功能。**

@@ -9,6 +9,7 @@
 const { createExternalSource } = require('../externalSource');
 const { readFileSyncSafe } = require('../security/pathPolicy');
 const { parse: parseTomlText } = require('../../parsers/toml');
+const { normalizeCandidate } = require('../importNormalizer');
 
 const ID = 'toml-file';
 const NAME = 'TOML 文件';
@@ -47,16 +48,20 @@ function parse(opts = {}) {
   src.configType = 'toml';
 
   // §31：复用现有 toml parser
-  const c = parseTomlText(text);
-  if (!c) {
+  const raw = parseTomlText(text);
+  if (!raw) {
     src.warnings.push({ type: 'parse_warning', message: 'TOML 文件中未发现可识别的 API 配置' });
     return { source: src, candidates, warnings };
   }
 
-  c.source.type = 'toml-file';
-  c.source.parser = ID;
-  c.source.path = opts.filePath;
-  c.source.confidence = 0.9;
+  // v2.5.1 §26/§32：经过 normalizeCandidate 做 URL scheme 校验 +
+  // prototype pollution 过滤 + credential classification
+  const c = normalizeCandidate({
+    ...raw,
+    sourceType: ID,
+    sourcePath: opts.filePath,
+    confidence: 0.9
+  });
   c.source.rawLength = text.length;
 
   candidates.push(c);

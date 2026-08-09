@@ -247,15 +247,16 @@ test('20) §76 OpenCode multi-provider → Batch Import（A+B 导入，C 不导�
 
 // ─── §77 Case 21: Conflict detection (DUPLICATE) ───────────────────────────
 
-test('21) §77 Conflict detection：预建同 baseUrl+protocol → DUPLICATE', async () => {
-  // 先通过 IPC 预建一个连接，与 config-chat.toml 的 baseUrl+provider 相同
+test('21) §77 Conflict detection：预建同 baseUrl+protocol+key → DUPLICATE', async () => {
+  // 先通过 IPC 预建一个连接，与 config-chat.toml 的 baseUrl+provider+key 完全相同
   // config-chat.toml: base_url=http://127.0.0.1:18001/v1, wire_api=chat → provider=openai
+  // v2.5.1 §14: 密钥也相同 → enrichBatchWithCredentialConflicts 保持 DUPLICATE（不会升级为 CONFLICT）
   const created = await page.evaluate(async () => {
     const r = await window.api.invoke('connections:create', {
       name: 'Pre-existing Chat Conn',
       provider: 'openai',
       base_url: 'http://127.0.0.1:18001/v1',
-      api_key: 'sk-pre-existing-key-for-conflict-test'
+      api_key: 'sk-test-codex-chat-0987654321fedcba'
     });
     return r && r.data !== undefined ? r.data : r;
   });
@@ -351,4 +352,140 @@ test('23) §79 OAuth/Session credential rejected（unsupported_credential，0 ca
   // 验证没有新连接被创建
   const connsAfter = await getConnections(page);
   expect(connsAfter.length, '不应创建任何新连接').toBe(countBefore);
+});
+
+// ─── §32 Case 24: Same Endpoint Different Key ──────────────────────────────
+
+test('24) §32 Same Endpoint Different Key → CONFLICT（不自动覆盖）', async () => {
+  // 先通过 IPC 预建一个连接：与 config-same-endpoint-diff-key.toml 同 baseUrl + 同 provider，但不同 key
+  // config-same-endpoint-diff-key.toml: base_url=http://127.0.0.1:18005/v1, wire_api=chat → provider=openai
+  // 预建连接用 sk-test-pre-existing-case24，fixture 用 sk-test-different-key-for-case24
+  // 用独立端口 18005 避免与 Case 21（端口 18001）的预建连接叠加
+  const created = await page.evaluate(async () => {
+    const r = await window.api.invoke('connections:create', {
+      name: 'Case24 Pre-existing',
+      provider: 'openai',
+      base_url: 'http://127.0.0.1:18005/v1',
+      api_key: 'sk-test-pre-existing-case24-abcdef123456'
+    });
+    return r && r.data !== undefined ? r.data : r;
+  });
+  expect(created && created.id, '预建连接应成功').toBeTruthy();
+
+  const fixture = path.join(FIXTURES, 'codex', 'config-same-endpoint-diff-key.toml');
+  await openImportAndPickFixture(page, 'codex', fixture);
+
+  // 预览应显示候选
+  await expect(page.locator('#ext-preview-tbl')).toContainText('Same Endpoint Different Key');
+  // §32: 状态应为冲突（同端异钥，不自动覆盖）
+  await expect(page.locator('#ext-preview-tbl')).toContainText('冲突');
+  // §32: 应提示密钥不同
+  await expect(page.locator('#ext-preview-tbl')).toContainText('密钥不同');
+  // §32: 应显示现有连接名
+  await expect(page.locator('#ext-preview-tbl')).toContainText('Case24 Pre-existing');
+  // §32: 不得显示任何完整明文 key
+  await expect(page.locator('#ext-preview-tbl')).not.toContainText('sk-test-pre-existing-case24-abcdef123456');
+  await expect(page.locator('#ext-preview-tbl')).not.toContainText('sk-test-different-key-for-case24-abcdef');
+
+  // §32: 默认 action 应为 skip（不自动覆盖），导入按钮不应导入冲突项
+  // 不修改 action，直接关闭弹窗（仅验证冲突检测，不实际导入）
+  await closeModal(page);
+
+  // 确认无 JS 致命错误
+  const fatals = pageErrors.filter(e => /Cannot read|TypeError|ReferenceError|is not defined/.test(e));
+  expect(fatals).toEqual([]);
+});
+
+// ─── §32 Case 25: JWT Credential Rejection ─────────────────────────────────
+
+test('25) §32 JWT Credential Rejection → UNSUPPORTED（不导入，不显示完整 JWT）', async () => {
+  // 记录导入前的连接数
+  const connsBefore = await getConnections(page);
+  const countBefore = connsBefore.length;
+
+  const fixture = path.join(FIXTURES, 'codex', 'config-jwt-credential.toml');
+  await openImportAndPickFixture(page, 'codex', fixture);
+
+  // 预览应显示候选
+  await expect(page.locator('#ext-preview-tbl')).toContainText('JWT Credential Provider');
+  // §32: 状态应为「不支持凭据」
+  await expect(page.locator('#ext-preview-tbl')).toContainText('不支持凭据');
+  // §32: 应显示「已拒绝」（apiKey 被分类器丢弃）
+  await expect(page.locator('#ext-preview-tbl')).toContainText('已拒绝');
+  // §32: 不得显示完整 JWT（三段 base64url）
+  await expect(page.locator('#ext-preview-tbl')).not.toContainText('eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9');
+  await expect(page.locator('#ext-preview-tbl')).not.toContainText('SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c');
+  // §32: 不得出现「导入」按钮为可执行状态 —— checkbox 应 disabled
+  const checkbox = page.locator('tr.ext-row', { hasText: 'JWT Credential Provider' }).locator('[data-check]');
+  await expect(checkbox).toBeDisabled();
+
+  // 关闭弹窗（不导入）
+  await closeModal(page);
+
+  // 验证没有新连接被创建（JWT 候选不可导入）
+  const connsAfter = await getConnections(page);
+  expect(connsAfter.length, 'JWT 候选不应被导入').toBe(countBefore);
+
+  // 确认无 JS 致命错误
+  const fatals = pageErrors.filter(e => /Cannot read|TypeError|ReferenceError|is not defined/.test(e));
+  expect(fatals).toEqual([]);
+});
+
+// ─── §32 Case 26: Malicious/Invalid External File Safe Failure ──────────────
+
+test('26) §32 Malicious config file → 显示明确错误，不 crash，不导入，可继续操作', async () => {
+  // 记录导入前的连接数
+  const connsBefore = await getConnections(page);
+  const countBefore = connsBefore.length;
+
+  const fixture = path.join(FIXTURES, 'hostile', 'malicious-config.json');
+
+  await page.getByRole('button', { name: 'API 连接' }).click();
+  await page.waitForSelector('#conn-external', { timeout: 10000 });
+  await page.locator('#conn-external').click();
+  await page.waitForSelector('.ext-source-btn', { timeout: 10000 });
+
+  // 选择 JSON 文件来源（json-file 是 requiresFile=true，按钮用 data-file 属性）
+  await page.locator('[data-file="json-file"]').click();
+
+  // 等待「选择文件」按钮（onPickFile 渲染 #ext-pick，不是 #ext-manual）
+  await page.waitForSelector('#ext-pick', { timeout: 15000 });
+
+  // 设置恶意 fixture 路径并点击选择文件（setFilePick hook externalImport:selectFile）
+  await setFilePick(page, fixture);
+  await page.locator('#ext-pick').click();
+
+  // §32: App 不 crash、不白屏 —— 预览表应出现（即使内容被安全过滤）
+  // malicious-config.json 的 base_url 是 javascript: → 被 validateUrlScheme 拒绝
+  // 但 apiKey 是 sk-test-* → 候选仍 viable（有 apiKey）
+  await page.waitForSelector('#ext-preview-tbl', { timeout: 10000 });
+
+  // §32: 应显示候选（name 正常解析）
+  await expect(page.locator('#ext-preview-tbl')).toContainText('Malicious JSON Provider');
+  // §32: baseUrl 被拒绝后显示「无地址」（candidate.baseUrl=null）
+  await expect(page.locator('#ext-preview-tbl')).toContainText('无地址');
+  // §32: 不得显示 javascript: URL
+  await expect(page.locator('#ext-preview-tbl')).not.toContainText('javascript:alert');
+
+  // 关闭弹窗（不导入）
+  await closeModal(page);
+
+  // 验证没有新连接被创建
+  const connsAfter = await getConnections(page);
+  expect(connsAfter.length, '恶意文件不应被导入').toBe(countBefore);
+
+  // §32: 错误没有破坏 UI 状态 —— 用户仍可以继续打开快速接入
+  await page.getByRole('button', { name: 'API 连接' }).click();
+  await page.waitForSelector('#conn-external', { timeout: 10000 });
+  await page.locator('#conn-external').click();
+  await page.waitForSelector('.ext-source-btn', { timeout: 10000 });
+  // 验证来源按钮仍可点击（UI 未崩溃）
+  await expect(page.locator('[data-src="codex"]')).toBeVisible();
+
+  // 关闭弹窗
+  await closeModal(page);
+
+  // 确认无 JS 致命错误
+  const fatals = pageErrors.filter(e => /Cannot read|TypeError|ReferenceError|is not defined/.test(e));
+  expect(fatals).toEqual([]);
 });

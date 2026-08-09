@@ -1,6 +1,8 @@
-# External Config Import — 外部 API 配置一键迁移（v2.5.0）
+# External Config Import — 外部 API 配置一键迁移（v2.5.1）
 
 > 把其他 Agent / AI 开发工具中已经配好的 API 安全地一键迁移到 Agent Dev Platform。
+>
+> **v2.5.1**：补齐值级凭据分类（JWT/OAuth/Session/会员拒绝）、同端异钥冲突（不自动覆盖）、SQLite 加固、Hostile Input 防御（原型污染 / URL 协议白名单）、Migration 回归、Batch 取消响应性。详见 CHANGELOG v2.5.1。
 
 ## 支持的来源
 
@@ -26,7 +28,7 @@ API 连接 → 从其他工具导入 → 选择来源
   ↓
 预览（密钥掩码）
   ↓
-冲突检测（NEW / DUPLICATE / CONFLICT / MISSING_SECRET / INVALID）
+冲突检测（NEW / DUPLICATE / CONFLICT / MISSING_SECRET / UNSUPPORTED / INVALID）
   ↓
 用户选择 + 手动补 key
   ↓

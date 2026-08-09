@@ -1,33 +1,58 @@
 'use strict';
 /**
- * v2.5.0 External Config Import — Conflict Resolver。
+ * v2.5.0/v2.5.1 External Config Import — Conflict Resolver。
  *
  * §37/§38：复用现有 onboarding findDuplicate 逻辑，扩展为 5 种状态：
  *   NEW              — 无现有连接冲突
  *   DUPLICATE        — baseUrl + provider 完全匹配（§39 提示更新/跳过/另存）
- *   CONFLICT         — 同 name 但 baseUrl/provider 不同（§40 提示密钥不同，需用户决策）
+ *   CONFLICT         — 同 name 但 baseUrl/provider 不同 / 同端异钥（§40 提示密钥不同，需用户决策）
  *   MISSING_SECRET   — baseUrl/model 存在但 apiKey 缺失（§36 允许手动补 key）
  *   INVALID          — 候选不 viable（无 baseUrl/apiKey/model）
  *
- * §40：不要无脑覆盖 Key。CONFLICT/DUPLICATE 时显示 mask 后的现有/导入 key。
- * §41：不显示两个完整 key，用 mask 形式比较。
+ * v2.5.1 §14-§18：Same Endpoint + Different Secret Conflict。
+ *   - 同 baseUrl + 同 protocol + 不同 apiKey → CONFLICT (SAME_ENDPOINT_DIFFERENT_SECRET)
+ *   - 不自动覆盖，需用户明确选择：更新现有 / 保留现有 / 另存为新连接 / 取消
+ *   - §15：不通过 Mask 判断 Secret 一定相同
+ *   - §16：constant-time compare 解密后的明文 key，立即丢弃
  */
 
 const { normalizeBaseUrl } = require('../urlNormalizer');
 const { isViable } = require('../candidate');
 
-const CONFLICT_STATES = ['NEW', 'DUPLICATE', 'CONFLICT', 'MISSING_SECRET', 'INVALID'];
+const CONFLICT_STATES = ['NEW', 'DUPLICATE', 'CONFLICT', 'MISSING_SECRET', 'UNSUPPORTED', 'INVALID'];
+
+/**
+ * v2.5.1 §16：Constant-time string comparison。
+ * 防止 timing attack，比较后立即丢弃明文。
+ */
+function constantTimeCompare(a, b) {
+  if (typeof a !== 'string' || typeof b !== 'string') return false;
+  if (a.length !== b.length) return false;
+  let result = 0;
+  for (let i = 0; i < a.length; i++) {
+    result |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  }
+  return result === 0;
+}
 
 /**
  * 评估单个 ImportCandidate 相对现有连接列表的冲突状态。
  *
+ * v2.5.1：DUPLICATE 时额外返回 requiresCredentialCheck: true，
+ * 供 IPC handler 解密现有 key 做 constant-time compare。
+ *
+ * v2.5.1 §32（Case 25）：新增 UNSUPPORTED 状态 —— 候选的凭据值被分类器拒绝
+ * （JWT/OAuth/Session/会员令牌）。优先级高于 MISSING_SECRET，因为不是「缺 key」
+ * 而是「key 被安全策略拒绝，不应重新输入」。
+ *
  * @param {object} candidate ImportCandidate
  * @param {Array} existingConnections store.connections.list() 结果
  * @returns {object} {
- *   state: 'NEW'|'DUPLICATE'|'CONFLICT'|'MISSING_SECRET'|'INVALID',
- *   duplicateId?: string,        // DUPLICATE 时现有连接 id
+ *   state: 'NEW'|'DUPLICATE'|'CONFLICT'|'MISSING_SECRET'|'UNSUPPORTED'|'INVALID',
+ *   duplicateId?: string,
  *   duplicateName?: string,
- *   conflictId?: string,         // CONFLICT 时冲突连接 id
+ *   requiresCredentialCheck?: boolean,  // v2.5.1: DUPLICATE 时需进一步检查密钥
+ *   conflictId?: string,
  *   conflictName?: string,
  *   reason: string
  * }
@@ -42,8 +67,16 @@ function resolveConflict(candidate, existingConnections) {
     return { state: 'INVALID', reason: '候选缺少 baseUrl / apiKey / model' };
   }
 
+  // v2.5.1 §32（Case 25）：UNSUPPORTED —— 凭据值被分类器拒绝（JWT/OAuth/Session/会员）
+  // 优先级高于 MISSING_SECRET：不是「缺 key」而是「key 被安全策略拒绝」
+  if (candidate._unsupportedCredential) {
+    return {
+      state: 'UNSUPPORTED',
+      reason: candidate._unsupportedCredential.reason || '检测到不可迁移凭据类型，该凭据不会被导入'
+    };
+  }
+
   // MISSING_SECRET: 有 baseUrl 但无 apiKey（§36）
-  // 注意：如果只有 apiKey 没 baseUrl，也算 INVALID，因为没法建连接
   const hasBaseUrl = candidate.baseUrl && String(candidate.baseUrl).trim();
   const hasApiKey = candidate.apiKey && String(candidate.apiKey).trim();
   const hasModel = (Array.isArray(candidate.models) && candidate.models.length)
@@ -52,7 +85,6 @@ function resolveConflict(candidate, existingConnections) {
   if (hasBaseUrl && !hasApiKey && !hasModel) {
     return { state: 'MISSING_SECRET', reason: '检测到 API 配置但缺少密钥，可手动补充' };
   }
-  // 有 model 没 key 也算 missing secret（需要 key 才能用）
   if (hasBaseUrl && hasModel && !hasApiKey) {
     return { state: 'MISSING_SECRET', reason: '检测到模型配置但缺少 API Key，可手动补充' };
   }
@@ -60,6 +92,7 @@ function resolveConflict(candidate, existingConnections) {
   const list = Array.isArray(existingConnections) ? existingConnections : [];
 
   // DUPLICATE: 同 normalizeBaseUrl + 同 provider（§37/§39）
+  // v2.5.1 §14：标记 requiresCredentialCheck 供后续密钥比较
   if (hasBaseUrl && candidate.protocolHint) {
     const norm = normalizeBaseUrl(candidate.baseUrl);
     const dup = list.find(c =>
@@ -70,7 +103,9 @@ function resolveConflict(candidate, existingConnections) {
         state: 'DUPLICATE',
         duplicateId: dup.id,
         duplicateName: dup.name,
-        reason: `已有连接「${dup.name}」使用相同 baseUrl + 协议，可选择更新现有连接 / 跳过 / 另存为新连接`
+        duplicateMasked: dup.api_key_masked || '',
+        requiresCredentialCheck: true,  // v2.5.1: 需要进一步检查密钥是否相同
+        reason: `已有连接「${dup.name}」使用相同 baseUrl + 协议，需检查密钥是否相同`
       };
     }
   }
@@ -87,6 +122,7 @@ function resolveConflict(candidate, existingConnections) {
           state: 'CONFLICT',
           conflictId: sameName.id,
           conflictName: sameName.name,
+          conflictReason: 'NAME_CONFLICT',
           reason: `已有连接「${sameName.name}」同名但 baseUrl 或协议不同，需用户确认是否覆盖`
         };
       }
@@ -111,8 +147,112 @@ function resolveBatchConflicts(candidates, existingConnections) {
 }
 
 /**
+ * v2.5.1 §14-§18：Same Endpoint Different Key 冲突检测。
+ *
+ * 当 DUPLICATE 被检测到时（同 baseUrl + 同 protocol），需要进一步检查密钥是否相同。
+ * §15：不通过 Mask 判断 Secret 一定相同。
+ * §16：解密现有 key → constant-time compare → 立即丢弃明文。
+ *
+ * @param {object} candidate ImportCandidate（含明文 apiKey）
+ * @param {object} duplicateConflict resolveConflict 返回的 DUPLICATE conflict 对象
+ * @param {object} store db store（用于 getDecrypted）
+ * @param {object} sec security module（用于 mask）
+ * @returns {object} {
+ *   state: 'DUPLICATE'|'CONFLICT',
+ *   credentialConflict: boolean,
+ *   sameKey: boolean,
+ *   importedMasked: string,
+ *   existingMasked: string,
+ *   requiresConfirmation: boolean,
+ *   reason: string,
+ *   conflictReason?: 'SAME_ENDPOINT_DIFFERENT_SECRET'
+ * }
+ */
+function checkCredentialConflict(candidate, duplicateConflict, store, sec) {
+  const importedKey = candidate && candidate.apiKey ? String(candidate.apiKey) : '';
+  const existingMasked = duplicateConflict.duplicateMasked || '';
+  const importedMasked = importedKey ? (sec && typeof sec.mask === 'function' ? sec.mask : defaultMask)(importedKey) : '';
+
+  // 如果导入的候选没有 apiKey（例如 MISSING_SECRET），不需要 credential check
+  if (!importedKey) {
+    return {
+      ...duplicateConflict,
+      credentialConflict: false,
+      sameKey: false,
+      importedMasked: '',
+      existingMasked,
+      requiresConfirmation: false
+    };
+  }
+
+  // §16：解密现有 key → constant-time compare → 立即丢弃
+  let sameKey = false;
+  try {
+    const existingConn = store && store.connections && store.connections.getDecrypted
+      ? store.connections.getDecrypted(duplicateConflict.duplicateId)
+      : null;
+    if (existingConn && existingConn.api_key) {
+      sameKey = constantTimeCompare(importedKey, String(existingConn.api_key));
+      // 立即丢弃明文（变量超出作用域即被 GC）
+    }
+  } catch {
+    // 解密失败 → 保守处理，视为 credential conflict
+    sameKey = false;
+  }
+
+  if (sameKey) {
+    // 同端同钥：真正的 DUPLICATE，不需要确认覆盖
+    return {
+      ...duplicateConflict,
+      credentialConflict: false,
+      sameKey: true,
+      importedMasked,
+      existingMasked,
+      requiresConfirmation: false,
+      reason: `已有连接「${duplicateConflict.duplicateName}」使用相同 baseUrl + 协议 + 密钥，可选择更新 / 跳过 / 另存为新连接`
+    };
+  }
+
+  // §14/§17：同端异钥 → CONFLICT，不自动覆盖
+  return {
+    state: 'CONFLICT',
+    credentialConflict: true,
+    sameKey: false,
+    importedMasked,
+    existingMasked,
+    requiresConfirmation: true,
+    duplicateId: duplicateConflict.duplicateId,
+    duplicateName: duplicateConflict.duplicateName,
+    conflictReason: 'SAME_ENDPOINT_DIFFERENT_SECRET',
+    reason: `检测到相同 API 地址和协议，但密钥不同。现有：${existingMasked || '(无)'}，导入：${importedMasked}。需用户确认是否更新现有连接。`
+  };
+}
+
+/**
+ * v2.5.1 §14-§18：批量冲突结果增强 —— 对 DUPLICATE 结果做 credential check。
+ *
+ * @param {Array} batchResults resolveBatchConflicts 的结果
+ * @param {object} store db store
+ * @param {object} sec security module
+ * @returns {Array} 增强后的结果（DUPLICATE + requiresCredentialCheck → 可能变为 CONFLICT）
+ */
+function enrichBatchWithCredentialConflicts(batchResults, store, sec) {
+  return (batchResults || []).map(item => {
+    const { candidate, conflict } = item;
+    if (conflict && conflict.state === 'DUPLICATE' && conflict.requiresCredentialCheck) {
+      const enriched = checkCredentialConflict(candidate, conflict, store, sec);
+      return { candidate, conflict: enriched };
+    }
+    return item;
+  });
+}
+
+/**
  * §40/§41：比较现有 key 与导入 key 是否相同，返回 mask 后的对比信息。
  * 不返回任何明文。
+ *
+ * v2.5.1 §15：警告 — mask 相同不代表 secret 相同，此函数仅用于 UI 显示。
+ * 真正的 secret equality 判断应使用 checkCredentialConflict + constantTimeCompare。
  *
  * @param {string} existingMasked 现有连接的 api_key_masked 字段
  * @param {string} importedPlain 导入的明文 key
@@ -136,5 +276,8 @@ module.exports = {
   CONFLICT_STATES,
   resolveConflict,
   resolveBatchConflicts,
-  compareSecrets
+  compareSecrets,
+  constantTimeCompare,
+  checkCredentialConflict,
+  enrichBatchWithCredentialConflicts
 };

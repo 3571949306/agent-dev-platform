@@ -1,0 +1,12 @@
+# Codex fixture for E2E Case 24 (spec §32) — Same endpoint, different key.
+# Uses sk-test-* fake keys only — no real credentials.
+# baseUrl 用独立端口 18005（避免与 Case 21 的 18001 冲突），
+# 预建连接用 sk-test-pre-existing-case24，fixture 用 sk-test-different-key-for-case24 —— 验证同端异钥。
+model = "model-diff-key"
+model_provider = "diffkey"
+
+[model_providers.diffkey]
+name = "Same Endpoint Different Key"
+base_url = "http://127.0.0.1:18005/v1"
+wire_api = "chat"
+api_key = "sk-test-different-key-for-case24-abcdef"

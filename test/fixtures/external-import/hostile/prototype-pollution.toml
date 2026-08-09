@@ -1,0 +1,10 @@
+# Hostile TOML with prototype-looking fields
+name = "Hostile TOML"
+base_url = "https://api.test.com/v1"
+api_key = "sk-test-abc123"
+
+[__proto__]
+polluted = true
+
+[constructor.prototype]
+polluted2 = true

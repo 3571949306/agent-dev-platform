@@ -1,10 +1,15 @@
 'use strict';
 /**
- * v2.5.0 External Config Import — Path Security Policy。
+ * v2.5.0/v2.5.1 External Config Import — Path Security Policy。
  *
  * §55/§56：External Importer 读取任何外部配置前必须经过 pathPolicy 验证。
  * §58：Windows 优先，跨平台路径用 os.homedir() 不硬编码 Administrator。
  * §59：禁止硬编码 C:\Users\Administrator\，必须用 os.homedir() / app.getPath('home')。
+ *
+ * v2.5.1 §9/§10/§11：Canonical Path 验证 + symlink/junction escape 防御。
+ *   - fs.realpathSync.native() 解析符号链接 / Windows Junction 到真实路径
+ *   - canonical containment check：realpath(target) 必须在 realpath(allowedDir) 内
+ *   - 用户主动选择文件仍需：canonical realpath + regular file + 扩展名白名单 + 大小限制
  *
  * 只允许两类路径：
  *   1. 明确支持的外部工具配置目录（known locations，在 REGISTRY 中声明）
@@ -44,8 +49,41 @@ function knownLocations(sourceType) {
   }
 }
 
+/** v2.5.1 §11：用户主动选择文件的最大允许大小（5 MB）。 */
+const MAX_FILE_SIZE = 5 * 1024 * 1024;
+
+/** v2.5.1 §11：用户主动选择文件的扩展名白名单。 */
+const USER_FILE_EXTENSIONS = new Set(['.env', '.json', '.toml']);
+
+/**
+ * v2.5.1 §9：Canonical Path 解析 —— fs.realpathSync.native() 解析 symlink/junction。
+ * 如果路径不存在，返回 null（调用方自行处理）。
+ */
+function realpathSafe(p) {
+  if (!p) return null;
+  try {
+    return fs.realpathSync.native(p);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * v2.5.1 §9/§10：Canonical containment check。
+ * 用 realpath 解析 target 和 allowedDir 后比较，防止 symlink/junction 逃逸。
+ */
+function isWithinCanonical(target, dir) {
+  const realTarget = realpathSafe(target);
+  const realDir = realpathSafe(dir);
+  if (!realTarget || !realDir) return false;
+  const rel = path.relative(realDir, realTarget);
+  return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
+}
+
 /**
  * §55：路径策略校验。
+ *
+ * v2.5.1 §9/§10/§11：增强为 canonical realpath 验证 + symlink/junction escape 防御。
  *
  * @param {string} filePath 待读取文件绝对路径
  * @param {object} opts { sourceType, userSelected }
@@ -59,27 +97,71 @@ function verifyPath(filePath, opts = {}) {
   }
   const abs = path.isAbsolute(filePath) ? filePath : path.resolve(filePath);
 
-  // 用户主动选择的文件直接放行（§29/§31）
+  // 用户主动选择的文件：仍需 canonical realpath + regular file + 扩展名白名单 + 大小限制（§11）
   if (opts.userSelected) {
-    return { ok: true };
+    return verifyUserSelectedFile(abs);
   }
 
-  // 自动发现：必须在已知配置目录内（§55/§56）
+  // 自动发现：必须在已知配置目录内（§55/§56），且 canonical containment check（§9/§10）
   const sourceType = opts.sourceType;
   if (!sourceType) {
     return { ok: false, reason: '非用户选择文件必须指定 sourceType' };
   }
   const allowed = knownLocations(sourceType);
   for (const dir of allowed) {
-    if (isWithin(abs, dir)) return { ok: true };
+    // v2.5.1 §9：先检查字符串路径（快速拒绝 ../ escape）
+    if (!isWithin(abs, dir)) continue;
+    // v2.5.1 §9/§10：再检查 canonical realpath（防 symlink/junction 逃逸）
+    if (isWithinCanonical(abs, dir)) return { ok: true };
   }
   return {
     ok: false,
-    reason: `路径 ${abs} 不在 ${sourceType} 已知配置目录内（${allowed.join('; ')}）`
+    reason: `路径 ${abs} 不在 ${sourceType} 已知配置目录内或含 symlink/junction 逃逸`
   };
 }
 
-/** 判断 target 是否在 dir 内（含 dir 自身）。 */
+/**
+ * v2.5.1 §11：验证用户主动选择的文件。
+ * 仍然允许读取任意用户明确选择的 .env/.json/.toml 文件，但需通过安全检查：
+ *   - canonical realpath
+ *   - 文件必须真实存在
+ *   - 必须是 regular file（非目录 / 非设备文件）
+ *   - 扩展名白名单
+ *   - 限制合理最大文件大小（5 MB）
+ */
+function verifyUserSelectedFile(absPath) {
+  // canonical realpath
+  const real = realpathSafe(absPath);
+  if (!real) {
+    return { ok: false, reason: '文件不存在或路径无法解析（含断链 symlink）' };
+  }
+
+  // 必须是 regular file
+  let stat;
+  try {
+    stat = fs.statSync(real);
+  } catch {
+    return { ok: false, reason: '无法获取文件状态' };
+  }
+  if (!stat.isFile()) {
+    return { ok: false, reason: '路径不是普通文件（可能是目录或设备文件）' };
+  }
+
+  // 扩展名白名单
+  const ext = path.extname(real).toLowerCase();
+  if (!USER_FILE_EXTENSIONS.has(ext)) {
+    return { ok: false, reason: `不支持的文件扩展名 "${ext}"，仅支持 .env / .json / .toml` };
+  }
+
+  // 文件大小限制
+  if (stat.size > MAX_FILE_SIZE) {
+    return { ok: false, reason: `文件过大（${Math.round(stat.size / 1024 / 1024)} MB），最大允许 ${MAX_FILE_SIZE / 1024 / 1024} MB` };
+  }
+
+  return { ok: true };
+}
+
+/** 判断 target 是否在 dir 内（含 dir 自身）。字符串路径比较（快速检查）。 */
 function isWithin(target, dir) {
   const rel = path.relative(dir, target);
   return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
@@ -131,7 +213,12 @@ function discoverKnownConfigs(sourceType) {
 module.exports = {
   knownLocations,
   verifyPath,
+  verifyUserSelectedFile,
   isWithin,
+  isWithinCanonical,
+  realpathSafe,
   readFileSyncSafe,
-  discoverKnownConfigs
+  discoverKnownConfigs,
+  MAX_FILE_SIZE,
+  USER_FILE_EXTENSIONS
 };

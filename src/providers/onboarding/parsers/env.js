@@ -14,6 +14,9 @@ const { createCandidate } = require('../candidate');
 const { normalizeBaseUrl } = require('../urlNormalizer');
 const { detectPreset, suggestName } = require('../presets');
 
+// v2.5.1 §25：prototype pollution 防御
+const FORBIDDEN_ENV_KEYS = new Set(['__proto__', 'prototype', 'constructor']);
+
 // 已知 key → (candidate 字段, provider hint)
 const KEY_MAP = {
   OPENAI_API_KEY: { field: 'apiKey', hint: 'openai' },
@@ -88,7 +91,16 @@ function parse(text) {
       if (!c.apiKey) c.apiKey = val;
     } else {
       // 其他 ENV 当作自定义 header（非 secret 的）
-      extras[key.toLowerCase()] = val;
+      // v2.5.1 §25：过滤 prototype pollution 字段
+      if (FORBIDDEN_ENV_KEYS.has(key) || FORBIDDEN_ENV_KEYS.has(key.toLowerCase())) continue;
+      const lk = key.toLowerCase();
+      if (FORBIDDEN_ENV_KEYS.has(lk)) continue;
+      Object.defineProperty(extras, lk, {
+        value: val,
+        writable: true,
+        enumerable: true,
+        configurable: true
+      });
     }
   }
 

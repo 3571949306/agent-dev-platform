@@ -1,0 +1,5 @@
+{
+  "name": "Hostile File URL",
+  "baseUrl": "file:///C:/Windows/System32/config/SAM",
+  "apiKey": "sk-test-abc123"
+}

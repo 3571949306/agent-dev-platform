@@ -23,6 +23,9 @@ const { createCandidate } = require('../candidate');
 const { normalizeBaseUrl } = require('../urlNormalizer');
 const { detectPreset, suggestName } = require('../presets');
 
+// v2.5.1 §25：prototype pollution 防御
+const FORBIDDEN_TOML_KEYS = new Set(['__proto__', 'prototype', 'constructor']);
+
 function parseToml(text) {
   const root = {};
   let cur = root;
@@ -37,7 +40,17 @@ function parseToml(text) {
       const path = tableMatch[1].split('.').map(s => s.trim());
       cur = root;
       for (const p of path) {
-        if (!cur[p] || typeof cur[p] !== 'object') cur[p] = {};
+        // v2.5.1 §25：过滤 prototype pollution 字段
+        if (FORBIDDEN_TOML_KEYS.has(p)) { cur = {}; break; }
+        if (!cur[p] || typeof cur[p] !== 'object') {
+          const next = {};
+          Object.defineProperty(cur, p, {
+            value: next,
+            writable: true,
+            enumerable: true,
+            configurable: true
+          });
+        }
         cur = cur[p];
       }
       continue;
@@ -45,8 +58,18 @@ function parseToml(text) {
     const m = line.match(/^([A-Za-z0-9_\-]+)\s*=\s*(.+)$/);
     if (!m) continue;
     const k = m[1];
+    // v2.5.1 §25：过滤 prototype pollution 字段
+    if (FORBIDDEN_TOML_KEYS.has(k)) continue;
     const v = parseValue(m[2]);
-    if (v !== null) cur[k] = v;
+    if (v !== null) {
+      // v2.5.1 §25：用 Object.defineProperty 避免 __proto__ setter
+      Object.defineProperty(cur, k, {
+        value: v,
+        writable: true,
+        enumerable: true,
+        configurable: true
+      });
+    }
   }
   return root;
 }

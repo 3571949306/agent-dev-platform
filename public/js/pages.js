@@ -864,6 +864,7 @@ const CONFLICT_CHIP = {
   DUPLICATE: '<span class="chip warn">重复</span>',
   CONFLICT: '<span class="chip bad">冲突</span>',
   MISSING_SECRET: '<span class="chip warn">缺少密钥</span>',
+  UNSUPPORTED: '<span class="chip bad">不支持凭据</span>',
   INVALID: '<span class="chip bad">无效</span>'
 };
 
@@ -1028,8 +1029,10 @@ function externalImport() {
       let action = 'import';
       if (st === 'DUPLICATE') action = 'skip';        // §39 默认跳过重复
       if (st === 'CONFLICT') action = 'skip';          // §40 默认跳过冲突
+      if (st === 'UNSUPPORTED') action = 'skip';       // §32 默认跳过不支持凭据
       if (st === 'INVALID') action = 'skip';
-      ctx.items.set(i, { checked: st !== 'INVALID', manualKey: '', action });
+      // v2.5.1 §32：UNSUPPORTED 和 INVALID 一样不可勾选
+      ctx.items.set(i, { checked: (st !== 'INVALID' && st !== 'UNSUPPORTED'), manualKey: '', action });
     });
     renderPreviewStep(extraWarnings);
   }
@@ -1042,7 +1045,10 @@ function externalImport() {
       const st = cf.state;
       const item = ctx.items.get(i) || { checked: false, manualKey: '', action: 'skip' };
       const srcMeta = c.source || {};
-      const showKey = c.apiKey ? maskKey(c.apiKey) : '<span class="muted">无</span>';
+      // v2.5.1 §32：UNSUPPORTED 时 apiKey 已被分类器丢弃（null），显示「已拒绝」
+      const showKey = (st === 'UNSUPPORTED')
+        ? '<span class="muted">已拒绝</span>'
+        : (c.apiKey ? maskKey(c.apiKey) : '<span class="muted">无</span>');
       const dupName = cf.duplicateName ? `<div class="muted small">现有连接：<b>${esc(cf.duplicateName)}</b></div>` : '';
       const dupActions = (st === 'DUPLICATE' || st === 'CONFLICT') ? `
         <select data-dup-act="${i}">
@@ -1054,7 +1060,7 @@ function externalImport() {
         <input type="password" data-manual-key="${i}" value="${esc(item.manualKey)}" placeholder="输入 API Key…">` : '';
       const reason = cf.reason ? `<div class="muted small">${esc(cf.reason)}</div>` : '';
       return `<tr class="ext-row" data-row="${i}">
-        <td><input type="checkbox" data-check="${i}" ${item.checked ? 'checked' : ''} ${st === 'INVALID' ? 'disabled' : ''}></td>
+        <td><input type="checkbox" data-check="${i}" ${item.checked ? 'checked' : ''} ${(st === 'INVALID' || st === 'UNSUPPORTED') ? 'disabled' : ''}></td>
         <td><b>${esc(c.name || '未命名')}</b>
           <div class="muted small">${esc(protoLabel(c.protocolHint))} · 可信度 ${Math.round((srcMeta.confidence || 0) * 100)}%</div>
         </td>

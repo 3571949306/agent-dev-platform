@@ -1,0 +1,5 @@
+{
+  "name": "Hostile Data URL",
+  "baseUrl": "data:text/html,<script>alert(1)</script>",
+  "apiKey": "sk-test-abc123"
+}

@@ -13,6 +13,9 @@ const { createCandidate, isSecretField } = require('../candidate');
 const { normalizeBaseUrl } = require('../urlNormalizer');
 const { detectPreset, suggestName } = require('../presets');
 
+// v2.5.1 §25：prototype pollution 防御 —— 禁止这些 key 进入 headers
+const FORBIDDEN_HEADER_KEYS = new Set(['__proto__', 'prototype', 'constructor']);
+
 function pick(obj, names) {
   for (const n of names) {
     if (obj[n] !== undefined && obj[n] !== null && String(obj[n]).trim() !== '') return obj[n];
@@ -53,12 +56,20 @@ function parse(text) {
   if (headers && typeof headers === 'object') {
     const clean = {};
     for (const [k, v] of Object.entries(headers)) {
+      // v2.5.1 §25：过滤 prototype pollution 字段
+      if (FORBIDDEN_HEADER_KEYS.has(k)) continue;
       // secret header 抽到 apiKey，不重复存在（§52）；剥掉 Bearer 前缀
       if (isSecretField(k) && !c.apiKey) {
         const raw = String(v).trim();
         c.apiKey = /^Bearer\s+/i.test(raw) ? raw.replace(/^Bearer\s+/i, '').trim() : raw;
       } else {
-        clean[k] = v;
+        // v2.5.1 §25：用 Object.defineProperty 避免 __proto__ setter 触发
+        Object.defineProperty(clean, k, {
+          value: v,
+          writable: true,
+          enumerable: true,
+          configurable: true
+        });
       }
     }
     c.headers = clean;

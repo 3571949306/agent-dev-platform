@@ -690,9 +690,12 @@ function register(window) {
     return r;
   });
   // externalImport:resolveConflicts — 批量冲突检测
+  // v2.5.1 §14-§18：DUPLICATE 结果需进一步做 credential check（constant-time compare 解密后的 key）
   reg('externalImport:resolveConflicts', (candidates) => {
     const list = store.connections.list();
-    return external.resolveBatchConflicts(candidates, list);
+    const batch = external.resolveBatchConflicts(candidates, list);
+    const { enrichBatchWithCredentialConflicts } = require('../providers/onboarding/external/conflictResolver');
+    return enrichBatchWithCredentialConflicts(batch, store, sec);
   });
   // externalImport:importBatch — 批量导入，每个 candidate 独立处理
   // §43: 一个失败不影响其他；§45: 并发 2~3

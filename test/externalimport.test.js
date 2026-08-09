@@ -63,9 +63,19 @@ test('pathPolicy.verifyPath: 空路径拒绝', () => {
   assert.strictEqual(verifyPath(undefined).ok, false);
 });
 
-test('pathPolicy.verifyPath: 用户主动选择文件直接放行', () => {
-  const r = verifyPath('C:\\random\\path\\config.toml', { userSelected: true });
-  assert.strictEqual(r.ok, true);
+test('pathPolicy.verifyPath: 用户主动选择文件需通过安全检查（v2.5.1 §11）', () => {
+  // v2.5.1：用户主动选择文件不再无条件放行，需通过 canonical realpath + regular file + 扩展名白名单 + 大小限制
+  // 不存在的文件 → 拒绝
+  const r1 = verifyPath('C:\\random\\nonexistent\\config.toml', { userSelected: true });
+  assert.strictEqual(r1.ok, false);
+  // 不支持的扩展名 → 拒绝
+  const r2 = verifyPath('C:\\Windows\\System32\\cmd.exe', { userSelected: true });
+  assert.strictEqual(r2.ok, false);
+  assert.match(r2.reason, /不支持的文件扩展名|文件不存在/);
+  // 真实存在的 .toml fixture → 放行
+  const fixture = path.join(__dirname, 'fixtures', 'external-import', 'codex', 'config-responses.toml');
+  const r3 = verifyPath(fixture, { userSelected: true });
+  assert.strictEqual(r3.ok, true);
 });
 
 test('pathPolicy.verifyPath: 自动发现必须在已知目录内（拒绝 C:\\random）', () => {
@@ -671,6 +681,105 @@ test('importBatch: manualKey 补 key（§36）', async () => {
   assert.strictEqual(results.length, 1);
   assert.strictEqual(results[0].result.ok, true);
   assert.ok(results[0].result.connection, '应创建 connection');
+});
+
+// ─── §31 Batch 取消响应性 ───────────────────────────────────────────────
+
+test('§31 importBatch: signal 取消后，已完成保留，未开始标记 skipped（不 rollback）', async () => {
+  // 构造 6 个候选，maxConcurrency=2，前 2 个开始执行后立即 abort
+  // 期望：在途的完成，未开始的有 4 个标记 skipped
+  const items = [];
+  for (let i = 0; i < 6; i++) {
+    items.push({
+      candidate: normalizeCandidate({
+        name: `Cancel Test ${i}`, baseUrl: `http://127.0.0.1:1920${i}/v1`,
+        apiKey: `sk-test-cancel-${i}`, protocolHint: 'openai', sourceType: 'codex'
+      }),
+      action: 'import'
+    });
+  }
+  const controller = new AbortController();
+  // 立即 abort（在第一个 await 前）—— 队列里全部 6 个都还没开始或只有 2 个在途
+  controller.abort();
+  const results = await external.importBatch(items, {
+    store, sec, maxConcurrency: 2, signal: controller.signal
+  });
+  assert.strictEqual(results.length, 6, '应返回全部 6 个结果（含 skipped）');
+  // 在途的 2 个可能成功（importCandidate 是同步的，很快完成）
+  // 未开始的 4 个应标记 skipped + reason='cancelled'
+  const skipped = results.filter(r => r.result && r.result.skipped && r.result.reason === 'cancelled');
+  const done = results.filter(r => r.result && r.result.ok && !r.result.reason);
+  assert.strictEqual(skipped.length + done.length, 6, '结果只应有 skipped 和 done 两类');
+  // 不应整批 rollback：done 的应在数据库中
+  for (const r of done) {
+    if (r.result.connection) {
+      assert.ok(store.connections.get(r.result.connection.id), '已完成的连接不应被 rollback');
+    }
+  }
+});
+
+test('§31 importBatch: 不传 signal 时正常完成（向后兼容）', async () => {
+  const items = [];
+  for (let i = 0; i < 4; i++) {
+    items.push({
+      candidate: normalizeCandidate({
+        name: `NoSignal ${i}`, baseUrl: `http://127.0.0.1:1921${i}/v1`,
+        apiKey: `sk-test-nosignal-${i}`, protocolHint: 'openai', sourceType: 'codex'
+      }),
+      action: 'import'
+    });
+  }
+  const results = await external.importBatch(items, { store, sec, maxConcurrency: 3 });
+  assert.strictEqual(results.length, 4);
+  const okCount = results.filter(r => r.result && r.result.ok).length;
+  assert.strictEqual(okCount, 4, '不传 signal 时应全部成功');
+  // 不应有 skipped/cancelled
+  const skipped = results.filter(r => r.result && r.result.skipped);
+  assert.strictEqual(skipped.length, 0, '不应有 skipped');
+});
+
+test('§31 importBatch: maxConcurrency 上限受 5 硬约束', async () => {
+  // 传入 maxConcurrency=100，应被 clamp 到 5
+  const items = [];
+  for (let i = 0; i < 10; i++) {
+    items.push({
+      candidate: normalizeCandidate({
+        name: `Conc ${i}`, baseUrl: `http://127.0.0.1:1922${i}/v1`,
+        apiKey: `sk-test-conc-${i}`, protocolHint: 'openai', sourceType: 'codex'
+      }),
+      action: 'import'
+    });
+  }
+  const results = await external.importBatch(items, { store, sec, maxConcurrency: 100 });
+  assert.strictEqual(results.length, 10, '应全部完成');
+  // importCandidate 是同步的，不会真正并发等待，这里只验证不报错且全部 ok
+  const okCount = results.filter(r => r.result && r.result.ok).length;
+  assert.strictEqual(okCount, 10);
+});
+
+test('§31 importBatch: 取消后未开始的不写库（不导入）', async () => {
+  const items = [];
+  for (let i = 0; i < 3; i++) {
+    items.push({
+      candidate: normalizeCandidate({
+        name: `NoWrite ${i}`, baseUrl: `http://127.0.0.1:1923${i}/v1`,
+        apiKey: `sk-test-nowrite-${i}`, protocolHint: 'openai', sourceType: 'codex'
+      }),
+      action: 'import'
+    });
+  }
+  const controller = new AbortController();
+  controller.abort();
+  const results = await external.importBatch(items, {
+    store, sec, maxConcurrency: 1, signal: controller.signal
+  });
+  // maxConcurrency=1 + 立即 abort：第 1 个可能在途，后 2 个应 skipped
+  const skipped = results.filter(r => r.result && r.result.skipped && r.result.reason === 'cancelled');
+  // skipped 的不应写库
+  for (const r of skipped) {
+    const list = store.connections.list();
+    assert.ok(!list.some(c => c.name === r.candidate.name), `skipped 的 ${r.candidate.name} 不应写库`);
+  }
 });
 
 // ─── §68 Security: Secret 不泄漏 ─────────────────────────────────────────

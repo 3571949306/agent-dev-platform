@@ -8,7 +8,9 @@
 
 const { createExternalSource } = require('../externalSource');
 const { readFileSyncSafe } = require('../security/pathPolicy');
+const { safeJsonParse } = require('../security/inputSanitizer');
 const { parse: parseJsonText } = require('../../parsers/json');
+const { normalizeCandidate } = require('../importNormalizer');
 
 const ID = 'json-file';
 const NAME = 'JSON 文件';
@@ -47,11 +49,10 @@ function parse(opts = {}) {
   src.configType = 'json';
 
   // §31：复用现有 json parser，支持对象或数组
-  let obj;
-  try {
-    obj = JSON.parse(text);
-  } catch (e) {
-    src.errors.push(`JSON 解析失败：${e.message}`);
+  // v2.5.1 §25：safeJsonParse 过滤 prototype pollution
+  const obj = safeJsonParse(text);
+  if (obj === null) {
+    src.errors.push('JSON 解析失败：格式无效');
     return { source: src, candidates, warnings };
   }
 
@@ -59,24 +60,32 @@ function parse(opts = {}) {
     // 批量
     for (const item of obj) {
       if (item && typeof item === 'object') {
-        const c = parseJsonText(JSON.stringify(item));
-        if (c) {
-          c.source.type = 'json-file';
-          c.source.parser = ID;
-          c.source.path = opts.filePath;
-          c.source.confidence = 0.9;
+        const raw = parseJsonText(JSON.stringify(item));
+        if (raw) {
+          // v2.5.1 §26/§32：经过 normalizeCandidate 做 URL scheme 校验 +
+          // prototype pollution 过滤 + credential classification
+          const c = normalizeCandidate({
+            ...raw,
+            sourceType: ID,
+            sourcePath: opts.filePath,
+            confidence: 0.9
+          });
           c.source.rawLength = text.length;
           candidates.push(c);
         }
       }
     }
   } else if (obj && typeof obj === 'object') {
-    const c = parseJsonText(text);
-    if (c) {
-      c.source.type = 'json-file';
-      c.source.parser = ID;
-      c.source.path = opts.filePath;
-      c.source.confidence = 0.92;
+    const raw = parseJsonText(text);
+    if (raw) {
+      // v2.5.1 §26/§32：经过 normalizeCandidate 做 URL scheme 校验 +
+      // prototype pollution 过滤 + credential classification
+      const c = normalizeCandidate({
+        ...raw,
+        sourceType: ID,
+        sourcePath: opts.filePath,
+        confidence: 0.92
+      });
       c.source.rawLength = text.length;
       candidates.push(c);
     }

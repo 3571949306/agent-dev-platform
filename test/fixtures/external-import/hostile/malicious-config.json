@@ -1,0 +1,12 @@
+{
+  "__proto__": { "polluted": "should-not-propagate" },
+  "constructor": { "prototype": { "evil": true } },
+  "name": "Malicious JSON Provider",
+  "base_url": "javascript:alert(1)",
+  "api_key": "sk-test-malicious-case26-not-real",
+  "models": ["malicious-model"],
+  "headers": {
+    "X-Ok": "yes",
+    "__proto__": { "headerPolluted": true }
+  }
+}

@@ -1,5 +1,108 @@
 # Changelog
 
+## v2.5.1 — 2026-08-09
+
+> External Import 安全性与兼容性收尾。在 v2.5.0 八个 Importer / 五态冲突检测 / Batch Import 基础上，补齐值级凭据分类、路径安全加固、同端异钥冲突、SQLite 加固、Hostile Input 防御、依赖漏洞审计、Migration 回归与取消响应性。**不新增 Importer、不改变 Runtime 请求路径、不破坏 v2.4.1 老库。**
+
+### 一、Secret Value Classifier（§3-§7，P0-A）
+
+* 新增 `security/credentialClassifier.js`：基于**值形状**判断凭据类型，不再只看字段名。
+  * `api_key` — 普通 sk-* / 随机串，允许导入。
+  * `oauth_token` — 含 `oauth` / `scope` / `openid` 字段的 JWT payload，拒绝。
+  * `session_token` — `sess_*` / `session-*` 前缀，拒绝。
+  * `membership_token` — JWT payload 含 `plan` / `subscription` / `membership` 字段，拒绝。
+  * `jwt_unknown` — JWT 结构但无法明确分类，拒绝（保守）。
+* `classifyAuthorizationHeader` 处理 `Bearer <token>` / `Token <token>` 前缀，剥掉前缀后再分类。
+* `importNormalizer.js` 集成分类器：不可迁移的值标记 `_unsupportedCredential`，丢弃明文 apiKey（不保留到内存）。
+
+### 二、Path Security 加固（§8-§11，P0-B）
+
+* `security/pathPolicy.js` 增强：
+  * `realpathSafe` 使用 `fs.realpathSync.native()` 解析符号链接 / 连接点，防止路径逃逸。
+  * 规范化路径包含检查（`realRoot.startsWith(allowedRoot)`），不允许 `..\` 逃逸。
+  * 用户选择文件限制：扩展名白名单（`.env` / `.json` / `.toml`）、大小上限（10 MB）、必须为普通文件。
+* `verifyPath` 返回 `{ ok, real, reason }`，调用方据 `reason` 显示具体错误。
+
+### 三、Same Endpoint Different Key（§12-§18，P0-C）
+
+* `conflictResolver.js` 增强：
+  * DUPLICATE 状态额外返回 `requiresCredentialCheck: true`，IPC handler 据此调用 `enrichBatchWithCredentialConflicts`。
+  * `checkCredentialConflict` 解密现有 key，与导入 key 做 **constant-time compare**（`constantTimeCompare`），不依赖掩码判断。
+  * 同 baseUrl + 同 protocol + 不同 key → **CONFLICT**（`SAME_ENDPOINT_DIFFERENT_SECRET`），**不自动覆盖**，需用户决策。
+  * 同 baseUrl + 同 protocol + 同 key → DUPLICATE（可选更新 / 跳过 / 另存）。
+* `compareSecrets` 仅用于 UI 显示，注释明确「mask 相同不代表 secret 相同」。
+
+### 四、CC Switch SQLite 加固（§20-§24，P1-A）
+
+* `importers/ccSwitchLocal.js` 重构 SQLite 读取器：
+  * `quoteIdentifier` 安全标识符引用（双引号 + 转义），不直接拼表名进 SQL。
+  * `PRAGMA query_only = ON` 禁止任何写入。
+  * `LIMIT 1000` / 最多 50 表 / 最多 200 候选 / 单字段 64 KB 截断。
+  * 文件大小上限 100 MB + `realpathSafe` + `isFile()` 检查。
+  * 复制到 temp 后只读打开，避免锁冲突；finally 清理 temp 文件。
+
+### 五、Hostile Input 防御（§25-§27，P1-B）
+
+* 新增 `security/inputSanitizer.js`：
+  * `sanitizeObject` — 递归过滤 `__proto__` / `prototype` / `constructor` 字段，用 `Object.defineProperty` 安全赋值（避免 setter 触发）。
+  * `safeJsonParse` — `JSON.parse` + `sanitizeObject`，畸形 JSON 返回 null。
+  * `validateUrlScheme` — URL 协议白名单，仅允许 `http:` / `https:`，拒绝 `javascript:` / `file:` / `data:` / `ftp:` / `ws:` / `gopher:`。
+  * `isLocalUrl` — 识别 localhost / 127.0.0.1 / ::1 / 私有 IP 段（含 IPv6 方括号处理）。
+  * `hasControlChars` / `sanitizeString` — 控制字符检测与清理。
+  * 深度 / 字段数 / 字符串长度限制，防止 DoS。
+* JSON / TOML / ENV 解析器全部加固：过滤危险字段，`Object.defineProperty` 安全赋值。
+* `importNormalizer.js` 集成：`baseUrl` 经 `validateUrlScheme` 校验，非法协议标记 `_invalidBaseUrl`；`models` / `headers` 经 `sanitizeObject` 过滤。
+* `jsonFile` / `tomlFile` Importer 现在调用 `normalizeCandidate`，确保 URL scheme 校验 + credential classification 对文件导入也生效（v2.5.0 漏洞修复）。
+
+### 六、Dependency Audit（§28，P1-C）
+
+* 新增 `docs/SECURITY_DEPENDENCY_AUDIT.md`：分类全部 46 个漏洞。
+* **结论：剩余 13 个漏洞全部在 dev/build 依赖（electron / electron-builder / node-fetch），不在生产 Runtime。**
+* Critical 1 / High 12 / Moderate 0 / Low 0（v2.5.0 spec 的 46 个含 24 Moderate + 5 Low，本轮已通过分类确认其均在 dev 依赖中）。
+* 制定 v2.6.0 升级计划（electron 28 → 33 大版本升级，需单独验证），本轮不升级。
+
+### 七、Import Source 持久化回归（§29-§30，P2）
+
+* `db/schema.js` 修复：`import_source` / `import_source_path` 列迁移带 `DEFAULT ''`，v2.4.1 老库升级后老连接得到 `''`（一致），不是 NULL。
+* 新增 `test/migration.test.js`（7 用例）：
+  * 新库字段存在 / v2.4.1 老库自动迁移 / 原 connections+models+agents 不丢失 / 老连接 `import_source=''` / 导入新连接持久化 / 重复 init 不破坏 / Runtime 不依赖来源。
+* 验证 Runtime（`providers/index.js` / `runManager.js` / `externalAgents.js`）完全不引用 `import_source`，来源仅用于 UI / Audit / Diagnostics / ConflictResolver。
+
+### 八、Batch Import 取消响应性（§31，P2）
+
+* `external/index.js` `importBatch` 增强：
+  * 新增 `ctx.signal`（AbortSignal）参数：abort 后不再派发新任务，已完成保留，未开始标记 `skipped(reason='cancelled')`，**不 rollback**。
+  * 修复并发池 bug（原 `await p` 在内层循环导致退化成串行）。
+  * `maxConcurrency` 默认 3，硬上限 5。
+* 新增 4 个 §31 单元测试：取消后已完成保留 / 不传 signal 向后兼容 / maxConcurrency 硬上限 / 取消后未开始不写库。
+
+### 九、Conflict Resolver 新增 UNSUPPORTED 状态（§32，P4）
+
+* `conflictResolver.js` 新增 `UNSUPPORTED` 状态：候选的凭据值被分类器拒绝（JWT/OAuth/Session/会员）。优先级高于 MISSING_SECRET（不是「缺 key」而是「key 被安全策略拒绝」）。
+* `CONFLICT_STATES` 从 5 态扩展为 6 态：`NEW` / `DUPLICATE` / `CONFLICT` / `MISSING_SECRET` / `UNSUPPORTED` / `INVALID`。
+* GUI `pages.js` 增强：UNSUPPORTED chip「不支持凭据」、checkbox disabled、apiKey 显示「已拒绝」、默认 action=skip。
+
+### 十、GUI E2E 新增 Case 24/25/26（§32，P4）
+
+* **Case 24**：Same Endpoint Different Key → CONFLICT（不自动覆盖，显示「密钥不同」，不显示明文 key）。
+* **Case 25**：JWT Credential Rejection → UNSUPPORTED（不导入，checkbox disabled，不显示完整 JWT）。
+* **Case 26**：Malicious config file → 不 crash、不导入、显示「无地址」（javascript: URL 被拒绝）、UI 可继续操作。
+* 修复 Case 21：预建连接改用与 fixture 相同的 key（→ DUPLICATE，而非 CONFLICT）。
+
+### 十一、测试
+
+* 单元测试：**516 / 516 PASS**（v2.5.0 的 386 + v2.5.1 新增 130）。
+* GUI E2E：**26 / 26 PASS**（v2.5.0 的 23 + v2.5.1 新增 Case 24/25/26）。
+* 新增测试文件：`migration.test.js` / `credentialClassifier.test.js` / `pathSecurity.test.js` / `credentialConflict.test.js` / `hostileInput.test.js`。
+* 新增 fixture：`codex/config-same-endpoint-diff-key.toml` / `codex/config-jwt-credential.toml` / `hostile/malicious-config.json` / `hostile/*.json|toml`。
+
+### 十二、Build
+
+* `npm run dist` 增加 `--publish never`：v2.5.0 及之前 electron-builder 在检测到 GitHub remote 后默认尝试发布 release，因 `GH_TOKEN` 未设置而返回非零退出码。本轮修复后 `npm run dist` 退出码为 0，仅生成本地产物。
+* 产物：Setup 80.9 MB / Portable 80.7 MB / win-unpacked 172.5 MB，`win-unpacked\Agent Dev Platform.exe --smoke` 返回 `SMOKE_OK` / ExitCode 0。
+
+---
+
 ## v2.5.0 — 2026-08-09
 
 > External Config Import — 外部 API 配置一键迁移。把其他 Agent / AI 开发工具中已经配好的 API（Codex / Claude Code / OpenCode / CC Switch / 环境变量 / .env / JSON / TOML 文件）安全地一键迁移到 Agent Dev Platform。**严格只读、密钥掩码、不迁移会员登录态 / OAuth Session / 软件内部认证。** 导入后仍走现有 ImportCandidate → Probe → Connection 链路，Runtime 不感知来源。

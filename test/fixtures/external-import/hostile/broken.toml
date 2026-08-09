@@ -1,0 +1,4 @@
+# Broken TOML — unclosed string
+name = "Hostile TOML
+base_url = "https://api.test.com/v1"
+api_key = "sk-test-abc123"

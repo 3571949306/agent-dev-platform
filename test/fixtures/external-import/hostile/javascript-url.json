@@ -1,0 +1,5 @@
+{
+  "name": "Hostile JavaScript URL",
+  "baseUrl": "javascript:alert(1)",
+  "apiKey": "sk-test-abc123"
+}

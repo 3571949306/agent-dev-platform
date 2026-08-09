@@ -1,0 +1,5 @@
+{
+  "name": "Hostile Null Bytes",
+  "baseUrl": "https://api.test.com/v1\u0000",
+  "apiKey": "sk-test-abc123\u0000extra"
+}

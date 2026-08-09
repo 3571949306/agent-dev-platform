@@ -318,6 +318,12 @@ CREATE TABLE IF NOT EXISTS runs (
  * Additive column migrations for databases created by an earlier build.
  * CREATE TABLE IF NOT EXISTS never adds columns to an existing table, so any
  * column introduced after the first release must be listed here.
+ *
+ * Each entry: [table, col, type, default?]
+ *   default?: optional SQLite DEFAULT clause value, e.g. "''" or "0".
+ *   When provided, ALTER TABLE ADD COLUMN includes `DEFAULT <default>`,
+ *   which SQLite applies to all existing rows (so v2.4.1 -> v2.5.1 migrations
+ *   populate the new column consistently instead of leaving NULL).
  */
 const COLUMN_MIGRATIONS = [
   ['memories', 'updated_at', 'TEXT'],
@@ -333,18 +339,23 @@ const COLUMN_MIGRATIONS = [
   // v2.1.0 — external agent run state
   ['external_agents', 'last_status', 'TEXT'],
   ['external_agents', 'last_run_at', 'TEXT'],
-  // v2.5.0 — External Config Import source tracking
-  ['api_connections', 'import_source', 'TEXT'],
-  ['api_connections', 'import_source_path', 'TEXT']
+  // v2.5.0 — External Config Import source tracking.
+  // v2.5.1 §29: DEFAULT '' so v2.4.1 老库迁移后老连接 import_source = '' (一致),
+  // 而不是 NULL。Runtime/UI 据此把空串视为 manual 来源。
+  ['api_connections', 'import_source', 'TEXT', "''"],
+  ['api_connections', 'import_source_path', 'TEXT', "''"]
 ];
 
 function ensureColumns(db) {
-  for (const [table, col, type] of COLUMN_MIGRATIONS) {
+  for (const entry of COLUMN_MIGRATIONS) {
+    const [table, col, type, def] = entry;
     let cols;
     try { cols = db.prepare(`PRAGMA table_info(${table})`).all().map(c => c.name); }
     catch { continue; }
     if (cols.length && !cols.includes(col)) {
-      db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${type}`);
+      // v2.5.1 §29: 带 DEFAULT 时，SQLite 会把默认值回填到所有现有行
+      const defClause = def !== undefined ? ` DEFAULT ${def}` : '';
+      db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${type}${defClause}`);
     }
   }
 }

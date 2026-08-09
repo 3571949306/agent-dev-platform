@@ -1,0 +1,8 @@
+{
+  "name": "Huge Whitespace",
+  "baseUrl": "https://api.test.com/v1",
+  "apiKey": "sk-test-abc123",
+  "headers": {
+    "X-Spam": "                                                                                                                                                                                                                                                                "
+  }
+}

@@ -1,12 +1,12 @@
 {
   "name": "agent-dev-platform",
-  "version": "2.5.0",
+  "version": "2.5.1",
   "description": "Agent Dev Platform - 本地 AI Agent IDE（智能体开发环境）：Coding Agent / 多 Agent 调度 / API 管理 / Computer Use / MCP / 外部 Agent 聚合",
   "main": "main.js",
   "scripts": {
     "start": "node src/server/static.js",
     "electron": "electron .",
-    "dist": "electron-builder --win nsis portable",
+    "dist": "electron-builder --win nsis portable --publish never",
     "rebuild": "electron-rebuild -f -w better-sqlite3",
     "test": "node scripts/run-tests.js",
     "smoke": "electron . --smoke",

@@ -582,6 +582,74 @@ function register(window) {
   });
   reg('terminal:cancel', (runId) => require('../tools/terminal').terminalManager.cancel(runId));
 
+  // ---------- v2.4.0 Smart API Onboarding ----------
+  const onboarding = require('../providers/onboarding');
+  const sec = require('../security/secret');
+  // onboarding:presets — 列出本地 preset（GUI「常用服务」按钮用）
+  reg('onboarding:presets', () => onboarding.listPresets());
+  // onboarding:parse — 本地解析（不发网络请求），返回真实候选（前端 mask 显示）。
+  // §11: ImportCandidate 只在内存；前端是可信 Electron renderer，与 connForm 处理明文 key 一致。
+  // §17: 日志/序列化必须用 sanitizeCandidate；此处返回真实候选供后续 probe/import 使用。
+  reg('onboarding:parse', (text) => {
+    const result = onboarding.parseInput(text || '');
+    if (result.candidate) {
+      result.candidate._viable = onboarding.isViable(result.candidate);
+    }
+    return result;
+  });
+  // onboarding:probe — 真实网络检测（复用 v2.2 Abort），返回协议候选 + 模型列表
+  // candidate 由前端传回（含明文 key）；此处内存中持有，检测完即丢弃
+  reg('onboarding:probe', async (candidate, opts) => {
+    const report = await onboarding.probe(candidate, opts || {});
+    return report;
+  });
+  // onboarding:import — 用户确认后写库（secret 走 sec.encrypt），可选分配主智能体
+  reg('onboarding:import', (candidate, opts) => {
+    const r = onboarding.importCandidate(candidate, {
+      store, sec,
+      assignToMain: !!(opts && opts.assignToMain),
+      agentId: opts && opts.agentId,
+      forceOverwrite: opts && opts.forceOverwrite,
+      modelsOverride: opts && opts.modelsOverride
+    });
+    // §60 audit：只记 import source / protocol，不记 key
+    try {
+      store.audit.add({
+        agent: 'system',
+        task: 'onboarding:import',
+        tool: 'connections',
+        target: r.connection && r.connection.id,
+        permission: 'write',
+        result: `imported source=${candidate.source && candidate.source.type} protocol=${candidate.protocolHint} assigned=${r.assigned}`
+      });
+    } catch { /* audit 失败不阻塞 */ }
+    return r;
+  });
+  // onboarding:ccswitch — 批量解析 CC Switch 配置（只读），返回真实候选数组（前端 mask 显示）
+  reg('onboarding:ccswitch', (text) => {
+    if (!text) return { batch: [] };
+    const ccSwitchParser = require('../providers/onboarding/parsers/ccSwitch');
+    // Deep Link 单条
+    if (/^ccswitch:\/\//i.test(String(text).trim())) {
+      const c = ccSwitchParser.parseDeepLink(String(text).trim());
+      return { batch: c ? [c] : [] };
+    }
+    // JSON 数组
+    let arr;
+    try { arr = JSON.parse(text); } catch { arr = null; }
+    if (Array.isArray(arr)) {
+      return { batch: ccSwitchParser.parseConfigBatch(arr) };
+    }
+    return { batch: [] };
+  });
+  // onboarding:duplicate — 重复检测（前端预览时调用）
+  reg('onboarding:duplicate', (baseUrl, provider) => {
+    const list = store.connections.list();
+    const norm = onboarding.normalizeBaseUrl(baseUrl);
+    const found = list.find(c => onboarding.normalizeBaseUrl(c.base_url) === norm && c.provider === provider);
+    return found ? { id: found.id, name: found.name } : null;
+  });
+
   // ---------- computer panel ----------
   reg('computer:windows', () => computer.manager.listWindows());
   reg('computer:screenshot', () => computer.manager.screenshot());

@@ -16,6 +16,10 @@
 * **随时停止**：AbortController 真的中断正在进行的 LLM 请求
 * **多重校验**：权限门控（ask / once / always）+ 文件路径守卫 + 密钥不落明文
 
+## 智能 API 快速接入
+
+v2.4.0 新增。在「API 连接」页面点击 **⚡ 快速接入**，把 API 地址、密钥、ENV、JSON、curl、代码片段或 CC Switch 配置粘贴进去，平台自动识别 URL / Key / Provider / 协议，安全预览后一键检测连接、发现模型并分配给主智能体。详见 [`docs/SMART_API_ONBOARDING.md`](docs/SMART_API_ONBOARDING.md)。
+
 ## 安装
 
 > 完整安装包与免安装版在 `dist-electron/` 目录中（构建产物，请参见 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)）。
@@ -58,5 +62,7 @@ npm run dist                 # 打 NSIS + Portable 到 dist-electron/
 ## 文档
 
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — 模块、数据流、设计权衡
-- [`docs/TEST_REPORT.md`](docs/TEST_REPORT.md) — 真实测试结果（83/83 通过）
+- [`docs/SMART_API_ONBOARDING.md`](docs/SMART_API_ONBOARDING.md) — 智能 API 快速接入（v2.4.0）
+- [`docs/TEST_REPORT.md`](docs/TEST_REPORT.md) — 真实测试结果
+- [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) — 第三方开源项目声明
 - [`CHANGELOG.md`](CHANGELOG.md) — 版本变更

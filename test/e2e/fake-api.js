@@ -4,24 +4,41 @@
  *
  * 能力：
  *  - GET  /v1/models              → model-A / model-B / model-C（OpenAI /models 格式）
+ *    · opts.modelsEnabled=false   → 404（§77 手动模型用例）
+ *  - GET  /v1/chat/completions    → 405（§71D / §77: probe 确认 OpenAI Chat 端点存在）
  *  - POST /v1/chat/completions    → SSE 流式回复「你好，我是测试智能体。」
  *    · model=model-FAIL  → HTTP 500（业务失败）
  *    · model=model-HANG  → 永不返回（超时 / 停止用例）
+ *    · model=model-QUICK → 回复「QUICK_CONNECT_OK」（§76 一键分配主智能体）
  *  - POST /v1/chat/completions（老模型名）→ 回复 echo
  */
 const http = require('http');
 
 const MODELS = ['model-A', 'model-B', 'model-C'];
 
-function start(preferredPort = 0) {
+function start(preferredPort = 0, opts = {}) {
+  const modelsEnabled = opts.modelsEnabled !== false; // 默认 true
   return new Promise((resolve, reject) => {
     const srv = http.createServer((req, res) => {
       const url = new URL(req.url, 'http://127.0.0.1');
       const pathname = url.pathname;
 
       if (req.method === 'GET' && pathname === '/v1/models') {
+        if (!modelsEnabled) {
+          // §77: /models 不可用，但 chat 端点可用
+          res.writeHead(404, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: { message: 'models not found' } }));
+          return;
+        }
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ object: 'list', data: MODELS.map(id => ({ id, object: 'model' })) }));
+        return;
+      }
+
+      // §71D / §77: GET /chat/completions → 405 表示端点存在（OpenAI Chat supported）
+      if (req.method === 'GET' && pathname === '/v1/chat/completions') {
+        res.writeHead(405, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: { message: 'Method Not Allowed' } }));
         return;
       }
 
@@ -44,6 +61,30 @@ function start(preferredPort = 0) {
             res.write('data: {"choices":[{"delta":{"content":"正在等待…"}}]}\n\n');
             res.flushHeaders && res.flushHeaders();
             return; // 不 end()
+          }
+
+          // §76: model-QUICK → 回复 QUICK_CONNECT_OK（一键分配主智能体验收）
+          if (model === 'model-QUICK') {
+            res.writeHead(200, {
+              'Content-Type': 'text/event-stream',
+              'Cache-Control': 'no-cache',
+              Connection: 'keep-alive'
+            });
+            const reply = 'QUICK_CONNECT_OK';
+            let i = 0;
+            const timer = setInterval(() => {
+              if (i >= reply.length) {
+                clearInterval(timer);
+                res.write('data: [DONE]\n\n');
+                res.end();
+                return;
+              }
+              const chunk = reply.slice(i, i + 3);
+              i += 3;
+              res.write(`data: ${JSON.stringify({ id: 'chatcmpl-fake', object: 'chat.completion.chunk', model, choices: [{ index: 0, delta: { content: chunk }, finish_reason: null }] })}\n\n`);
+            }, 20);
+            res.on('close', () => clearInterval(timer));
+            return;
           }
 
           // 正常 SSE 流式回复

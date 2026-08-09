@@ -275,7 +275,7 @@ async function renderConnections(body) {
   const list = await api.connections();
   state.connections = list;
   body.innerHTML = `
-    <div class="page-actions"><button class="btn primary" id="conn-add">+ 新建连接</button>
+    <div class="page-actions"><button class="btn primary" id="conn-smart">⚡ 快速接入</button><button class="btn" id="conn-add">+ 手动新建</button>
       <span class="muted">API Key 使用 Windows DPAPI（safeStorage）加密后存入本地数据库，界面只显示掩码。</span></div>
     ${list.length ? `<table class="tbl"><thead><tr><th>名称</th><th>协议</th><th>Base URL</th><th>Key</th><th>状态</th><th>模型</th><th></th></tr></thead><tbody>
       ${list.map(c => `<tr>
@@ -292,8 +292,9 @@ async function renderConnections(body) {
           <button class="btn tiny" data-edit="${c.id}">编辑</button>
           <button class="btn tiny danger" data-del="${c.id}">删除</button>
         </td></tr>`).join('')}
-    </tbody></table>` : '<div class="empty">还没有 API 连接，点击「新建连接」开始。</div>'}`;
+    </tbody></table>` : '<div class="empty">还没有 API 连接，点击「快速接入」或「手动新建」开始。</div>'}`;
 
+  $('#conn-smart').onclick = () => smartOnboard();
   $('#conn-add').onclick = () => connForm(null);
   body.querySelectorAll('[data-edit]').forEach(b => b.onclick = () => connForm(list.find(c => c.id === b.dataset.edit)));
   body.querySelectorAll('[data-del]').forEach(b => b.onclick = async () => {
@@ -469,6 +470,294 @@ function connForm(conn) {
       closeModal(); toast('已保存', 'ok'); open('connections');
     } catch (e) { toast(e.message, 'error'); }
   });
+}
+
+/* ------------------------------------------------------------------ */
+/* v2.4.0 Smart API Onboarding — 快速接入                              */
+/* ------------------------------------------------------------------ */
+
+/** §15: 前端 mask 显示，真实 key 只存在 JS 变量里供 probe/import 使用 */
+function maskKey(k) {
+  if (!k) return '未设置';
+  const s = String(k);
+  if (s.length <= 8) return s[0] + '••••' + s[s.length - 1];
+  return s.slice(0, 4) + '••••••••' + s.slice(-4);
+}
+
+const PROTOCOL_LABELS = {
+  'openai': 'OpenAI Chat', 'openai-responses': 'OpenAI Responses',
+  'anthropic': 'Anthropic', 'ollama': 'Ollama', 'local': 'LM Studio / 本地',
+  'custom': '自定义', 'mock': 'Mock'
+};
+function protoLabel(p) { return PROTOCOL_LABELS[p] || p || '未识别'; }
+
+const SOURCE_LABELS = {
+  'plain-text': '普通文本', 'env': 'ENV 配置', 'json': 'JSON',
+  'toml': 'TOML', 'curl': 'curl 命令', 'code-snippet': '代码片段',
+  'ccswitch-deeplink': 'CC Switch Deep Link', 'ccswitch-config': 'CC Switch 配置'
+};
+
+/**
+ * 快速接入大弹窗 —— spec §7/§36/§37/§38 全流程：
+ *   粘贴 → 预览 → 检测 → 确认 → 保存（可选分配主智能体）
+ */
+function smartOnboard() {
+  let candidate = null;     // 真实候选（含明文 key，仅内存）
+  let probeReport = null;   // 检测报告
+  let probeCtrl = null;     // AbortController（取消检测用）
+
+  openModal('智能 API 快速接入', '', { noFooter: true });
+  renderPasteStep();
+
+  // ─── Step 1: 粘贴 ───────────────────────────────────────────────────
+  function renderPasteStep() {
+    const modal = $('#modal');
+    modal.querySelector('.modal-body').innerHTML = `
+      <p class="muted">把 API 地址、密钥、配置或代码粘贴到这里，自动识别 URL / Key / Provider / 协议。支持：URL / Key / JSON / ENV / curl / 代码 / TOML / CC Switch。</p>
+      <textarea id="ob-paste" rows="7" placeholder="例如：&#10;接口地址：https://api.example.com/v1&#10;API Key：sk-xxxx&#10;&#10;或 curl 命令、OPENAI_API_KEY=... 、JSON 配置等"></textarea>
+      <div class="ob-presets" style="margin:10px 0">
+        <span class="muted small">常用服务（点击后只需填 API Key）：</span>
+        <div id="ob-preset-btns" style="margin-top:6px"></div>
+      </div>
+      <div class="ob-actions" style="margin-top:10px">
+        <button class="btn primary" id="ob-parse">识别配置</button>
+        <button class="btn" id="ob-ccswitch">从 CC Switch 导入</button>
+        <button class="btn" id="ob-cancel">取消</button>
+      </div>`;
+    $('#ob-cancel').onclick = closeModal;
+    $('#ob-parse').onclick = onParse;
+    $('#ob-ccswitch').onclick = onCcswitch;
+    // 渲染常用服务按钮
+    api.onboardingPresets().then(presets => {
+      $('#ob-preset-btns').innerHTML = presets.filter(p => p.id !== 'custom').map(p =>
+        `<button class="btn tiny" data-preset="${p.id}" title="${esc(p.defaultBaseUrl || '')}">${esc(p.name)}</button>`).join('') +
+        `<button class="btn tiny" data-preset="custom">自定义</button>`;
+      $('#ob-preset-btns').querySelectorAll('[data-preset]').forEach(b => b.onclick = () => onPresetPick(b.dataset.preset, presets));
+    }).catch(() => {});
+    // Ctrl+Enter 识别
+    $('#ob-paste').addEventListener('keydown', e => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) onParse(); });
+    $('#ob-paste').focus();
+  }
+
+  // 选 preset → 填好 baseUrl/protocol，让用户补 key
+  function onPresetPick(id, presets) {
+    const p = presets.find(x => x.id === id);
+    if (!p) return;
+    candidate = {
+      name: p.name, providerHint: p.id, protocolHint: p.protocol,
+      baseUrl: p.defaultBaseUrl, apiKey: null, defaultModel: null, models: [], headers: {},
+      source: { type: 'preset', parser: 'preset', confidence: 1, rawLength: 0 }
+    };
+    renderPreviewStep();
+  }
+
+  async function onParse() {
+    const text = $('#ob-paste').value.trim();
+    if (!text) { toast('请先粘贴 API 配置', 'warn'); return; }
+    try {
+      const r = await api.onboardingParse(text);
+      if (r && r.batch) { renderBatchStep(r.batch, text); return; }
+      if (!r || !r.candidate) { toast('无法识别输入，请检查格式', 'warn'); return; }
+      candidate = r.candidate;
+      renderPreviewStep();
+    } catch (e) { toast('识别失败：' + e.message, 'error'); }
+  }
+
+  async function onCcswitch() {
+    const text = $('#ob-paste').value.trim();
+    if (!text) { toast('请先粘贴 CC Switch Deep Link 或配置 JSON', 'warn'); return; }
+    try {
+      const r = await api.onboardingCcswitch(text);
+      if (!r.batch || !r.batch.length) { toast('未解析到 CC Switch Provider', 'warn'); return; }
+      renderBatchStep(r.batch, text);
+    } catch (e) { toast('CC Switch 导入失败：' + e.message, 'error'); }
+  }
+
+  // ─── Step 2: 预览（§36）─────────────────────────────────────────────
+  async function renderPreviewStep() {
+    const c = candidate;
+    if (!c) return;
+    // §47 重复检测
+    let dupNote = '';
+    try {
+      const dup = await api.onboardingDuplicate(c.baseUrl, c.protocolHint);
+      if (dup) dupNote = `<div class="warn-box">检测到可能重复的连接：<b>${esc(dup.name)}</b>（同地址 + 同协议）。继续将覆盖该连接。</div>`;
+    } catch { /* ignore */ }
+
+    $('#modal').querySelector('.modal-body').innerHTML = `
+      <h3>检测到 API 配置</h3>
+      <div class="ob-preview">
+        <label>名称<input id="ob-name" value="${esc(c.name || '')}" placeholder="连接名称"></label>
+        <label>接口地址<input id="ob-url" value="${esc(c.baseUrl || '')}"></label>
+        <label>密钥<span class="mono">${esc(maskKey(c.apiKey))}</span></label>
+        <label>推测协议<span class="chip">${esc(protoLabel(c.protocolHint))}</span> <span class="muted small">（来源：${esc(SOURCE_LABELS[c.source.type] || c.source.type || '未知')}，可信度 ${Math.round((c.source.confidence || 0) * 100)}%）</span></label>
+        ${c.defaultModel ? `<label>默认模型<span class="mono">${esc(c.defaultModel)}</span></label>` : ''}
+      </div>
+      ${dupNote}
+      <div class="ob-actions" style="margin-top:12px">
+        <button class="btn primary" id="ob-probe">开始检测</button>
+        <button class="btn" id="ob-back">重新粘贴</button>
+      </div>`;
+    $('#ob-back').onclick = renderPasteStep;
+    $('#ob-probe').onclick = renderProbeStep;
+  }
+
+  // ─── 批量导入（CC Switch 多 Provider §45/§46）──────────────────────
+  function renderBatchStep(batch, sourceText) {
+    const items = batch.map((c, i) => ({ c, checked: true, i }));
+    const refresh = () => {
+      $('#modal').querySelector('.modal-body').innerHTML = `
+        <h3>从 CC Switch 导入</h3>
+        <p class="muted small">发现 ${batch.length} 个 Provider，勾选要导入的项。</p>
+        <div class="ob-batch">${items.map(it => `
+          <label class="ob-batch-item"><input type="checkbox" data-idx="${it.i}" ${it.checked ? 'checked' : ''}>
+            <span><b>${esc(it.c.name || '未命名')}</b> <span class="muted small">${esc(protoLabel(it.c.protocolHint))} · ${esc(it.c.baseUrl || '无地址')}</span><br><span class="mono small">${esc(maskKey(it.c.apiKey))}</span></span>
+          </label>`).join('')}</div>
+        <div class="ob-actions" style="margin-top:12px">
+          <button class="btn primary" id="ob-batch-import">导入选中的 ${items.filter(x => x.checked).length} 项</button>
+          <button class="btn" id="ob-back">返回</button>
+        </div>`;
+      $('#modal').querySelectorAll('[data-idx]').forEach(cb => cb.onchange = () => {
+        items[cb.dataset.idx].checked = cb.checked;
+        $('#ob-batch-import').textContent = `导入选中的 ${items.filter(x => x.checked).length} 项`;
+      });
+      $('#ob-back').onclick = renderPasteStep;
+      $('#ob-batch-import').onclick = async () => {
+        const picked = items.filter(x => x.checked).map(x => x.c);
+        if (!picked.length) { toast('请至少勾选一项', 'warn'); return; }
+        let ok = 0, fail = 0;
+        for (const c of picked) {
+          try { await api.onboardingImport(c, {}); ok++; } catch { fail++; }
+        }
+        toast(`已导入 ${ok} 个连接${fail ? '，失败 ' + fail : ''}`, fail ? 'warn' : 'ok');
+        closeModal(); open('connections');
+      };
+    };
+    refresh();
+  }
+
+  // ─── Step 3: 检测（§37）─────────────────────────────────────────────
+  function renderProbeStep() {
+    // 从预览表单读回用户可能改过的 name/url
+    const nameEl = $('#ob-name'), urlEl = $('#ob-url');
+    if (nameEl && nameEl.value.trim()) candidate.name = nameEl.value.trim();
+    if (urlEl && urlEl.value.trim()) candidate.baseUrl = urlEl.value.trim();
+    if (!candidate.baseUrl) { toast('缺少接口地址，无法检测', 'warn'); return; }
+
+    let aborted = false;
+    $('#modal').querySelector('.modal-body').innerHTML = `
+      <h3>连接检测中…</h3>
+      <div class="ob-probing">
+        <p>正在检测 <span class="mono">${esc(candidate.baseUrl)}</span></p>
+        <p class="muted small">探测模型列表 / 协议端点，最多 4 个请求。</p>
+        <button class="btn" id="ob-abort">取消检测</button>
+      </div>`;
+    $('#ob-abort').onclick = () => { aborted = true; renderPreviewStep(); };
+
+    // §29: AbortSignal 无法跨 IPC 序列化；用 timeoutMs 控制超时，取消 = 回到预览页忽略结果
+    api.onboardingProbe(candidate, { timeoutMs: 15000 })
+      .then(report => { if (!aborted) { probeReport = report; renderResultStep(); } })
+      .catch(e => {
+        if (aborted) return;
+        $('#modal').querySelector('.modal-body').innerHTML = `
+          <h3>检测失败</h3><p class="error">${esc(e.message)}</p>
+          <div class="ob-actions"><button class="btn primary" id="ob-back">返回</button></div>`;
+        $('#ob-back').onclick = renderPreviewStep;
+      });
+  }
+
+  // ─── Step 4: 检测结果 + 最终确认（§37/§38）──────────────────────────
+  async function renderResultStep() {
+    const r = probeReport;
+    const supported = (r.candidates || []).filter(c => c.status === 'supported').map(c => c.protocol);
+    const unsupported = (r.candidates || []).filter(c => c.status === 'unsupported').map(c => c.protocol);
+    const models = r.models || [];
+    // 默认协议用推荐值；用户可改
+    let chosenProto = r.recommendedProtocol || candidate.protocolHint || 'custom';
+    // 协议选项：supported 优先，加上候选本身的 hint
+    const protoOptions = Array.from(new Set([...supported, candidate.protocolHint, 'custom'].filter(Boolean)));
+    let chosenModel = candidate.defaultModel || (models.length ? models[0] : '');
+
+    // §40: 主智能体当前配置（异步获取 agents + connections）
+    let mainInfo = '';
+    let agents = [];
+    try { agents = await api.agents(); } catch { agents = []; }
+    const main = agents.find(a => a.is_main);
+    let conns = [];
+    try { conns = await api.connections(); } catch { conns = []; }
+    if (main) {
+      const curConn = conns.find(c => c.id === main.api_connection_id);
+      mainInfo = `<div class="warn-box" id="ob-main-warn">主智能体当前使用：${curConn ? esc(curConn.name) : '未配置'} / ${esc(main.model || '未设置模型')}</div>`;
+    }
+
+    const refresh = () => {
+      $('#modal').querySelector('.modal-body').innerHTML = `
+        <h3>连接检测结果</h3>
+        <div class="ob-result">
+          <div>${r.reachable ? '<span class="chip ok">✓ 网络可达</span>' : '<span class="chip bad">✕ 网络不可达</span>'} ${r.latencyMs != null ? `<span class="muted small">${r.latencyMs}ms</span>` : ''}</div>
+          ${supported.length ? supported.map(p => `<div><span class="chip ok">✓ ${esc(protoLabel(p))}</span></div>`).join('') : ''}
+          ${unsupported.length ? unsupported.map(p => `<div><span class="chip bad">✕ ${esc(protoLabel(p))}</span></div>`).join('') : ''}
+          <div>${models.length ? `<span class="chip ok">✓ 发现 ${models.length} 个模型</span>` : '<span class="chip warn">模型列表不可用（可手动输入）</span>'}</div>
+          ${r.aborted ? '<div class="warn-box">检测已被取消，结果可能不完整。</div>' : ''}
+          ${r.error ? `<div class="error small">${esc(r.error)}</div>` : ''}
+        </div>
+        <h3 style="margin-top:14px">确认保存</h3>
+        <div class="ob-confirm">
+          <label>连接名称<input id="ob-final-name" value="${esc(candidate.name || '')}"></label>
+          <label>协议<select id="ob-final-proto">${protoOptions.map(p => `<option value="${p}" ${p === chosenProto ? 'selected' : ''}>${esc(protoLabel(p))}</option>`).join('')}</select></label>
+          <label>默认模型
+            ${models.length
+              ? `<select id="ob-final-model">${models.map(m => `<option value="${esc(m)}" ${m === chosenModel ? 'selected' : ''}>${esc(m)}</option>`).join('')}</select>`
+              : `<input id="ob-final-model" value="${esc(chosenModel || '')}" placeholder="手动输入模型 id">`}
+          </label>
+          <div class="muted small">将保存 ${models.length} 个模型（来源：远端获取）</div>
+          ${mainInfo}
+          <label class="ob-check"><input type="checkbox" id="ob-assign-main" ${main ? 'checked' : ''}> 分配给主智能体</label>
+        </div>
+        <div class="ob-actions" style="margin-top:12px">
+          <button class="btn primary" id="ob-finish">完成</button>
+          <button class="btn" id="ob-reprobe">重新检测</button>
+          <button class="btn" id="ob-back">返回粘贴</button>
+        </div>`;
+      $('#ob-final-proto').onchange = e => { chosenProto = e.target.value; };
+      if (models.length) { $('#ob-final-model').onchange = e => { chosenModel = e.target.value; }; }
+      else { $('#ob-final-model').oninput = e => { chosenModel = e.target.value; }; }
+      $('#ob-back').onclick = renderPasteStep;
+      $('#ob-reprobe').onclick = renderProbeStep;
+      $('#ob-finish').onclick = onFinish;
+    };
+    refresh();
+
+    function onFinish() {
+      candidate.name = $('#ob-final-name').value.trim() || candidate.name || '新连接';
+      candidate.protocolHint = $('#ob-final-proto').value;
+      candidate.defaultModel = typeof $('#ob-final-model').value === 'string' ? $('#ob-final-model').value.trim() : '';
+      if (models.length) candidate.models = models;
+      const assignMain = $('#ob-assign-main') && $('#ob-assign-main').checked;
+      // §40: 主智能体已有配置时二次确认
+      if (assignMain && main && main.api_connection_id) {
+        confirmBox('切换主智能体 API', `主智能体当前已配置 API，确定切换到新连接「${candidate.name}」？`).then(ok => {
+          if (ok) doImport(true);
+        });
+      } else {
+        doImport(assignMain);
+      }
+    }
+
+    async function doImport(assignMain) {
+      try {
+        const r = await api.onboardingImport(candidate, { assignToMain: assignMain, forceOverwrite: true });
+        if (r.duplicate && !r.assigned) {
+          toast('检测到重复连接，已覆盖更新', 'warn');
+        } else {
+          toast(assignMain && r.assigned ? '已保存并分配给主智能体' : '已保存', 'ok');
+        }
+        closeModal();
+        open('connections');
+        if (assignMain) window.dispatchEvent(new CustomEvent('models-updated'));
+      } catch (e) { toast('保存失败：' + e.message, 'error'); }
+    }
+  }
 }
 
 /* ------------------------------------------------------------------ */

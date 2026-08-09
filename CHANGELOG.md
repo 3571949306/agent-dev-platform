@@ -1,5 +1,44 @@
 # Changelog
 
+## v2.4.0 — 2026-08-09
+
+> Smart API Onboarding — 智能 API 快速接入。用户拿到任何常见 AI API 后，不需要再手工研究 Provider、协议、Base URL、模型列表。一次粘贴 + 几次确认即可完成从「拿到 API 信息」到「主智能体已能使用这个 API」。**不破坏 v2.3.2 稳定基线，不新增无关功能。**
+
+### Smart API Onboarding
+
+* **万能粘贴**：支持普通文本 / 纯 URL+Key / ENV / PowerShell ENV / JSON / JS / Python / curl / TOML / CC Switch Deep Link / CC Switch Config 共 11 种输入格式，7 个独立 Parser（`src/providers/onboarding/parsers/`），本地规则识别不调用 LLM。
+* **统一 ImportCandidate**：所有 Parser 输出 `ImportCandidate` 结构（`src/providers/onboarding/candidate.js`），用户确认前不写数据库。
+* **Secret 安全**：GUI 始终掩码显示（`sk-abcd••••wxyz`）；console / audit / model_calls / event / trace / E2E screenshot / TEST_REPORT 均不记录完整 Key；Parser debug 使用 `sanitizeCandidate()`；沿用 Electron safeStorage / DPAPI 加密落盘，不新增 Secret 数据库。
+* **URL Normalizer**：自动处理尾部斜杠和版本段，避免 `/v1/v1/models`（`src/providers/onboarding/urlNormalizer.js`）。
+* **Provider Preset Registry**：内置 7 个 Preset（OpenAI / Anthropic / OpenRouter / DeepSeek / Ollama / LM Studio / 自定义），Preset 与线协议严格分离（`src/providers/onboarding/presets.js`）。
+* **Protocol Probe**：轻量 HTTP GET 探测（`/models`、`/chat/completions`、`/responses`、`/v1/messages`、`/api/tags`），MAX_PROBES=4，复用 v2.2 HTTP Abort 合约，用户取消 < 2s 停止（`src/providers/onboarding/probe.js`）。
+* **模型自动发现**：检测成功后自动从 `/models` 获取模型列表（`source = remote`）；`/models` 404 时显示手动输入框（`source = manual`）。
+* **重复检测**：基于 `baseUrl` + `protocol` 判断（不用 Secret hash），提示更新现有 / 另存为新连接 / 取消。
+* **一键分配主智能体**：最终确认页可勾选分配给主智能体；主智能体已配置时显示当前连接 + 模型，禁止静默覆盖。
+* **CC Switch Import**：基于 CC Switch commit `413c09e`（v3.19.2）实际源码研究，支持 Deep Link 单个导入和 Config JSON 批量导入；只读，用户主动点击才读取（`src/providers/onboarding/parsers/ccSwitch.js`）。
+* **IPC**：`onboarding:presets` / `onboarding:parse` / `onboarding:probe` / `onboarding:import` / `onboarding:ccswitch` / `onboarding:duplicate`。
+* **GUI**：API 连接页新增「⚡ 快速接入」按钮，大弹窗流程（粘贴 → 预览 → 检测 → 确认），旧手动新建 / 编辑 / 测试 / 拉取模型全部保留。
+
+### 文档
+
+* 新增 `docs/SMART_API_ONBOARDING.md`：支持格式、识别流程、协议检测、模型发现、CC Switch Import、Secret 安全、Deep Link、限制。
+* 新增 `THIRD_PARTY_NOTICES.md`：CC Switch MIT License attribution。
+* `README.md` 增加智能 API 快速接入简介。
+* `CHANGELOG.md` 新增 v2.4.0 条目。
+
+### 测试与质量
+
+* `npm test`：**309 / 309 PASS / 0 FAIL**（v2.3.2 250 + 新增 onboarding 52 + onboardingprobe 7）。
+* `npm run e2e`：**14 / 14 PASS**（原 9 + 新增 Smart API 5：万能粘贴 / Secret 不泄漏 / 一键分配主智能体 / 手动模型 / CC Switch Import）。
+* Parser 单元测试覆盖：plain text / URL+key / ENV / PowerShell ENV / JSON / curl / JS / Python / TOML / CC Switch / malformed / multiple URLs / multiple keys / no key / no URL。
+* Security 测试：API Key 不出现在 logs / audit / error / serialized preview，Mask 正确。
+* URL Normalization 测试：不会生成 `/v1/v1`。
+* Protocol Probe 测试：Server A（Chat only）/ Server B（Chat + Responses）/ Server C（Anthropic）/ Server D（/models 404 但可用）/ Probe Abort（hang → cancel < 2s）。
+
+### 版本
+
+* `package.json` 版本升级 `2.3.2 → 2.4.0`。
+
 ## v2.3.2 — 2026-08-09
 
 > Release Candidate：把 Agent Dev Platform 从「功能基本完成」修到「第一版可长期实际使用」。**禁止新增无关功能，禁止用扩大超时掩盖 GUI Bug，禁止把测试失败写成「部分成功」。** 本轮全部 E2E 在真实 Electron 窗口下 9/9 PASS。

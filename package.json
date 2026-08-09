@@ -1,6 +1,6 @@
 {
   "name": "agent-dev-platform",
-  "version": "2.3.2",
+  "version": "2.4.0",
   "description": "Agent Dev Platform - 本地 AI Agent IDE（智能体开发环境）：Coding Agent / 多 Agent 调度 / API 管理 / Computer Use / MCP / 外部 Agent 聚合",
   "main": "main.js",
   "scripts": {

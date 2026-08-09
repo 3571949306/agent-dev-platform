@@ -46,6 +46,14 @@ export const api = {
   connTest: (id) => call('connections:test', id),
   connModels: (id) => call('connections:models', id),
 
+  // onboarding (v2.4.0 Smart API)
+  onboardingPresets: () => call('onboarding:presets'),
+  onboardingParse: (text) => call('onboarding:parse', text),
+  onboardingProbe: (candidate, opts) => call('onboarding:probe', candidate, opts),
+  onboardingImport: (candidate, opts) => call('onboarding:import', candidate, opts),
+  onboardingCcswitch: (text) => call('onboarding:ccswitch', text),
+  onboardingDuplicate: (baseUrl, provider) => call('onboarding:duplicate', baseUrl, provider),
+
   // diagnostics (P1-5) — live capability probing + call-record audit
   diagCapabilities: (connId, modelId, which) => call('diagnostics:capabilities', connId, modelId, which),
   diagKnown: (connId, modelId) => call('diagnostics:known', connId, modelId),

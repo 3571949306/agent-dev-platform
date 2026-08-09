@@ -343,7 +343,20 @@ const COLUMN_MIGRATIONS = [
   // v2.5.1 §29: DEFAULT '' so v2.4.1 老库迁移后老连接 import_source = '' (一致),
   // 而不是 NULL。Runtime/UI 据此把空串视为 manual 来源。
   ['api_connections', 'import_source', 'TEXT', "''"],
-  ['api_connections', 'import_source_path', 'TEXT', "''"]
+  ['api_connections', 'import_source_path', 'TEXT', "''"],
+  // v2.7.0 — Agent Integration Hub columns
+  // (capabilities_json already exists in the SCHEMA, so it is intentionally
+  //  omitted here to avoid a duplicate ADD COLUMN.)
+  ['external_agents', 'transport', 'TEXT', "''"],
+  ['external_agents', 'health_status', 'TEXT', "'unknown'"],
+  ['external_agents', 'detected_version', 'TEXT', "''"],
+  ['external_agents', 'executable_path', 'TEXT', "''"],
+  ['external_agents', 'last_health_check', 'TEXT'],
+  ['external_agents', 'enabled', 'INTEGER', '1'],
+  // v2.7.0 — parent/child run tracking
+  ['runs', 'provider_type', 'TEXT', "''"],
+  ['runs', 'adapter_id', 'TEXT', "''"],
+  ['runs', 'parent_run_id', 'TEXT']
 ];
 
 function ensureColumns(db) {

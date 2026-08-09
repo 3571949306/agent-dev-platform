@@ -1,5 +1,81 @@
 # Changelog
 
+## v2.7.0 — 2026-08-09
+
+> Agent Integration Hub —— 统一智能体适配层。把 Agent Dev Platform 从「拥有多个 Agent 功能」升级为「可以统一管理和调度各种 Agent 的平台」。新增 AgentAdapter 统一接口、AgentRegistry 运行态注册表、AgentRouter 确定性评分路由、Capability Registry、Health Manager、Lifecycle Manager、Event Normalizer，以及 Native / Codex / WorkBuddy 三种适配器和 Generic CLI / HTTP / Desktop 适配器。**不改变 v2.6.0 的 Main Agent Runtime 核心逻辑；旧库、旧连接、旧外部智能体完全兼容。**
+
+### 一、AgentAdapter 统一接口（§6）
+
+* 新增 `src/agents/`：hub/（9 个模块）+ adapters/（7 个文件）+ manifests/（1 个文件），共 17 个新模块。
+* `BaseAgentAdapter` 定义统一接口：`getManifest()` / `detect()` / `healthCheck()` / `startTask()` / `sendMessage()` / `cancel()` / `getStatus()` / `getResult()` / `dispose()`。
+* 每一个 Agent 都必须通过 Manifest 描述：`id` / `displayName` / `source` / `transport` / `capabilities` / `availability` / `version` / `path` / `maxConcurrency`。
+* Transport 类型：`native` / `sdk` / `http` / `cli` / `protocol` / `desktop`。
+
+### 二、Capability System（§18-§19）
+
+* 17 种统一能力：`coding` / `planning` / `research` / `review` / `filesystem` / `terminal` / `git` / `browser` / `computer` / `vision` / `mcp` / `longRunning` / `parallel` / `streaming` / `resume` / `diff` / `sandbox`。
+* `CapabilityRegistry.match(agentCaps, required, preferred)` 返回 `{ matched, missing, preferredMatched }`。
+
+### 三、AgentRegistry + AgentRouter（§10, §20-§24）
+
+* `AgentRegistry` 是 Agent Provider 运行态唯一真源：`register()` / `unregister()` / `get()` / `list()` / `detectAll()` / `getByCapability()` / `getManifests()`。
+* `AgentRouter` 确定性评分（不调用 LLM）：Required 匹配 +40/缺失 -100、Preferred +10、Availability healthy +20/degraded +5/unavailable -200、Busy -30、User Preference +50、Manual Override +1000、Delegation Path -1000。
+* 路由结果可解释：每个候选包含 `reasons[]` 和 `penalties[]`。
+* Fallback Chain：失败自动切换下一候选，最多 3 次，超限 `AGENT_ROUTE_EXHAUSTED`。
+
+### 四、Health Manager + Lifecycle Manager（§25-§28）
+
+* 统一健康状态：`unknown` / `checking` / `healthy` / `degraded` / `unavailable` / `disabled`。
+* Health Check 按 Transport 差异化：Native（runtime available）/ CLI（executable + version）/ HTTP（health endpoint）/ Desktop（window detection），全部 bounded timeout（5s）+ TTL cache（30s）。
+* 统一生命周期：`idle` / `starting` / `running` / `waiting` / `completed` / `failed` / `cancelled` / `timeout` / `unavailable`。
+
+### 五、Unified Agent Events（§29-§31）
+
+* 21 种统一事件：`agent.detected` / `agent.health.changed` / `agent.run.started` / `agent.run.status` / `agent.plan.updated` / `agent.message` / `agent.tool.started` / `agent.tool.completed` / `agent.tool.failed` / `agent.file.read` / `agent.file.changed` / `agent.command.started` / `agent.command.completed` / `agent.test.failed` / `agent.test.passed` / `agent.permission.required` / `agent.run.completed` / `agent.run.failed` / `agent.run.cancelled` / `agent.run.timeout` / `agent.fallback`。
+* `EventNormalizer` 把 Native（runtime events）/ CLI（stdout）/ Desktop（UI state）/ HTTP（response）统一映射为 `AgentEvent`，并过滤密钥（token/key/auth/secret/password/bearer/session）。
+
+### 六、Adapters（§12-§17）
+
+* `NativeAgentAdapter`：包装 v2.6.0 `MainAgentRuntime`，不复制第二套 Agent Loop。
+* `CodexAgentAdapter`：包装现有 `runCodex()`，统一 detect/healthCheck/startTask/cancel。
+* `WorkBuddyAgentAdapter`：包装 `DesktopAgentBridge`，Main Agent 不再直接调用 Bridge。
+* `CliAgentAdapter`：通用 CLI 适配器，Codex / Claude Code / 其他 CLI Agent 共享。
+* `HttpAgentAdapter`：通用 HTTP 适配器，为 OpenCode / OpenHands 准备。
+* `DesktopAgentAdapter`：通用桌面适配器，WorkBuddy 是其特化。
+
+### 七、Main Agent delegate → Hub（§33-§37）
+
+* v2.6.0 的 `delegate` Action 正式接入 `AgentHub`。
+* 指定 `agentId` → `hub.start(agentId, task)`；不指定 → `hub.startAuto(task)` 让 Router 自动选。
+* Parent/Child Run 关联：`parent_run_id` 链接委托 Run 到父 Run，GUI 可显示 `Main Agent └─ Codex`。
+* Delegation Path 防递归：`A → B → A` 被阻止。
+* Cancel Isolation：取消 Run A 不影响 Run B。
+
+### 八、GUI Agent Center（§40-§43）
+
+* 智能体页面新增「Agent Integration Hub」分区。
+* Agent 卡片从 Registry 获取（非 GUI hardcode），显示 Transport / Health / Capability Tags。
+* 「测试」按钮触发真实 `healthCheck`，显示版本和延迟。
+* 「任务路由测试」输入任务描述，显示 Router 推荐排序 + 理由。
+
+### 九、DB Migration（§11）
+
+* `external_agents` 表新增列：`transport` / `health_status` / `detected_version` / `executable_path` / `last_health_check` / `enabled`（向后兼容，ALTER TABLE ADD COLUMN）。
+* `runs` 表新增列：`provider_type` / `adapter_id` / `parent_run_id`。
+* 新增 `settings` 中 `agent_hub_prefs` 键：`routingMode` / `preferredAgent` / `disabledAgents`。
+
+### 十、测试
+
+* 原 617 tests 全部保留。新增 147 tests（9 个文件）。
+* `test/fakes/`：4 个 deterministic fake adapter（Native / CLI / HTTP / Desktop）。
+* `test/agentAdapter.test.js`（18 tests）/ `test/agentRegistry.test.js`（12）/ `test/capabilityRegistry.test.js`（15）/ `test/agentRouter.test.js`（14）/ `test/agentHub.test.js`（21）/ `test/agentHealth.test.js`（14）/ `test/agentLifecycle.test.js`（19）/ `test/agentEvents.test.js`（24）/ `test/delegation.test.js`（10）。
+* `test/e2e/agent-hub.spec.js`：Case 31-35（Agent Center / Capability Routing / Fallback / Cancel Isolation / Main Agent Delegate）。
+* **总计 764 tests，0 FAIL。**
+
+### 十一、文档
+
+* 新增 `docs/AGENT_INTEGRATION_HUB.md`：Architecture / AgentAdapter / Manifest / Capabilities / Registry / Router / Lifecycle / Health / Events / Fallback / Delegation / Security / Adding New Agent。
+
 ## v2.6.0 — 2026-08-09
 
 > Main Agent Autonomous Coding Loop —— 让主智能体真正独立完成编码任务。在 v2.5.1 基础上新增状态机驱动的 Main Agent Runtime，主智能体不再依赖外部智能体（Codex / WorkBuddy）即可走完「理解需求 → 读项目 → 分析代码 → 制定计划 → 修改文件 → 运行命令 → 测试 → 错误检测 → 修复 → 输出结果」的完整闭环。**不改变 v2.4.x/v2.5.x 的 API 连接、Provider 请求路径与 External Import 链路；旧库与旧连接完全兼容。**

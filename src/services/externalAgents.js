@@ -359,5 +359,6 @@ async function runExternalAgent(adapter, taskText, ctx = {}) {
 
 module.exports = {
   runExternalAgent, runCodex, runWorkBuddyBridge, runHttpAgent,
-  killTree, resolveCodexCwd, TERMINAL_STATES, mapExternalResult
+  killTree, resolveCliInPath, resolveCodexCli, resolveCodexCwd,
+  TERMINAL_STATES, mapExternalResult, structured
 };

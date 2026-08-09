@@ -93,6 +93,12 @@ export const api = {
   extUpdate: (id, b) => call('externalAgents:update', id, b),
   extRemove: (id) => call('externalAgents:remove', id),
 
+  // v2.6.0 — Agent Integration Hub（注册表 / 路由 / 健康）
+  hubAvailable: () => call('hub:available'),
+  hubManifests: () => call('hub:manifests'),
+  hubRoute: (task) => call('hub:route', task),
+  hubHealth: (opts) => call('hub:health', opts),
+
   // conversations
   conversations: (projectId) => call('conversations:list', projectId),
   convCreate: (b) => call('conversations:create', b),
@@ -130,5 +136,17 @@ export const api = {
   computerWindows: () => call('computer:windows'),
   computerShot: () => call('computer:screenshot'),
   computerFocus: (t) => call('computer:focus', t),
-  browserStatus: () => call('browser:status')
+  browserStatus: () => call('browser:status'),
+
+  // v2.7.0 — Agent Integration Hub
+  hubManifests: () => call('hub:manifests'),
+  hubAvailable: () => call('hub:available'),
+  hubDetect: () => call('hub:detect'),
+  hubHealth: (opts) => call('hub:health', opts),
+  hubRoute: (task) => call('hub:route', task),
+  hubStart: (agentId, task) => call('hub:start', { agentId, task }),
+  hubStartAuto: (task) => call('hub:startAuto', { task }),
+  hubCancel: (runId) => call('hub:cancel', runId),
+  hubStatus: (runId) => call('hub:status', runId),
+  hubResult: (runId) => call('hub:result', runId)
 };

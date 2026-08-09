@@ -25,6 +25,19 @@ const { pickVisionModel } = require('../services/visionReader');
 const { RunManager } = require('../agent/runManager');
 // v2.6.0 — Main Agent Runtime（自主编码闭环）。独立 IPC 模块，避免 handlers.js 膨胀。
 const mainAgentIpc = require('./mainAgent');
+// v2.7.0 — Agent Integration Hub
+const { createAgentHub, setAgentHub } = require('../agents/hub/agentHub');
+const { createAgentRegistry } = require('../agents/hub/agentRegistry');
+const { createAgentRouter } = require('../agents/hub/agentRouter');
+const { createHealthManager } = require('../agents/hub/healthManager');
+const { createLifecycleManager } = require('../agents/hub/lifecycleManager');
+const { createEventNormalizer } = require('../agents/hub/eventNormalizer');
+const { createRunBridge } = require('../agents/hub/runBridge');
+const { createCapabilityRegistry } = require('../agents/hub/capabilityRegistry');
+const { BUILTIN_AGENT_MANIFESTS } = require('../agents/manifests/builtinAgents');
+const { NativeAgentAdapter } = require('../agents/adapters/nativeAgentAdapter');
+const { CodexAgentAdapter } = require('../agents/adapters/codexAgentAdapter');
+const { WorkBuddyAgentAdapter } = require('../agents/adapters/workBuddyAgentAdapter');
 
 const mcpManager = new McpManager();
 const browser = createBrowserTools();
@@ -45,6 +58,26 @@ let testFilePickPath = null;
 
 // v2.3.1 (P0-2/P0-3/P0-4) — 全应用唯一的 Run 状态机。只有它能宣布 Run 终态。
 const runManager = new RunManager({ store, emit });
+
+// v2.7.0 — Agent Integration Hub
+const capabilityRegistry = createCapabilityRegistry();
+const agentRegistry = createAgentRegistry();
+const agentPreferences = store.agentPrefs || { getRoutingMode: () => 'auto', getPreferredAgent: () => null, getDisabledAgents: () => [] };
+const agentRouter = createAgentRouter({ registry: agentRegistry, preferences: agentPreferences });
+const healthManager = createHealthManager({ registry: agentRegistry });
+const lifecycleManager = createLifecycleManager({ emit });
+const eventNormalizer = createEventNormalizer({ emit });
+const runBridge = createRunBridge({ runManager, lifecycleManager, emit });
+const agentHub = createAgentHub({ registry: agentRegistry, router: agentRouter, healthManager, lifecycleManager, eventNormalizer, runBridge, emit });
+setAgentHub(agentHub);
+
+// Register built-in adapters
+const nativeAdapter = new NativeAgentAdapter({ manifest: BUILTIN_AGENT_MANIFESTS[0], runMainAgentFn: require('../agent/runtime/mainAgentRuntime').runMainAgent, emit });
+agentHub.register(nativeAdapter);
+const codexAdapter = new CodexAgentAdapter({ manifest: BUILTIN_AGENT_MANIFESTS[1], store });
+agentHub.register(codexAdapter);
+const workBuddyAdapter = new WorkBuddyAgentAdapter({ manifest: BUILTIN_AGENT_MANIFESTS[2], computerManager: computer.manager });
+agentHub.register(workBuddyAdapter);
 
 // v2.4.1 — ProbeManager：真正的 GUI Probe Cancel（abort fetch）+ probeId 生命周期。
 const sec = require('../security/secret');
@@ -829,6 +862,18 @@ function register(window) {
     if (resolve) { pendingPermissions.delete(reqId); resolve({ decision, range }); }
     return { ok: true };
   });
+
+  // v2.7.0 — Agent Integration Hub IPC
+  ipcMain.handle('hub:manifests', () => agentHub.getManifests());
+  ipcMain.handle('hub:available', async () => agentHub.getAvailable());
+  ipcMain.handle('hub:detect', async () => { return agentHub.detect(); });
+  ipcMain.handle('hub:health', async (e, { force = false } = {}) => agentHub.health({ force }));
+  ipcMain.handle('hub:route', (e, task) => agentHub.route(task));
+  ipcMain.handle('hub:start', async (e, { agentId, task }) => agentHub.start(agentId, task));
+  ipcMain.handle('hub:startAuto', async (e, { task }) => agentHub.startAuto(task));
+  ipcMain.handle('hub:cancel', async (e, runId) => agentHub.cancel(runId));
+  ipcMain.handle('hub:status', async (e, runId) => agentHub.status(runId));
+  ipcMain.handle('hub:result', async (e, runId) => agentHub.result(runId));
 }
 
 // connect MCP servers marked connected at startup

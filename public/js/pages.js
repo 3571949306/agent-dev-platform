@@ -1244,6 +1244,16 @@ async function renderAgents(body) {
       <button class="btn primary" id="agent-add">+ 新建智能体</button>
       <button class="btn" id="ext-add">+ 接入外部智能体</button>
     </div>
+    <h3>Agent Integration Hub</h3>
+    <div class="cards" id="hub-cards"><div class="muted small">正在加载注册表…</div></div>
+    <div id="hub-router-preview" style="margin-top:16px">
+      <h4>任务路由测试</h4>
+      <div style="display:flex;gap:8px">
+        <input type="text" id="hub-route-input" placeholder="输入任务描述..." style="flex:1">
+        <button class="btn" id="hub-route-btn">路由测试</button>
+      </div>
+      <div id="hub-route-results" style="margin-top:8px"></div>
+    </div>
     <h3>本地智能体</h3>
     <div class="cards">${native.map(a => `
       <div class="acard">
@@ -1279,6 +1289,109 @@ async function renderAgents(body) {
     if (!await confirmBox('删除外部智能体', '确定删除？')) return;
     await api.extRemove(b.dataset.ed); toast('已删除'); open('agents');
   });
+
+  // v2.6.0 — Agent Integration Hub：从注册表加载统一视图 + 路由预览
+  loadHubCards(body);
+  const routeBtn = $('#hub-route-btn', body);
+  if (routeBtn) routeBtn.onclick = () => runHubRoutePreview(body);
+}
+
+/** 健康状态 → chip CSS class */
+function hubHealthClass(status) {
+  if (status === 'healthy') return 'ok';
+  if (status === 'degraded') return '';
+  if (status === 'unavailable') return 'bad';
+  return '';
+}
+
+/** 健康状态 → 展示文本 */
+function hubHealthText(status) {
+  return ({ healthy: '健康', degraded: '降级', unavailable: '不可用', checking: '检查中…', disabled: '已禁用', unknown: '未知' })[status] || '未知';
+}
+
+/** 能力键 → 展示标签（首字母大写 camelCase） */
+function hubCapLabel(cap) {
+  const map = { coding: 'Coding', planning: 'Planning', research: 'Research', review: 'Review', filesystem: 'Filesystem', terminal: 'Terminal', git: 'Git', browser: 'Browser', computer: 'Computer', vision: 'Vision', mcp: 'MCP', longRunning: 'LongRunning', parallel: 'Parallel', streaming: 'Streaming', resume: 'Resume', diff: 'Diff', sandbox: 'Sandbox' };
+  return map[cap] || cap;
+}
+
+/** 从 Agent Integration Hub 注册表加载并渲染统一卡片视图 */
+async function loadHubCards(body) {
+  const cardsEl = $('#hub-cards', body);
+  if (!cardsEl) return;
+  let available = [];
+  let manifests = [];
+  try {
+    [available, manifests] = await Promise.all([api.hubAvailable(), api.hubManifests()]);
+  } catch (e) {
+    cardsEl.innerHTML = `<div class="muted small">注册表不可用：${esc(e.message)}</div>`;
+    return;
+  }
+  if (!Array.isArray(available) || !available.length) {
+    cardsEl.innerHTML = '<div class="empty">注册表中没有可用 Agent</div>';
+    return;
+  }
+  const manifestById = new Map((manifests || []).map(m => [m && m.id, m]));
+  cardsEl.innerHTML = available.map(a => {
+    const m = manifestById.get(a.id) || {};
+    const name = esc(m.displayName || a.id);
+    const transport = esc(a.transport || a.adapterType || 'unknown');
+    const caps = (m.capabilities && typeof m.capabilities === 'object')
+      ? Object.keys(m.capabilities).filter(k => m.capabilities[k])
+      : (Array.isArray(a.capabilities) ? a.capabilities : []);
+    const healthStatus = (a.health && a.health.status) || a.healthStatus || 'unknown';
+    return `<div class="acard" data-hub-id="${esc(a.id)}">
+      <div class="acard-h"><b>${name}</b><span class="chip">${transport}</span><span class="chip ${hubHealthClass(healthStatus)}">${esc(hubHealthText(healthStatus))}</span></div>
+      <div class="acard-meta">${caps.map(c => `<span class="chip">${esc(hubCapLabel(c))}</span>`).join('') || '<span class="muted small">无能力声明</span>'}</div>
+      <div class="acard-f"><button class="btn tiny" data-hub-test="${esc(a.id)}">测试</button></div>
+    </div>`;
+  }).join('');
+  cardsEl.querySelectorAll('[data-hub-test]').forEach(b => b.onclick = async () => {
+    b.disabled = true;
+    const orig = b.textContent;
+    b.textContent = '检测中…';
+    try {
+      await api.hubHealth({ force: true });
+      await loadHubCards(body);
+      toast('健康检查已更新', 'ok');
+    } catch (e) {
+      toast('健康检查失败：' + e.message, 'error');
+    } finally {
+      b.disabled = false;
+      b.textContent = orig;
+    }
+  });
+}
+
+/** 任务路由预览：输入任务描述 → 调用 hub:route → 展示评分排序结果 */
+async function runHubRoutePreview(body) {
+  const input = $('#hub-route-input', body);
+  const results = $('#hub-route-results', body);
+  const btn = $('#hub-route-btn', body);
+  if (!input || !results) return;
+  const desc = input.value.trim();
+  results.innerHTML = '<div class="muted small">路由计算中…</div>';
+  if (btn) { btn.disabled = true; }
+  try {
+    const ranked = await api.hubRoute({ required: ['coding', 'filesystem'], preferred: ['git'], description: desc });
+    if (!Array.isArray(ranked) || !ranked.length) {
+      results.innerHTML = '<div class="muted small">没有匹配的 Agent</div>';
+      return;
+    }
+    results.innerHTML = ranked.map((r, i) => {
+      const reasons = (r.reasons || []).map(x => `<li>${esc(x)}</li>`).join('');
+      const penalties = (r.penalties || []).map(x => `<li class="muted small">${esc(x)}</li>`).join('');
+      return `<div class="acard" style="margin-bottom:8px">
+        <div class="acard-h"><b>#${i + 1} ${esc(r.agentId)}</b><span class="chip">score ${r.score}</span></div>
+        ${reasons ? `<ul class="small" style="margin:4px 0 0 16px">${reasons}</ul>` : ''}
+        ${penalties ? `<ul class="small" style="margin:4px 0 0 16px">${penalties}</ul>` : ''}
+      </div>`;
+    }).join('');
+  } catch (e) {
+    results.innerHTML = `<div class="err small">${esc(e.message)}</div>`;
+  } finally {
+    if (btn) { btn.disabled = false; }
+  }
 }
 
 function agentForm(agent, ctx) {

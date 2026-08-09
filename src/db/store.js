@@ -564,6 +564,36 @@ const settings = {
   all() { const rows = db().prepare('SELECT key,value_json FROM settings').all(); const o = {}; rows.forEach(r => o[r.key] = p(r.value_json, null)); return o; }
 };
 
+// v2.7.0 — Agent Hub preferences（持久化在 settings 表的 agent_hub_prefs 键）
+const agentPrefs = {
+  get() {
+    const row = db().prepare('SELECT value_json FROM settings WHERE key=?').get('agent_hub_prefs');
+    return row ? p(row.value_json, {}) : {};
+  },
+  set(prefs) {
+    const t = now();
+    const existing = db().prepare('SELECT key FROM settings WHERE key=?').get('agent_hub_prefs');
+    if (existing) {
+      db().prepare('UPDATE settings SET value_json=? WHERE key=?').run(j(prefs), 'agent_hub_prefs');
+    } else {
+      db().prepare('INSERT INTO settings (key, value_json) VALUES (?,?)').run('agent_hub_prefs', j(prefs));
+    }
+    return prefs;
+  },
+  getRoutingMode() { return agentPrefs.get().routingMode || 'auto'; },
+  getPreferredAgent() { return agentPrefs.get().preferredAgent || null; },
+  getDisabledAgents() { return agentPrefs.get().disabledAgents || []; },
+  setRoutingMode(mode) { const p = agentPrefs.get(); p.routingMode = mode; return agentPrefs.set(p); },
+  setPreferredAgent(agentId) { const p = agentPrefs.get(); p.preferredAgent = agentId; return agentPrefs.set(p); },
+  toggleAgentDisabled(agentId, disabled) {
+    const p = agentPrefs.get();
+    p.disabledAgents = p.disabledAgents || [];
+    if (disabled && !p.disabledAgents.includes(agentId)) p.disabledAgents.push(agentId);
+    if (!disabled) p.disabledAgents = p.disabledAgents.filter(id => id !== agentId);
+    return agentPrefs.set(p);
+  }
+};
+
 // ---------- runs (v2.3.1: Run 持久化，重启后把非终态标记为 interrupted) ----------
 const runs = {
   upsert(run) {
@@ -661,5 +691,5 @@ module.exports = {
   db, init: dbm.initDb, getDb: dbm.getDb,
   projects, connections, models, prompts, skills, agents, externalAgents,
   conversations, messages, events, tasks, runs, agentMessages, tools, mcpServers,
-  memories, checkpoints, fileChanges, usage, modelCalls, permissionGrants, audit, settings, migrateFromJson
+  memories, checkpoints, fileChanges, usage, modelCalls, permissionGrants, audit, settings, agentPrefs, migrateFromJson
 };

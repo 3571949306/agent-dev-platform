@@ -2,7 +2,7 @@
 
 > 本地 AI Agent IDE（智能体开发环境）—— 一个真正能读项目、改代码、跑命令、调子 Agent、把活干完的 Windows 桌面 Coding Agent。
 
-![platform](https://img.shields.io/badge/platform-Windows%2010%2F11-0078d4) ![electron](https://img.shields.io/badge/electron-31-47848F) ![node](https://img.shields.io/badge/node-20-339933) ![sqlite](https://img.shields.io/badge/sqlite-WAL-003B57) ![tests](https://img.shields.io/badge/tests-617%2B30-3fb950)
+![platform](https://img.shields.io/badge/platform-Windows%2010%2F11-0078d4) ![electron](https://img.shields.io/badge/electron-31-47848F) ![node](https://img.shields.io/badge/node-20-339933) ![sqlite](https://img.shields.io/badge/sqlite-WAL-003B57) ![tests](https://img.shields.io/badge/tests-764%2B35-3fb950)
 
 ## 它能做什么
 
@@ -41,6 +41,35 @@ v2.6.0 新增。主智能体现在能独立走完整个编码任务，**不依�
 
 详见 [`docs/MAIN_AGENT_RUNTIME.md`](docs/MAIN_AGENT_RUNTIME.md)。
 
+## Agent Integration Hub
+
+v2.7.0 新增。把平台从「拥有多个 Agent 功能」升级为「可以统一管理和调度各种 Agent 的平台」。
+
+```
+                        Main Agent
+                            │
+                       Agent Router
+                            │
+                  Agent Integration Hub
+                            │
+       ┌────────────────────┼─────────────────────┐
+       │                    │                     │
+ Native Agents        External Agents         Future Agents
+ ─────────────        ───────────────         ─────────────
+ Main Coding          Codex                   Cline
+ Research             WorkBuddy               OpenCode
+ Computer             Claude Code             OpenHands
+```
+
+* **AgentAdapter 统一接口**：所有 Agent 通过同一接口接入（detect / healthCheck / startTask / cancel / getResult）
+* **AgentRouter 确定性评分**：按 Capability 匹配 + Health + Busy 状态打分，可解释，不调用 LLM
+* **Capability Registry**：17 种统一能力（coding / terminal / git / browser / computer / mcp 等）
+* **Fallback Chain**：首选 Agent 失败自动切换，最多 3 次
+* **当前已接入**：Native Agent / Codex / WorkBuddy
+* **未来接入**（只需写 Adapter + 注册 Manifest + 通过 Contract Tests）：Cline / OpenCode / OpenHands
+
+详见 [`docs/AGENT_INTEGRATION_HUB.md`](docs/AGENT_INTEGRATION_HUB.md)。
+
 ## 安装
 
 > 完整安装包与免安装版在 `dist-electron/` 目录中（构建产物，请参见 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)）。
@@ -67,7 +96,7 @@ v2.6.0 新增。主智能体现在能独立走完整个编码任务，**不依�
 ```bash
 npm install                  # 装依赖
 npm run rebuild              # 把 better-sqlite3 重新按 Electron ABI 编译
-npm run test                 # 跑 617 个单元 / 集成 / 服务端到端测试
+npm run test                 # 跑 764 个单元 / 集成 / 服务端到端测试
 npm run smoke                # 启 Electron + 探测渲染层是否挂载（headless 友好）
 npm run electron             # 开发模式启动
 npm run dist                 # 打 NSIS + Portable 到 dist-electron/
@@ -86,6 +115,7 @@ npm run dist                 # 打 NSIS + Portable 到 dist-electron/
 - [`docs/SMART_API_ONBOARDING.md`](docs/SMART_API_ONBOARDING.md) — 智能 API 快速接入（v2.4.0）
 - [`docs/EXTERNAL_CONFIG_IMPORT.md`](docs/EXTERNAL_CONFIG_IMPORT.md) — 外部 API 配置一键迁移（v2.5.0）
 - [`docs/MAIN_AGENT_RUNTIME.md`](docs/MAIN_AGENT_RUNTIME.md) — Main Agent 自主编码闭环（v2.6.0）
+- [`docs/AGENT_INTEGRATION_HUB.md`](docs/AGENT_INTEGRATION_HUB.md) — Agent Integration Hub 统一智能体适配层（v2.7.0）
 - [`docs/TEST_REPORT.md`](docs/TEST_REPORT.md) — 真实测试结果
 - [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) — 第三方开源项目声明
 - [`CHANGELOG.md`](CHANGELOG.md) — 版本变更

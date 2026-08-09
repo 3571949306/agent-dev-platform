@@ -12,6 +12,7 @@
 
 const { isDangerous } = require('../../tools/terminal');
 const { gitDestructive } = require('../../tools/git');
+const { getAgentHub } = require('../../agents/hub/agentHub');
 
 const MAX_OUTPUT = 20000;   // 单条 stdout/stderr 摘要上限
 const MAX_ERRORS = 20;      // errors 列表上限
@@ -59,9 +60,14 @@ function isMutatingAction(action) {
 async function executeAction(ctx, action, getTool) {
   const { type, args } = action;
 
-  // complete / ask_permission / delegate 不在此执行
-  if (type === 'complete' || type === 'ask_permission' || type === 'delegate') {
+  // complete / ask_permission 由 loop 处理
+  if (type === 'complete' || type === 'ask_permission') {
     return { ok: true, tool: type, data: { handledByLoop: true } };
+  }
+
+  // v2.7.0 — delegate：经 AgentHub 路由到合适的 Agent；Hub 未初始化时回退原行为
+  if (type === 'delegate') {
+    return await executeDelegate(ctx, action, args);
   }
 
   // read_files：循环 read_file
@@ -92,6 +98,69 @@ async function executeAction(ctx, action, getTool) {
   }
 
   return await runTool(ctx, toolName, args, getTool, action);
+}
+
+/**
+ * v2.7.0 — delegate action：经 AgentHub 路由到合适的 Agent 并等待结果。
+ *
+ * AgentHub 未初始化（getAgentHub() === null）时回退到原行为
+ * （{ handledByLoop: true }，交由 agentLoop 自行处理），保证旧测试不受影响。
+ *
+ * delegate args: { task, requiredCapabilities, agentId? }
+ *   - agentId 指定 → hub.start(agentId, task)
+ *   - 未指定      → hub.startAuto(task)（按 requiredCapabilities 自动路由）
+ *
+ * @param {object} ctx    runCtx
+ * @param {object} action { type, args, thought }
+ * @param {object} args   { task, requiredCapabilities, agentId? }
+ * @returns {Promise<object>} Tool Result
+ */
+async function executeDelegate(ctx, action, args) {
+  const hub = getAgentHub();
+  if (!hub) {
+    return { ok: true, tool: 'delegate', data: { handledByLoop: true } };
+  }
+  const { task: delegateTask, requiredCapabilities, agentId } = args || {};
+  const hubTask = {
+    goal: typeof delegateTask === 'string' ? delegateTask : ((delegateTask && delegateTask.goal) || String(delegateTask || '')),
+    required: Array.isArray(requiredCapabilities) ? requiredCapabilities : [],
+    projectRoot: ctx.projectRoot,
+    projectId: ctx.projectId,
+    conversationId: ctx.conversationId,
+    taskId: ctx.taskId
+  };
+  let startResult;
+  try {
+    startResult = agentId ? await hub.start(agentId, hubTask) : await hub.startAuto(hubTask);
+  } catch (e) {
+    return { ok: false, tool: 'delegate', action, error: { code: 'DELEGATE_START_FAILED', message: e.message, retryable: true } };
+  }
+  if (startResult.error) {
+    return { ok: false, tool: 'delegate', action, error: { code: startResult.errorCode || 'DELEGATE_FAILED', message: startResult.error, retryable: !!startResult.runId } };
+  }
+  const runId = startResult.runId;
+  // 轮询等待终态结果（adapter.startTask 立即返回 runId，后台异步执行）
+  const POLL_MS = 500;
+  const deadline = Date.now() + 600000;
+  let last = null;
+  while (Date.now() < deadline) {
+    if (ctx.abortSignal && ctx.abortSignal.aborted) {
+      try { await hub.cancel(runId); } catch { /* noop */ }
+      return { ok: false, tool: 'delegate', action, error: { code: 'ABORTED', message: 'delegate 已取消' } };
+    }
+    try { last = await hub.result(runId); } catch { last = null; }
+    if (last && /^(completed|failed|cancelled|timeout|interrupted)$/.test(last.status)) break;
+    await new Promise(r => setTimeout(r, POLL_MS));
+  }
+  const status = last && last.status;
+  const ok = status === 'completed';
+  return {
+    ok,
+    tool: 'delegate',
+    action,
+    data: { runId, agentId: startResult.agentId, status, result: last && last.result },
+    error: ok ? null : { code: `DELEGATE_${(status || 'TIMEOUT').toUpperCase()}`, message: (last && last.error) || 'delegate 未完成' }
+  };
 }
 
 async function executeReadFiles(ctx, args, getTool) {

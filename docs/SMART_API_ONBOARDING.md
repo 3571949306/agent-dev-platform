@@ -1,6 +1,6 @@
 # Smart API Onboarding — 智能 API 快速接入
 
-> v2.4.0 新增。让用户从「拿到 API 信息」到「主智能体已经能使用这个 API」，尽可能只需要一次粘贴和几次确认。
+> v2.4.0 新增，v2.4.1 可靠性闭环。让用户从「拿到 API 信息」到「主智能体已经能使用这个 API」，尽可能只需要一次粘贴和几次确认。
 
 ## 概述
 
@@ -39,9 +39,11 @@ ImportCandidate（只在内存）
   ↓
 用户点击「开始检测」
   ↓
-Protocol Probe（最多 4 个请求）
+ProbeManager.startProbe（立即返回 probeId，后台执行）
   ↓
-模型自动发现
+Protocol Probe（最多 6 个请求，分阶段调度）
+  ↓
+模型自动发现 + 协议能力独立检测
   ↓
 用户确认协议 + 选择默认模型
   ↓
@@ -52,20 +54,133 @@ Protocol Probe（最多 4 个请求）
 
 ## 协议检测（Protocol Probe）
 
-检测使用轻量 HTTP 请求（GET），不发真实大模型调用，避免成本。探测策略：
+> v2.4.1 重构：Model Discovery 与 Protocol Capability 严格分离，Probe Scheduler 按优先级调度，真正 Cancel 机制。
 
-| 探测路径 | 200 | 401 | 405 | 404 |
-|----------|-----|-----|-----|-----|
-| `/models` 或 `/v1/models` | 模型发现可用 | Key 无效但端点存在 | — | 不支持模型发现 |
-| `/chat/completions` | — | — | OpenAI Chat 端点存在 | 不存在 |
-| `/responses` | — | — | OpenAI Responses 端点存在 | 不存在 |
-| `/v1/messages` | — | — | Anthropic 端点存在 | 不存在 |
-| `/api/tags` | Ollama 模型发现可用 | — | — | — |
+### Model Discovery 与 Protocol Capability 分离（v2.4.1）
 
-- **MAX_PROBES = 4**：总请求数上限，不会暴力探测几十个路径。
-- **超时 + 取消**：复用 v2.2 HTTP Abort 合约，用户点击「取消检测」立即停止网络请求（< 2s）。
-- **多协议共存**：如果 Chat 和 Responses 都可用，UI 列出全部支持协议并标注推荐项，由用户选择，不偷偷覆盖。
-- **推荐只是推荐**：用户可以手动切换协议。
+v2.4.0 的一个关键缺陷：`/models` 200 就认为 OpenAI Chat supported，这会产生假阳性。v2.4.1 严格分离：
+
+| 检测类别 | 探测路径 | 200 | 401/403 | 405/400 | 404 |
+|----------|----------|-----|---------|---------|-----|
+| **Model Discovery** | `/models` 或 `/v1/models` | 模型列表可用 | Key 无效但端点存在 | — | 模型发现不可用 |
+| **Model Discovery (Ollama)** | `/api/tags` | 模型列表可用 + Ollama 协议 supported | — | — | — |
+| **Protocol: OpenAI Chat** | `/chat/completions` | supported | supported（端点存在） | supported | unsupported |
+| **Protocol: OpenAI Responses** | `/responses` | supported | supported | supported | unsupported |
+| **Protocol: Anthropic** | `/v1/messages` | supported | supported | supported | unsupported |
+| **Protocol: Ollama** | `/api/tags` | supported + 模型发现 | — | — | unsupported |
+
+**关键规则**：
+- `/models` 200 **只说明** API 可达 + 模型列表能力 + 可能是 OpenAI-compatible family，**不说明** `/chat/completions` 一定存在。
+- 每个协议独立探测 endpoint：405/400/401/403 → endpoint exists = supported；404 → unsupported。
+- 401/403 只说明端点存在但认证失败。
+
+### Probe Scheduler（v2.4.1）
+
+v2.4.0 固定 `MAX_PROBES=4`，对完全未知 API 可能漏掉关键协议（如 Responses）。v2.4.1 重构为分阶段调度：
+
+```
+Stage A: Model Discovery（/models 或 /api/tags）
+  ↓
+Stage B: Protocol Capability（按优先级排序探测）
+  ↓
+可提前结束（如 Ollama + localhost → 跳过其他协议）
+```
+
+**优先级规则**（`prioritizeProtocols()`）：
+- URL Hint：`localhost:11434` → Ollama 高优先级；`api.anthropic.com` → Anthropic 高优先级；`api.openai.com` → Responses + Chat 高优先级。
+- Port Hint：`11434` → Ollama；`1234` → OpenAI-compatible / LM Studio。
+- Parser/Preset Hint：`anthropic` → Anthropic；`ollama` → Ollama；`openai-responses` → Responses。
+
+**Hint 只影响优先级，不禁止其他候选**：即使用户选了 OpenAI preset，仍会探测 Anthropic / Ollama，只是优先级较低。
+
+**预算**：`MAX_TOTAL_PROBES = 6`，不会暴力探测几十个路径，但也不因固定 4 请求而漏掉关键协议。
+
+### 真正 Probe Cancel（v2.4.1）
+
+v2.4.0 的 Cancel 是假的：Renderer 只回到预览页，Main Process 的 `fetch()` 仍然继续。v2.4.1 实现**真正的 abort**：
+
+```
+Renderer: 点击「取消检测」
+  ↓
+调用 onboarding:probe:cancel(probeId)
+  ↓
+Main: ProbeManager.cancelProbe(probeId)
+  ↓
+AbortController.abort()
+  ↓
+fetch 真正立即结束（< 2s）
+  ↓
+Probe state = cancelled
+  ↓
+ProbeManager cleanup
+```
+
+**关键设计**：
+- **不把 AbortSignal 跨 IPC 传输**（不可靠），使用 `probeId` 作为取消句柄。
+- `onboarding:probe:start` 立即返回 `probeId`，`probe()` 在后台执行。
+- Probe 结果通过 `onboarding:probe:event` 推送。
+- **Late Result Guard**：cancel 后迟到的 result 不覆盖 `cancelled` 状态。
+- **Renderer 绑定 `currentProbeId`**：所有事件必须 `event.probeId === currentProbeId` 才处理。
+- **Cancel ≠ Timeout**：`cancelProbe` → `cancelled`；`timeoutMs` 到期 → `timeout`。
+- **Cancel 后 UI**：回到预览页，不显示「检测失败」或 `AbortError`。
+
+### Probe ID 生命周期
+
+```
+probe:start
+  ↓
+生成唯一 probeId + new AbortController()
+  ↓
+保存到 ProbeManager Map（state = running）
+  ↓
+后台执行 probe(candidate, { signal })
+  ↓
+completed / failed / cancelled / timeout
+  ↓
+从 Map 清理（延迟 5s 供迟到事件读取）
+```
+
+**状态**：`running` → `completed` / `cancelled` / `timeout` / `failed`
+
+**Probe Error Codes**：
+- `PROBE_CANCELLED` — 用户取消
+- `PROBE_TIMEOUT` — 超时
+- `PROBE_NETWORK_ERROR` — 网络错误
+- `PROBE_AUTH_FAILED` — 认证失败
+- `PROBE_NO_PROTOCOL` — 没有可用协议
+
+### Probe Report 结构（v2.4.1）
+
+```js
+{
+  probeId,
+  baseUrl,
+  reachable: true,
+  latencyMs: 29,
+  modelDiscovery: {
+    status: "supported",   // supported | auth_failed | unsupported | unknown
+    path: "/models",
+    models: ["gpt-4o", "gpt-4o-mini"]
+  },
+  protocols: [
+    { protocol: "openai",           status: "unsupported", endpoint: "/chat/completions" },
+    { protocol: "openai-responses", status: "supported",   endpoint: "/responses" },
+    { protocol: "anthropic",        status: "unsupported", endpoint: "/v1/messages" },
+    { protocol: "ollama",           status: "unsupported", endpoint: "/api/tags" }
+  ],
+  recommendedProtocol: "openai-responses",
+  state: "completed",     // completed | cancelled | timeout | failed
+  errorCode: null,        // PROBE_CANCELLED | PROBE_TIMEOUT | ...
+  aborted: false,
+  probeCount: 4,
+  protocolsAttempted: ["openai", "openai-responses", "anthropic", "ollama"],
+  // 向后兼容
+  candidates: [...],
+  models: [...]
+}
+```
+
+GUI 通过 `modelDiscovery` / `protocols` / `recommendedProtocol` 渲染，不依赖 `candidates[0]` 位置假设。
 
 ### URL Normalizer
 
@@ -158,10 +273,14 @@ ccswitch://v1/import?resource=provider&app=codex&name=My%20API&endpoint=https://
 |---------|------|
 | `onboarding:presets` | 获取 Preset 列表 |
 | `onboarding:parse` | 解析粘贴文本 → ImportCandidate / batch |
-| `onboarding:probe` | 协议检测 + 模型发现 |
+| `onboarding:probe:start` | **v2.4.1** 立即返回 probeId，后台执行 Probe，结果通过 `onboarding:probe:event` 推送 |
+| `onboarding:probe:cancel` | **v2.4.1** 通过 probeId 取消 Probe，真实 abort fetch |
+| `onboarding:probe:get` | **v2.4.1** 获取 Probe 安全 diagnostics（不含 apiKey） |
+| `onboarding:probe` | （向后兼容）同步等待 Probe 完成 |
 | `onboarding:import` | 将 ImportCandidate 保存为 Connection |
 | `onboarding:ccswitch` | 解析 CC Switch Deep Link / Config |
 | `onboarding:duplicate` | 重复检测 |
+| `diagnostics:listActiveProbes` | **v2.4.1** 列出活跃 Probe（供 E2E / Diagnostics 读取） |
 
 ## 限制
 

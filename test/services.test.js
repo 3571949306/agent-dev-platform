@@ -143,14 +143,23 @@ test('Browser: 工具层错误被包装成 {ok:false,error} 而不是抛异常',
 /* ------------------------------------------------------------- Computer */
 
 test('Computer: 列出真实窗口', async (t) => {
-  const c = new ComputerManager();
-  const r = await c.listWindows();
-  // CI runners may experience PowerShell timeouts (no responsive desktop session);
-  // treat as skip rather than failure — the test still runs on real machines.
-  if (!r.ok && /超时|timeout/i.test(r.error)) {
-    t.diagnostic('CI 环境 PowerShell 超时，跳过窗口枚举断言');
+  // §36-§39: CI 环境可能无稳定桌面会话 → 真正 t.skip（不是假 PASS）
+  if (process.env.CI) {
+    const c = new ComputerManager();
+    const r = await c.listWindows();
+    if (!r.ok && /超时|timeout/i.test(r.error)) {
+      t.skip('CI 环境无稳定桌面会话，PowerShell 超时');
+      return;
+    }
+    assert.strictEqual(r.ok, true, '列窗口失败: ' + r.error);
+    assert.ok(Array.isArray(r.windows));
+    t.diagnostic('当前可见窗口数：' + r.windows.length);
+    if (r.windows.length) assert.ok('title' in r.windows[0] && 'pid' in r.windows[0]);
     return;
   }
+  // 真机必须真实执行
+  const c = new ComputerManager();
+  const r = await c.listWindows();
   assert.strictEqual(r.ok, true, '列窗口失败: ' + r.error);
   assert.ok(Array.isArray(r.windows));
   t.diagnostic('当前可见窗口数：' + r.windows.length);

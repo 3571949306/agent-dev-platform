@@ -1,5 +1,64 @@
 # Changelog
 
+## v2.4.1 — 2026-08-09
+
+> Smart Onboarding Reliability — 把 Smart API Onboarding 的协议检测与取消机制从「基本可用」修到「真实可靠」。**不新增功能，只修可靠性。** 让「快速接入 API」的自动检测结果值得信任，并且用户点击「取消检测」时，后台网络请求也真的停止。
+
+### P0-1 — 真正的 GUI Probe Cancel
+
+* 新增 `src/providers/onboarding/probeManager.js`：`ProbeManager` 类管理 probeId 生命周期（`startProbe` / `cancelProbe` / `getProbe` / `listActiveProbes` / `cleanupProbe`），内部 `Map<probeId, { controller, state, ... }>`。
+* `onboarding:probe:start` 立即返回 `probeId`，`probe()` 在后台执行（§8：不让 IPC 等待 Probe 完成）。
+* `onboarding:probe:cancel` 通过 `probeId` 找到 `AbortController` 并 `abort()`，fetch 真正立即结束（§9：cancel < 2s）。
+* **不尝试把 AbortSignal 跨 IPC 传输**（§4），使用 `probeId` 作为取消句柄。
+* §47 Late Result Guard：cancel 后迟到的 result 不覆盖 `cancelled` 状态，不重新打开结果页。
+* §48 Renderer 绑定 `currentProbeId`，所有事件必须 `event.probeId === currentProbeId` 才处理。
+* §49 Cancel 后 UI 回到预览页，不显示「检测失败」或 `AbortError`。
+* §50 Cancel ≠ Timeout：`cancelProbe` → `cancelled`，`timeoutMs` 到期 → `timeout`。
+* §51 Probe Error Codes：`PROBE_CANCELLED` / `PROBE_TIMEOUT` / `PROBE_NETWORK_ERROR` / `PROBE_AUTH_FAILED` / `PROBE_NO_PROTOCOL`。
+* §43/§44 安全 diagnostics：`getProbe` / `listActiveProbes` 不含 `apiKey` / `Authorization` / `x-api-key`。
+* §45/§46 生命周期：正常完成 / cancel / timeout / failed 后 active probes = 0；多 Probe 按 `probeId` 严格隔离。
+
+### P0-2 — Model Discovery 与 Protocol Capability 分离
+
+* §11/§12：`/models` 200 只说明「API 可达 + 模型列表能力」，**不再等于** OpenAI Chat supported。
+* §14：Chat Capability 独立探测 `GET /chat/completions`：405/400/401/403 → endpoint exists = supported；404 → unsupported。
+* §15：Responses Capability 独立探测 `GET /responses`。
+* §16：Anthropic Capability 独立探测 `GET /v1/messages`（统一走 URL helper，避免 `/v1/v1/messages`）。
+* §17：Ollama Capability 独立探测 `GET /api/tags`：200 → supported + 解析 models。
+* §32 Probe Report 新结构：`{ modelDiscovery: { status, path, models }, protocols: [{ protocol, status, endpoint, confidence }], recommendedProtocol, ... }`，向后兼容旧 `candidates` / `models` 字段。
+* §33/§34/§35：GUI 通过 `protocols` / `modelDiscovery` / `recommendedProtocol` 渲染，不再依赖 `candidates[0]` 位置假设；Model Discovery 不再显示成 Protocol。
+
+### P0-3 — Probe Scheduler 重构
+
+* §18/§19：不再固定 `MAX_PROBES=4`（漏协议），也不简单改成 10。
+* §20/§31：新 `prioritizeProtocols()` 根据 Parser Hint + Preset Hint + URL Hint + Port Hint 确定优先级。**Hint 只影响优先级，不禁止其他候选**。
+* §21/§22：`MAX_TOTAL_PROBES = 6`，分阶段调度：Stage A = Model Discovery，Stage B = Protocol Capability。
+* §23：可提前结束 —— Ollama `/api/tags` 200 + localhost → 跳过 Anthropic/Responses/Chat。
+* §24：完全未知 Endpoint 仍有机会检测全部 4 个协议，不因 `/models` 请求占满预算而漏掉 Responses。
+* §30：Unknown Ollama（无 hostname hint）仍能通过 `/api/tags` 200 被识别。
+
+### P1 — Computer CI 真正 SKIP 语义
+
+* §36/§37/§38：CI 环境下 PowerShell 超时时使用 `t.skip()` 而非 `t.diagnostic() + return`，测试报告统计为 SKIP 而非 PASS。
+* §39：真机（非 CI）必须真实执行 `listWindows` 并 PASS。
+
+### 测试
+
+* 新增 `test/probeManager.test.js`（7 用例）：ProbeManager lifecycle / cancel < 2s / timeout ≠ cancelled / 多 Probe 隔离 / Late Result Guard / diagnostics 不含 apiKey / listActiveProbes / Error Codes。
+* 新增 `test/onboardingprobe.test.js` §25-§30 False Positive Fixture Tests：Responses-only / Chat-only / Both / Models-only / Responses without models / Unknown Ollama。
+* `npm test`：**323 / 323 PASS / 0 FAIL / 0 SKIP**（v2.4.0 309 + 新增 probeManager 7 + onboardingprobe §25-§30 6 + Computer skip 1 不变）。
+* `npm run e2e`：**17 / 17 PASS**（原 14 + 新增 Case 15 Probe Cancel / Case 16 Responses-only / Case 17 Models-only）。
+
+### 文档
+
+* 更新 `docs/SMART_API_ONBOARDING.md`：Probe Scheduler / Model Discovery 与 Protocol Capability 分离 / 真正 Probe Cancel / Probe ID 生命周期。
+* 更新 `docs/TEST_REPORT.md`：真实记录 Total / Pass / Fail / Skip。
+* `CHANGELOG.md` 新增 v2.4.1 条目。
+
+### 版本
+
+* `package.json` / `package-lock.json` 版本升级 `2.4.0 → 2.4.1`。
+
 ## v2.4.0 — 2026-08-09
 
 > Smart API Onboarding — 智能 API 快速接入。用户拿到任何常见 AI API 后，不需要再手工研究 Provider、协议、Base URL、模型列表。一次粘贴 + 几次确认即可完成从「拿到 API 信息」到「主智能体已能使用这个 API」。**不破坏 v2.3.2 稳定基线，不新增无关功能。**

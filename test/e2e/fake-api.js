@@ -125,4 +125,85 @@ function start(preferredPort = 0, opts = {}) {
   });
 }
 
-module.exports = { start, MODELS };
+module.exports = { start, startProbeServer, startHangServer, MODELS };
+
+/**
+ * v2.4.1 — Probe 专用 Fake Server（spec §25-§30 E2E fixtures）。
+ *
+ * Scenarios:
+ *   'responses-only': /models 200, /chat/completions 404, /responses 405
+ *   'models-only':    /models 200, /chat/completions 404, /responses 404, /messages 404
+ *   'chat-only':      /models 200, /chat/completions 405, /responses 404
+ *   'both':           /models 200, /chat/completions 405, /responses 405
+ */
+function startProbeServer(scenario = 'responses-only') {
+  const routes = {
+    'responses-only': {
+      'GET /v1/models': { status: 200, body: { data: [{ id: 'resp-model' }] } },
+      'GET /v1/chat/completions': 404,
+      'GET /v1/responses': 405,
+      'GET /v1/messages': 404,
+      'GET /v1/api/tags': 404
+    },
+    'models-only': {
+      'GET /v1/models': { status: 200, body: { data: [{ id: 'model-x' }] } },
+      'GET /v1/chat/completions': 404,
+      'GET /v1/responses': 404,
+      'GET /v1/messages': 404,
+      'GET /v1/api/tags': 404
+    },
+    'chat-only': {
+      'GET /v1/models': { status: 200, body: { data: [{ id: 'chat-model' }] } },
+      'GET /v1/chat/completions': 405,
+      'GET /v1/responses': 404,
+      'GET /v1/messages': 404,
+      'GET /v1/api/tags': 404
+    },
+    'both': {
+      'GET /v1/models': { status: 200, body: { data: [{ id: 'dual-model' }] } },
+      'GET /v1/chat/completions': 405,
+      'GET /v1/responses': 405,
+      'GET /v1/messages': 404,
+      'GET /v1/api/tags': 404
+    }
+  };
+
+  const table = routes[scenario] || routes['responses-only'];
+
+  return new Promise((resolve, reject) => {
+    const srv = http.createServer((req, res) => {
+      const key = `${req.method} ${req.url}`;
+      const rule = table[key];
+      if (!rule) {
+        res.writeHead(404, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: { message: 'not found: ' + key } }));
+        return;
+      }
+      const status = typeof rule === 'number' ? rule : rule.status;
+      const body = typeof rule === 'object' && rule.body !== undefined ? rule.body : null;
+      res.writeHead(status, { 'Content-Type': 'application/json' });
+      if (body !== null) res.end(JSON.stringify(body));
+      else res.end();
+    });
+    srv.on('error', reject);
+    srv.listen(0, '127.0.0.1', () => {
+      const port = srv.address().port;
+      resolve({ server: srv, port, baseUrl: `http://127.0.0.1:${port}/v1` });
+    });
+  });
+}
+
+/**
+ * v2.4.1 — Hang Server（spec §9/§55 E2E Probe Cancel）。
+ * 接受 TCP 连接但永不响应，用于验证 cancel < 2s。
+ */
+function startHangServer() {
+  return new Promise((resolve, reject) => {
+    const srv = http.createServer((_req, _res) => { /* hang forever */ });
+    srv.on('error', reject);
+    srv.listen(0, '127.0.0.1', () => {
+      const port = srv.address().port;
+      resolve({ server: srv, port, baseUrl: `http://127.0.0.1:${port}/v1` });
+    });
+  });
+}

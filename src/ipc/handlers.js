@@ -41,6 +41,10 @@ const pendingPermissions = new Map();
 // v2.3.1 (P0-2/P0-3/P0-4) — 全应用唯一的 Run 状态机。只有它能宣布 Run 终态。
 const runManager = new RunManager({ store, emit });
 
+// v2.4.1 — ProbeManager：真正的 GUI Probe Cancel（abort fetch）+ probeId 生命周期。
+const sec = require('../security/secret');
+const probeManager = new (require('../providers/onboarding').ProbeManager)({ emit, sec });
+
 function emit(type, payload) {
   if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('agent:event', { ...(payload || {}), type });
 }
@@ -597,8 +601,25 @@ function register(window) {
     }
     return result;
   });
-  // onboarding:probe — 真实网络检测（复用 v2.2 Abort），返回协议候选 + 模型列表
-  // candidate 由前端传回（含明文 key）；此处内存中持有，检测完即丢弃
+  // v2.4.1: onboarding:probe:start — 立即返回 probeId，后台执行 probe()，结果通过 onboarding:probe:event 推送
+  // §3-§9: 真正的 GUI Probe Cancel。不再让 IPC 等待整个 Probe 完成。
+  reg('onboarding:probe:start', (candidate, opts) => {
+    const probeId = probeManager.startProbe(candidate, opts || {});
+    return { probeId };
+  });
+  // v2.4.1: onboarding:probe:cancel — 通过 probeId 取消 Probe，真实 abort fetch
+  reg('onboarding:probe:cancel', (probeId) => {
+    return probeManager.cancelProbe(probeId);
+  });
+  // v2.4.1: onboarding:probe:get — 获取 Probe 安全 diagnostics（不含 apiKey）
+  reg('onboarding:probe:get', (probeId) => {
+    return probeManager.getProbe(probeId);
+  });
+  // v2.4.1: diagnostics:listActiveProbes — 供 E2E / Advanced Diagnostics 读取活跃 Probe
+  reg('diagnostics:listActiveProbes', () => {
+    return probeManager.listActiveProbes();
+  });
+  // 旧 onboarding:probe 保留向后兼容（同步等待完成），新代码应使用 probe:start
   reg('onboarding:probe', async (candidate, opts) => {
     const report = await onboarding.probe(candidate, opts || {});
     return report;

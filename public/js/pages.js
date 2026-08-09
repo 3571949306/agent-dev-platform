@@ -31,6 +31,11 @@ let current = null;
 let diagBody = null;
 let diagActive = null;
 
+// v2.4.1 — Smart Onboarding probe event handler (probeId-scoped).
+// §48: Renderer binds currentProbeId; all events must match before processing.
+let currentProbeId = null;
+let probeEventCb = null;
+
 const CAP_LABELS = { text: '文本生成', streaming: '流式输出', tools: '工具调用', vision: '视觉 / 多模态' };
 const CAP_ORDER = ['text', 'streaming', 'tools', 'vision'];
 const stateShort = s => ({ tested: '测', inferred: '推', declared: '声', unknown: '?' }[s] || s);
@@ -97,6 +102,17 @@ export function handleDiagEvent(ev) {
     tr.querySelector('.cap-result').innerHTML = c ? resultChip(c) : '<span class="muted">—</span>';
     tr.querySelector('.cap-detail').textContent = c && c.detail ? c.detail : '';
   }
+}
+
+/**
+ * v2.4.1 — Smart Onboarding probe event handler。
+ * §48: 所有事件必须确认 event.probeId === currentProbeId，否则忽略。
+ * §47: Late Result Guard —— cancel 后迟到的事件不处理。
+ */
+export function handleProbeEvent(ev) {
+  if (!ev || ev.type !== 'onboarding:probe:event') return;
+  if (!probeEventCb) return;
+  probeEventCb(ev);
 }
 
 async function renderDiagnostics(body) {
@@ -504,9 +520,43 @@ const SOURCE_LABELS = {
 function smartOnboard() {
   let candidate = null;     // 真实候选（含明文 key，仅内存）
   let probeReport = null;   // 检测报告
-  let probeCtrl = null;     // AbortController（取消检测用）
+
+  // v2.4.1: 设置 probe 事件处理器（probeId 绑定 + late result guard）
+  probeEventCb = (ev) => {
+    // §48: 只处理当前 probe 的事件
+    if (ev.probeId !== currentProbeId) return;
+    // §47: cancelled 事件由取消按钮本地处理，忽略
+    if (ev.state === 'cancelled') return;
+    // 处理 result 事件
+    if (ev.state === 'completed') {
+      probeReport = ev.report;
+      currentProbeId = null;
+      renderResultStep();
+    } else if (ev.state === 'failed' || ev.state === 'timeout') {
+      currentProbeId = null;
+      const errMsg = ev.report ? ev.report.error : (ev.error || '检测失败');
+      const errCode = ev.report ? ev.report.errorCode : null;
+      $('#modal').querySelector('.modal-body').innerHTML = `
+        <h3>检测${ev.state === 'timeout' ? '超时' : '失败'}</h3>
+        <p class="error">${esc(errMsg)}</p>
+        ${errCode ? `<p class="muted small">错误码：${esc(errCode)}</p>` : ''}
+        <div class="ob-actions"><button class="btn primary" id="ob-back">返回</button></div>`;
+      $('#ob-back').onclick = renderPreviewStep;
+    }
+  };
+
+  // 清理函数：取消活跃 probe + 清除事件处理器
+  function cleanupProbe() {
+    if (currentProbeId) {
+      api.onboardingProbeCancel(currentProbeId).catch(() => {});
+      currentProbeId = null;
+    }
+  }
 
   openModal('智能 API 快速接入', '', { noFooter: true });
+  // 拦截 modal-x 关闭按钮，确保取消活跃 probe
+  const xBtn = $('#modal .modal-x');
+  if (xBtn) xBtn.onclick = () => { cleanupProbe(); probeEventCb = null; closeModal(); };
   renderPasteStep();
 
   // ─── Step 1: 粘贴 ───────────────────────────────────────────────────
@@ -636,7 +686,7 @@ function smartOnboard() {
     refresh();
   }
 
-  // ─── Step 3: 检测（§37）─────────────────────────────────────────────
+  // ─── Step 3: 检测（§37）—— v2.4.1: probe:start / probe:cancel 真实 abort ──
   function renderProbeStep() {
     // 从预览表单读回用户可能改过的 name/url
     const nameEl = $('#ob-name'), urlEl = $('#ob-url');
@@ -644,34 +694,50 @@ function smartOnboard() {
     if (urlEl && urlEl.value.trim()) candidate.baseUrl = urlEl.value.trim();
     if (!candidate.baseUrl) { toast('缺少接口地址，无法检测', 'warn'); return; }
 
-    let aborted = false;
     $('#modal').querySelector('.modal-body').innerHTML = `
       <h3>连接检测中…</h3>
       <div class="ob-probing">
         <p>正在检测 <span class="mono">${esc(candidate.baseUrl)}</span></p>
-        <p class="muted small">探测模型列表 / 协议端点，最多 4 个请求。</p>
+        <p class="muted small">探测模型发现 + 协议端点，最多 6 个请求。</p>
         <button class="btn" id="ob-abort">取消检测</button>
       </div>`;
-    $('#ob-abort').onclick = () => { aborted = true; renderPreviewStep(); };
 
-    // §29: AbortSignal 无法跨 IPC 序列化；用 timeoutMs 控制超时，取消 = 回到预览页忽略结果
-    api.onboardingProbe(candidate, { timeoutMs: 15000 })
-      .then(report => { if (!aborted) { probeReport = report; renderResultStep(); } })
+    // v2.4.1: 立即启动 probe，获取 probeId
+    currentProbeId = null;
+    api.onboardingProbeStart(candidate, { timeoutMs: 15000 })
+      .then(r => {
+        // §48: 绑定 currentProbeId，后续事件按此过滤
+        currentProbeId = r.probeId;
+      })
       .catch(e => {
-        if (aborted) return;
         $('#modal').querySelector('.modal-body').innerHTML = `
-          <h3>检测失败</h3><p class="error">${esc(e.message)}</p>
+          <h3>检测启动失败</h3><p class="error">${esc(e.message)}</p>
           <div class="ob-actions"><button class="btn primary" id="ob-back">返回</button></div>`;
         $('#ob-back').onclick = renderPreviewStep;
       });
+
+    // §49: 取消按钮 → 真实 abort fetch → 回到预览页（不显示检测失败/AbortError）
+    $('#ob-abort').onclick = async () => {
+      const pid = currentProbeId;
+      currentProbeId = null; // §47: 清除绑定，迟到结果被忽略
+      if (pid) {
+        try { await api.onboardingProbeCancel(pid); } catch { /* noop */ }
+      }
+      renderPreviewStep();
+    };
   }
 
-  // ─── Step 4: 检测结果 + 最终确认（§37/§38）──────────────────────────
+  // ─── Step 4: 检测结果 + 最终确认（§37/§38）—— v2.4.1: 新报告结构 ──────
   async function renderResultStep() {
     const r = probeReport;
-    const supported = (r.candidates || []).filter(c => c.status === 'supported').map(c => c.protocol);
-    const unsupported = (r.candidates || []).filter(c => c.status === 'unsupported').map(c => c.protocol);
-    const models = r.models || [];
+    // v2.4.1: 使用 modelDiscovery + protocols 新结构（向后兼容旧 candidates）
+    const md = r.modelDiscovery || { status: 'unknown', models: [] };
+    const protos = r.protocols || r.candidates || [];
+    const supported = protos.filter(p => p.status === 'supported').map(p => p.protocol);
+    const unsupported = protos.filter(p => p.status === 'unsupported').map(p => p.protocol);
+    const models = (md.models && md.models.length) ? md.models : (r.models || []);
+    const hasModels = md.status === 'supported' && models.length > 0;
+    const hasProtocol = supported.length > 0;
     // 默认协议用推荐值；用户可改
     let chosenProto = r.recommendedProtocol || candidate.protocolHint || 'custom';
     // 协议选项：supported 优先，加上候选本身的 hint
@@ -690,16 +756,31 @@ function smartOnboard() {
       mainInfo = `<div class="warn-box" id="ob-main-warn">主智能体当前使用：${curConn ? esc(curConn.name) : '未配置'} / ${esc(main.model || '未设置模型')}</div>`;
     }
 
+    // §28/§34: Models-only 不误判 Chat；显示模型发现 + 协议各自独立状态
+    const protocolRows = protos.map(p => {
+      const label = protoLabel(p.protocol);
+      if (p.status === 'supported') {
+        const isRec = p.protocol === r.recommendedProtocol;
+        return `<div><span class="chip ok">✓ ${esc(label)}</span>${isRec ? ' <span class="chip ok">推荐</span>' : ''}</div>`;
+      }
+      if (p.status === 'unsupported') return `<div><span class="chip bad">✕ ${esc(label)}</span></div>`;
+      return `<div><span class="chip warn">? ${esc(label)}（未知）</span></div>`;
+    }).join('');
+
     const refresh = () => {
       $('#modal').querySelector('.modal-body').innerHTML = `
         <h3>连接检测结果</h3>
         <div class="ob-result">
           <div>${r.reachable ? '<span class="chip ok">✓ 网络可达</span>' : '<span class="chip bad">✕ 网络不可达</span>'} ${r.latencyMs != null ? `<span class="muted small">${r.latencyMs}ms</span>` : ''}</div>
-          ${supported.length ? supported.map(p => `<div><span class="chip ok">✓ ${esc(protoLabel(p))}</span></div>`).join('') : ''}
-          ${unsupported.length ? unsupported.map(p => `<div><span class="chip bad">✕ ${esc(protoLabel(p))}</span></div>`).join('') : ''}
-          <div>${models.length ? `<span class="chip ok">✓ 发现 ${models.length} 个模型</span>` : '<span class="chip warn">模型列表不可用（可手动输入）</span>'}</div>
+          <div>${hasModels
+            ? `<span class="chip ok">✓ 模型列表：${models.length} 个</span>`
+            : md.status === 'auth_failed'
+              ? '<span class="chip warn">模型列表：密钥无效（401/403）</span>'
+              : '<span class="chip warn">模型列表不可用（可手动输入）</span>'}</div>
+          ${protocolRows}
+          ${!hasProtocol && hasModels ? '<div class="warn-box">发现模型列表，但没有确认可用的生成协议。请手动选择协议或检查接口文档。</div>' : ''}
           ${r.aborted ? '<div class="warn-box">检测已被取消，结果可能不完整。</div>' : ''}
-          ${r.error ? `<div class="error small">${esc(r.error)}</div>` : ''}
+          ${r.error && r.state !== 'completed' ? `<div class="error small">${esc(r.error)}</div>` : ''}
         </div>
         <h3 style="margin-top:14px">确认保存</h3>
         <div class="ob-confirm">
@@ -710,7 +791,7 @@ function smartOnboard() {
               ? `<select id="ob-final-model">${models.map(m => `<option value="${esc(m)}" ${m === chosenModel ? 'selected' : ''}>${esc(m)}</option>`).join('')}</select>`
               : `<input id="ob-final-model" value="${esc(chosenModel || '')}" placeholder="手动输入模型 id">`}
           </label>
-          <div class="muted small">将保存 ${models.length} 个模型（来源：远端获取）</div>
+          <div class="muted small">将保存 ${models.length} 个模型（来源：${hasModels ? '远端获取' : '手动输入'}）</div>
           ${mainInfo}
           <label class="ob-check"><input type="checkbox" id="ob-assign-main" ${main ? 'checked' : ''}> 分配给主智能体</label>
         </div>

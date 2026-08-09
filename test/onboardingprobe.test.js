@@ -15,7 +15,7 @@ const { test } = require('node:test');
 const assert = require('node:assert');
 const http = require('node:http');
 
-const { probe } = require('../src/providers/onboarding/probe');
+const { probe, MAX_TOTAL_PROBES } = require('../src/providers/onboarding/probe');
 const { createCandidate } = require('../src/providers/onboarding/candidate');
 
 /** 构造一个按路由表响应的 fake server。routes: { [path]: status | {status, body} } */
@@ -89,6 +89,14 @@ test('Probe Server A: /models ✓ + /responses ✕ → OpenAI Chat', async () =>
     const responses = report.candidates.find(c => c.protocol === 'openai-responses');
     assert.ok(responses && responses.status === 'unsupported', 'responses 应 unsupported');
     assert.strictEqual(report.recommendedProtocol, 'openai', '应推荐 OpenAI Chat');
+    // v2.4.1: 新结构断言
+    assert.strictEqual(report.modelDiscovery.status, 'supported', '模型发现应 supported');
+    assert.strictEqual(report.modelDiscovery.models.length, 2, '模型发现应 2 个模型');
+    const protoOpenai = report.protocols.find(p => p.protocol === 'openai');
+    assert.ok(protoOpenai && protoOpenai.status === 'supported', 'protocols: openai supported');
+    const protoResponses = report.protocols.find(p => p.protocol === 'openai-responses');
+    assert.ok(protoResponses && protoResponses.status === 'unsupported', 'protocols: responses unsupported');
+    assert.strictEqual(report.state, 'completed', 'state 应 completed');
   } finally {
     await srv.close();
   }
@@ -188,9 +196,9 @@ test('Probe: 缺少 baseUrl 返回错误，不崩溃', async () => {
   assert.ok(report.error, '应返回错误说明');
 });
 
-// ─── MAX_PROBES 上限 ────────────────────────────────────────────────────────
+// ─── MAX_TOTAL_PROBES 上限 ──────────────────────────────────────────────────
 
-test('Probe: 不会暴力探测超过 MAX_PROBES 个请求（§28）', async () => {
+test('Probe: 不会暴力探测超过 MAX_TOTAL_PROBES 个请求（§18/§21）', async () => {
   const srv = fakeServer({
     '/models': 404,
     '/v1/models': 404,
@@ -203,8 +211,146 @@ test('Probe: 不会暴力探测超过 MAX_PROBES 个请求（§28）', async () 
   try {
     // baseUrl 不含 /v1，candidateModelPaths 会返回 ['/v1/models', '/models'] 两个
     const report = await probe(makeCandidate(base, 'openai'), { timeoutMs: 5000 });
-    // MAX_PROBES = 4，请求数不应超过 4
-    assert.ok(srv.state.requests.length <= 4, `请求数应 ≤ 4，实际 ${srv.state.requests.length}`);
+    // v2.4.1: MAX_TOTAL_PROBES = 6（不再固定 4），请求数不应超过 6
+    assert.ok(srv.state.requests.length <= MAX_TOTAL_PROBES, `请求数应 ≤ ${MAX_TOTAL_PROBES}，实际 ${srv.state.requests.length}`);
+  } finally {
+    await srv.close();
+  }
+});
+
+// ═══ v2.4.1: §25-§30 False Positive Fixture Tests ═══════════════════════════
+
+// ─── §25: Responses-only（/models ✓, /chat/completions ✕, /responses ✓）─────
+
+test('§25 Responses-only: /models ✓ + /chat/completions ✕ + /responses ✓ → Responses', async () => {
+  const srv = fakeServer({
+    '/models': { status: 200, body: { data: [{ id: 'gpt-4o' }] } },
+    '/chat/completions': 404,
+    '/responses': 405
+  });
+  const base = await srv.listen();
+  try {
+    const report = await probe(makeCandidate(base + '/v1', 'openai'), { timeoutMs: 5000 });
+    assert.strictEqual(report.reachable, true, '应可达');
+    assert.strictEqual(report.modelDiscovery.status, 'supported', '模型发现应 supported');
+    const chat = report.protocols.find(p => p.protocol === 'openai');
+    assert.ok(chat && chat.status === 'unsupported', '§25: Chat 应 unsupported（不能因 /models 200 而误判）');
+    const responses = report.protocols.find(p => p.protocol === 'openai-responses');
+    assert.ok(responses && responses.status === 'supported', 'Responses 应 supported');
+    assert.strictEqual(report.recommendedProtocol, 'openai-responses', '应推荐 Responses');
+  } finally {
+    await srv.close();
+  }
+});
+
+// ─── §26: Chat-only（/models ✓, /chat/completions ✓, /responses ✕）──────────
+
+test('§26 Chat-only: /models ✓ + /chat/completions ✓ + /responses ✕ → Chat', async () => {
+  const srv = fakeServer({
+    '/models': { status: 200, body: { data: [{ id: 'gpt-4o' }] } },
+    '/chat/completions': 405,
+    '/responses': 404
+  });
+  const base = await srv.listen();
+  try {
+    const report = await probe(makeCandidate(base + '/v1', 'openai'), { timeoutMs: 5000 });
+    const chat = report.protocols.find(p => p.protocol === 'openai');
+    assert.ok(chat && chat.status === 'supported', 'Chat 应 supported');
+    const responses = report.protocols.find(p => p.protocol === 'openai-responses');
+    assert.ok(responses && responses.status === 'unsupported', 'Responses 应 unsupported');
+    assert.strictEqual(report.recommendedProtocol, 'openai', '应推荐 Chat');
+  } finally {
+    await srv.close();
+  }
+});
+
+// ─── §27: Both（/models ✓, /chat/completions ✓, /responses ✓）───────────────
+
+test('§27 Both: Chat + Responses 都 ✓ → Responses recommended', async () => {
+  const srv = fakeServer({
+    '/models': { status: 200, body: { data: [{ id: 'gpt-4o' }] } },
+    '/chat/completions': 405,
+    '/responses': 405
+  });
+  const base = await srv.listen();
+  try {
+    const report = await probe(makeCandidate(base + '/v1', 'openai'), { timeoutMs: 5000 });
+    const chat = report.protocols.find(p => p.protocol === 'openai' && p.status === 'supported');
+    const responses = report.protocols.find(p => p.protocol === 'openai-responses' && p.status === 'supported');
+    assert.ok(chat, 'Chat 应 supported');
+    assert.ok(responses, 'Responses 应 supported');
+    assert.strictEqual(report.recommendedProtocol, 'openai-responses', '两者都支持时推荐 Responses');
+  } finally {
+    await srv.close();
+  }
+});
+
+// ─── §28: Models-only（/models ✓, 所有协议 ✕）→ 不误判任何协议 ─────────────
+
+test('§28 Models-only: /models ✓ + 所有协议 ✕ → 模型发现可用，无生成协议', async () => {
+  const srv = fakeServer({
+    '/models': { status: 200, body: { data: [{ id: 'gpt-4o' }] } },
+    '/chat/completions': 404,
+    '/responses': 404,
+    '/v1/messages': 404,
+    '/api/tags': 404
+  });
+  const base = await srv.listen();
+  try {
+    const report = await probe(makeCandidate(base + '/v1', 'openai'), { timeoutMs: 5000 });
+    assert.strictEqual(report.modelDiscovery.status, 'supported', '模型发现应 supported');
+    assert.ok(report.modelDiscovery.models.length > 0, '应有模型');
+    // §28: 不能因为 /models 200 就说 OpenAI Chat supported
+    const chat = report.protocols.find(p => p.protocol === 'openai');
+    assert.ok(chat && chat.status === 'unsupported', '§28: Chat 应 unsupported（/models ≠ Chat）');
+    const responses = report.protocols.find(p => p.protocol === 'openai-responses');
+    assert.ok(responses && responses.status === 'unsupported', 'Responses 应 unsupported');
+    assert.strictEqual(report.recommendedProtocol, null, '无可用协议时 recommendedProtocol 应 null');
+  } finally {
+    await srv.close();
+  }
+});
+
+// ─── §29: Responses without models（/models ✕, /responses ✓）───────────────
+
+test('§29 Responses no models: /models 404 + /responses ✓ → Responses supported', async () => {
+  const srv = fakeServer({
+    '/models': 404,
+    '/chat/completions': 404,
+    '/responses': 405
+  });
+  const base = await srv.listen();
+  try {
+    const report = await probe(makeCandidate(base + '/v1', 'openai'), { timeoutMs: 5000 });
+    assert.strictEqual(report.reachable, true, '应可达');
+    assert.notStrictEqual(report.modelDiscovery.status, 'supported', '/models 404 → 模型发现不可用');
+    const responses = report.protocols.find(p => p.protocol === 'openai-responses');
+    assert.ok(responses && responses.status === 'supported', '不能因 /models 404 就认为 API 不可用');
+    assert.strictEqual(report.recommendedProtocol, 'openai-responses', '应推荐 Responses');
+  } finally {
+    await srv.close();
+  }
+});
+
+// ─── §30: Unknown Ollama（无 hint，但 /api/tags 200）────────────────────────
+
+test('§30 Unknown Ollama: 无 hint + /api/tags 200 → 识别 Ollama', async () => {
+  const srv = fakeServer({
+    '/models': 404,
+    '/v1/models': 404,
+    '/chat/completions': 404,
+    '/responses': 404,
+    '/v1/messages': 404,
+    '/api/tags': { status: 200, body: { models: [{ name: 'llama3' }, { name: 'mistral' }] } }
+  });
+  const base = await srv.listen();
+  try {
+    // 无 ollama hint，baseUrl 也不含 11434 / ollama
+    const report = await probe(makeCandidate(base, 'custom'), { timeoutMs: 5000 });
+    const ollama = report.protocols.find(p => p.protocol === 'ollama');
+    assert.ok(ollama && ollama.status === 'supported', '§30: 应通过 /api/tags 200 识别 Ollama（无 hint 也要探测）');
+    assert.strictEqual(report.recommendedProtocol, 'ollama', '应推荐 Ollama');
+    assert.ok(report.modelDiscovery.models.length >= 2, '应从 /api/tags 发现模型');
   } finally {
     await srv.close();
   }

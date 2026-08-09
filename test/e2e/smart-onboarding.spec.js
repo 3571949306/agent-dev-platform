@@ -16,7 +16,7 @@ const { spawn } = require('child_process');
 const os = require('os');
 const fs = require('fs');
 const path = require('path');
-const { start } = require('./fake-api');
+const { start, startProbeServer, startHangServer } = require('./fake-api');
 
 const ROOT = path.join(__dirname, '..', '..');
 const ELECTRON_BIN = require('electron');
@@ -128,7 +128,8 @@ test('10) §74 万能粘贴：粘贴文本 → 识别 URL/Key → 检测 → 保
   await page.waitForSelector('#ob-finish', { timeout: 30000 });
   await expect(page.locator('.ob-result')).toContainText('网络可达');
   await expect(page.locator('.ob-result')).toContainText('OpenAI Chat');
-  await expect(page.locator('.ob-result')).toContainText('发现');
+  // v2.4.1: 新 UI 显示 "模型列表：N 个"（modelDiscovery 与 protocol 分离）
+  await expect(page.locator('.ob-result')).toContainText('模型列表');
 
   // 保存
   await page.locator('#ob-final-name').fill('Smart Test Conn');
@@ -138,15 +139,17 @@ test('10) §74 万能粘贴：粘贴文本 → 识别 URL/Key → 检测 → 保
   await page.locator('#ob-finish').click();
   await page.waitForTimeout(1000);
 
-  // 验证连接已保存
-  await expect(page.locator('tbody')).toContainText('Smart Test Conn', { timeout: 10000 });
+  // 验证连接已保存（scope 到 #page-body 避免选择器歧义）
+  await expect(page.locator('#page-body')).toContainText('Smart Test Conn', { timeout: 10000 });
 });
 
 // ─── §75 Secret 不泄漏 ────────────────────────────────────────────────────
 
 test('11) §75 Secret 不泄漏：DOM/console/audit/SQLite 非密文字段无明文 key', async () => {
   const SECRET = 'sk-leak-test-abcdef123456';
-  // 用 IPC 直接新建一个 Smart Onboarding 流程的连接，再检查泄漏
+  // 先导航到 API 连接页，确保 #conn-smart 可见（不依赖前一个用例的页面状态）
+  await page.getByRole('button', { name: 'API 连接' }).click();
+  await page.waitForSelector('#conn-smart', { timeout: 10000 });
   await page.locator('#conn-smart').click();
   await page.waitForSelector('#ob-paste', { timeout: 10000 });
   await page.locator('#ob-paste').fill(`https://api.leak-test.example.com/v1\n${SECRET}`);
@@ -191,6 +194,9 @@ test('11) §75 Secret 不泄漏：DOM/console/audit/SQLite 非密文字段无明
 test('12) §76 一键分配主智能体 → 发送 → 收到 QUICK_CONNECT_OK', async () => {
   // §76: 用 fakeManual（/models=404 → 手动输入 model-QUICK），分配给主智能体。
   // fakeManual 的 POST /chat/completions 对 model-QUICK 返回 QUICK_CONNECT_OK。
+  // 先导航到 API 连接页，确保 #conn-smart 可见
+  await page.getByRole('button', { name: 'API 连接' }).click();
+  await page.waitForSelector('#conn-smart', { timeout: 10000 });
   await page.locator('#conn-smart').click();
   await page.waitForSelector('#ob-paste', { timeout: 10000 });
   await page.locator('#ob-paste').fill(`接口地址：${fakeManual.baseUrl}\nAPI Key：sk-quick-assign`);
@@ -354,4 +360,126 @@ test('14) §78 CC Switch Import：Deep Link + Config 批量导入', async () => 
   // §79: 确认无 JS 致命错误
   const fatals = pageErrors.filter(e => /Cannot read|TypeError|ReferenceError|is not defined/.test(e));
   expect(fatals).toEqual([]);
+});
+
+// ═══ v2.4.1 §55-§57: Probe Cancel + False Positive E2E ═════════════════════
+
+// ─── §55 Case 15: GUI Probe Cancel 真正中断网络 ─────────────────────────────
+
+test('15) §55 GUI Probe Cancel：Hang Server + 取消检测 < 2s + activeProbe = 0', async () => {
+  // 启动 Hang Server（接受 TCP 但永不响应）
+  const hang = await startHangServer();
+  try {
+    // 导航到 API 连接页
+    await page.getByRole('button', { name: 'API 连接' }).click();
+    await page.waitForSelector('#conn-smart', { timeout: 10000 });
+    await page.locator('#conn-smart').click();
+    await page.waitForSelector('#ob-paste', { timeout: 10000 });
+
+    // 粘贴 Hang Server URL + Key
+    await page.locator('#ob-paste').fill(`接口地址：${hang.baseUrl}\nAPI Key：sk-hang-cancel`);
+    await page.locator('#ob-parse').click();
+    await page.waitForSelector('#ob-probe', { timeout: 10000 });
+
+    // 开始检测
+    await page.locator('#ob-probe').click();
+    // 等待"检测中"页面
+    await page.waitForSelector('#ob-abort', { timeout: 10000 });
+
+    // 记录开始时间
+    const t0 = Date.now();
+    // 点击取消检测
+    await page.locator('#ob-abort').click();
+
+    // §55: < 2s 回到预览页（#ob-probe 按钮重新出现）
+    await page.waitForSelector('#ob-probe', { timeout: 5000 });
+    const elapsed = Date.now() - t0;
+    expect(elapsed, `取消应在 2s 内回到预览，实际 ${elapsed}ms`).toBeLessThan(2000);
+
+    // §55: 通过 IPC 验证 activeProbe = 0
+    const activeProbesRaw = await page.evaluate(async () => {
+      try {
+        return await window.api.invoke('diagnostics:listActiveProbes');
+      } catch (e) { return { error: e.message }; }
+    });
+    // reg() 包装为 { ok, data }，需要解包
+    const activeProbes = activeProbesRaw && activeProbesRaw.data !== undefined ? activeProbesRaw.data : activeProbesRaw;
+    expect(Array.isArray(activeProbes), `listActiveProbes 应返回数组，实际: ${JSON.stringify(activeProbesRaw)}`).toBe(true);
+    expect(activeProbes.length, '取消后不应有活跃 Probe').toBe(0);
+
+    // §55: 没有结果页迟到出现（仍应在预览页）
+    await page.waitForTimeout(1000);
+    const finishBtn = await page.locator('#ob-finish').count();
+    expect(finishBtn, '迟到结果不应出现').toBe(0);
+
+    // 关闭 modal
+    await closeModal();
+  } finally {
+    try { hang.server.close(); } catch { /* noop */ }
+  }
+});
+
+// ─── §56 Case 16: Responses-only（/models ✓, Chat ✕, Responses ✓）──────────
+
+test('16) §56 Responses-only：Chat ✕ + Responses ✓ → 推荐 Responses', async () => {
+  const srv = await startProbeServer('responses-only');
+  try {
+    await page.getByRole('button', { name: 'API 连接' }).click();
+    await page.waitForSelector('#conn-smart', { timeout: 10000 });
+    await page.locator('#conn-smart').click();
+    await page.waitForSelector('#ob-paste', { timeout: 10000 });
+
+    await page.locator('#ob-paste').fill(`接口地址：${srv.baseUrl}\nAPI Key：sk-resp-only`);
+    await page.locator('#ob-parse').click();
+    await page.waitForSelector('#ob-probe', { timeout: 10000 });
+    await page.locator('#ob-probe').click();
+
+    // 等待检测结果页
+    await page.waitForSelector('#ob-finish', { timeout: 30000 });
+
+    // §56: 模型列表 ✓
+    await expect(page.locator('.ob-result')).toContainText('模型列表');
+    // §56: Chat ✕（不能因 /models 200 就说 Chat supported）
+    await expect(page.locator('.ob-result')).toContainText('✕ OpenAI Chat');
+    // §56: Responses ✓ + 推荐
+    await expect(page.locator('.ob-result')).toContainText('✓ OpenAI Responses');
+    await expect(page.locator('.ob-result')).toContainText('推荐');
+
+    // 关闭 modal（不保存）
+    await closeModal();
+  } finally {
+    try { srv.server.close(); } catch { /* noop */ }
+  }
+});
+
+// ─── §57 Case 17: Models-only 不误判 Chat ──────────────────────────────────
+
+test('17) §57 Models-only：/models ✓ + 所有协议 ✕ → 不误判 Chat', async () => {
+  const srv = await startProbeServer('models-only');
+  try {
+    await page.getByRole('button', { name: 'API 连接' }).click();
+    await page.waitForSelector('#conn-smart', { timeout: 10000 });
+    await page.locator('#conn-smart').click();
+    await page.waitForSelector('#ob-paste', { timeout: 10000 });
+
+    await page.locator('#ob-paste').fill(`接口地址：${srv.baseUrl}\nAPI Key：sk-models-only`);
+    await page.locator('#ob-parse').click();
+    await page.waitForSelector('#ob-probe', { timeout: 10000 });
+    await page.locator('#ob-probe').click();
+
+    // 等待检测结果页
+    await page.waitForSelector('#ob-finish', { timeout: 30000 });
+
+    // §57: 模型发现 ✓
+    await expect(page.locator('.ob-result')).toContainText('模型列表');
+    // §57: Chat ✕（/models 200 ≠ Chat supported）
+    await expect(page.locator('.ob-result')).toContainText('✕ OpenAI Chat');
+    // §57: 应显示"没有确认可用的生成协议"提示
+    await expect(page.locator('.ob-result')).toContainText('没有确认可用的生成协议');
+
+    // 关闭 modal（不保存）
+    await closeModal();
+  } finally {
+    try { srv.server.close(); } catch { /* noop */ }
+  }
 });

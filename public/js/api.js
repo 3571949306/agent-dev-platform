@@ -50,9 +50,13 @@ export const api = {
   onboardingPresets: () => call('onboarding:presets'),
   onboardingParse: (text) => call('onboarding:parse', text),
   onboardingProbe: (candidate, opts) => call('onboarding:probe', candidate, opts),
+  onboardingProbeStart: (candidate, opts) => call('onboarding:probe:start', candidate, opts),
+  onboardingProbeCancel: (probeId) => call('onboarding:probe:cancel', probeId),
+  onboardingProbeGet: (probeId) => call('onboarding:probe:get', probeId),
   onboardingImport: (candidate, opts) => call('onboarding:import', candidate, opts),
   onboardingCcswitch: (text) => call('onboarding:ccswitch', text),
   onboardingDuplicate: (baseUrl, provider) => call('onboarding:duplicate', baseUrl, provider),
+  diagListActiveProbes: () => call('diagnostics:listActiveProbes'),
 
   // diagnostics (P1-5) — live capability probing + call-record audit
   diagCapabilities: (connId, modelId, which) => call('diagnostics:capabilities', connId, modelId, which),

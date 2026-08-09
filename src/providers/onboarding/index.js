@@ -13,6 +13,7 @@
 
 const { parseInput } = require('./smartImport');
 const { probe } = require('./probe');
+const { ProbeManager } = require('./probeManager');
 const { createCandidate, sanitizeCandidate, isViable } = require('./candidate');
 const { normalizeBaseUrl, joinUrl, candidateModelPaths } = require('./urlNormalizer');
 const { listPresets, detectPreset, getPreset, suggestName } = require('./presets');
@@ -107,6 +108,7 @@ function findMainAgent(store) {
 module.exports = {
   parseInput,
   probe,
+  ProbeManager,
   importCandidate,
   sanitizeCandidate,
   createCandidate,

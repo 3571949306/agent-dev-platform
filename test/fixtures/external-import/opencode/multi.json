@@ -1,0 +1,23 @@
+[
+  {
+    "name": "Provider A",
+    "provider": "openai",
+    "model": "model-a",
+    "baseURL": "http://127.0.0.1:18021/v1",
+    "apiKey": "sk-test-opencode-a-abcdef123456"
+  },
+  {
+    "name": "Provider B",
+    "provider": "anthropic",
+    "model": "claude-test-b",
+    "baseURL": "http://127.0.0.1:18022",
+    "apiKey": "sk-test-opencode-b-abcdef123456"
+  },
+  {
+    "name": "Provider C",
+    "provider": "openrouter",
+    "model": "openrouter/c-test",
+    "baseURL": "http://127.0.0.1:18023/v1",
+    "apiKey": "sk-test-opencode-c-abcdef123456"
+  }
+]

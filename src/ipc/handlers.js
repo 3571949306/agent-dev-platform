@@ -38,6 +38,9 @@ let currentProjectId = null;
 const activeRuns = new Map();
 const pendingPermissions = new Map();
 
+// E2E 测试钩子：externalImport:selectFile 一次性返回的文件路径（仅测试中设置）
+let testFilePickPath = null;
+
 // v2.3.1 (P0-2/P0-3/P0-4) — 全应用唯一的 Run 状态机。只有它能宣布 Run 终态。
 const runManager = new RunManager({ store, emit });
 
@@ -669,6 +672,84 @@ function register(window) {
     const norm = onboarding.normalizeBaseUrl(baseUrl);
     const found = list.find(c => onboarding.normalizeBaseUrl(c.base_url) === norm && c.provider === provider);
     return found ? { id: found.id, name: found.name } : null;
+  });
+
+  // ---------- v2.5.0 External Config Import ----------
+  const external = onboarding.external;
+  // externalImport:listSources — GUI 渲染「从其他工具导入」按钮列表
+  reg('externalImport:listSources', () => external.listSources());
+  // externalImport:discover — 检查单个 sourceType 在本机是否安装/可读
+  reg('externalImport:discover', (sourceType) => external.discover(sourceType));
+  // externalImport:discoverAll — 批量 discover 所有已注册 importer
+  reg('externalImport:discoverAll', () => external.discoverAll());
+  // externalImport:parse — 解析指定 sourceType 为 candidates（opts: { filePath?, env? }）
+  // §53/§54: 返回真实候选（前端 mask 显示），日志/audit 只记 source/protocol 不记 key
+  reg('externalImport:parse', (sourceType, opts) => {
+    const r = external.parseSource(sourceType, opts || {});
+    // sanitize candidates 副本用于安全打印，但返回真实候选供后续 probe/import
+    return r;
+  });
+  // externalImport:resolveConflicts — 批量冲突检测
+  reg('externalImport:resolveConflicts', (candidates) => {
+    const list = store.connections.list();
+    return external.resolveBatchConflicts(candidates, list);
+  });
+  // externalImport:importBatch — 批量导入，每个 candidate 独立处理
+  // §43: 一个失败不影响其他；§45: 并发 2~3
+  reg('externalImport:importBatch', async (items) => {
+    const results = await external.importBatch(items, { store, sec, maxConcurrency: 3 });
+    // §54 audit：批量导入也记 audit
+    for (const r of results) {
+      try {
+        store.audit.add({
+          agent: 'system',
+          task: 'externalImport:importBatch',
+          tool: 'connections',
+          target: r.result && r.result.connection && r.result.connection.id,
+          permission: 'write',
+          result: `imported source=${r.candidate && r.candidate.source && r.candidate.source.type} ok=${r.result && r.result.ok} action=${r.action}`
+        });
+      } catch { /* audit 失败不阻塞 */ }
+    }
+    return results;
+  });
+  // externalImport:readFile — 用户手动选择文件（.env/.json/.toml）后读取
+  // §63: 通过 dialog.showOpenDialog 选择，限制扩展名
+  // E2E 测试钩子：testFilePickPath 由 externalImport:testSetFilePick 设置，
+  //   仅在测试中激活，生产环境始终为 null 走真实 dialog。
+  reg('externalImport:selectFile', async () => {
+    if (testFilePickPath) {
+      const p = testFilePickPath;
+      testFilePickPath = null;
+      return { canceled: false, filePath: p };
+    }
+    const result = await dialog.showOpenDialog(mainWindow, {
+      title: '选择配置文件',
+      properties: ['openFile'],
+      filters: [
+        { name: '配置文件', extensions: ['env', 'json', 'toml'] },
+        { name: '所有文件', extensions: ['*'] }
+      ]
+    });
+    if (result.canceled || !result.filePaths.length) return { canceled: true };
+    return { canceled: false, filePath: result.filePaths[0] };
+  });
+  // E2E 测试专用：设置下一次 selectFile 返回的文件路径（一次性，用后即清）
+  reg('externalImport:testSetFilePick', (filePath) => { testFilePickPath = filePath || null; });
+  // externalImport:parseFile — 根据文件扩展名自动选择 importer 解析
+  reg('externalImport:parseFile', (filePath) => {
+    if (!filePath) return { source: null, candidates: [], warnings: [] };
+    const ext = path.extname(filePath).toLowerCase();
+    let sourceType = null;
+    if (ext === '.env') sourceType = 'env-file';
+    else if (ext === '.json') sourceType = 'json-file';
+    else if (ext === '.toml') sourceType = 'toml-file';
+    if (!sourceType) return {
+      source: null,
+      candidates: [],
+      warnings: [{ type: 'parse_warning', message: `不支持的文件扩展名：${ext}` }]
+    };
+    return external.parseSource(sourceType, { filePath, userSelected: true });
   });
 
   // ---------- computer panel ----------

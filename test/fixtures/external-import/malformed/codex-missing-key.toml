@@ -1,0 +1,5 @@
+# Malformed fixture — missing apiKey (spec §36/§38 MISSING_SECRET)
+[model_providers.missingkey]
+name = "Missing Key Provider"
+base_url = "http://127.0.0.1:18070/v1"
+wire_api = "chat"

@@ -1,0 +1,9 @@
+# TOML fixture for file import (spec §31)
+model = "model-toml-file"
+model_provider = "tomlfile"
+
+[model_providers.tomlfile]
+name = "TOML File Provider"
+base_url = "http://127.0.0.1:18060/v1"
+wire_api = "chat"
+api_key = "sk-test-toml-file-abcdef123456"

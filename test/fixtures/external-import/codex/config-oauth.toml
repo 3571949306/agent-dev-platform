@@ -1,0 +1,10 @@
+# Codex fixture — requires_openai_auth=true (spec §14)
+# Must be rejected as unsupported credential (account login, not API key).
+model = "model-D"
+model_provider = "oaiauth"
+
+[model_providers.oaiauth]
+name = "OpenAI Account Login"
+base_url = "http://127.0.0.1:18003/v1"
+wire_api = "responses"
+requires_openai_auth = true

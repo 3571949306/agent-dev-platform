@@ -1,0 +1,7 @@
+{
+  "name": "Env Reference Provider",
+  "provider": "openai",
+  "model": "model-env-ref",
+  "baseURL": "http://127.0.0.1:18024/v1",
+  "apiKey": "${OPENCODE_TEST_KEY}"
+}

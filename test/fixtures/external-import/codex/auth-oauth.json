@@ -1,0 +1,10 @@
+# Codex fixture — auth.json with ChatGPT account login tokens (spec §14)
+# Must be detected as unsupported credential and NOT imported.
+{
+  "auth_mode": "chatgpt",
+  "tokens": {
+    "access_token": "eyJ-test-access-token-not-a-real-credential",
+    "refresh_token": "test-refresh-token-not-real",
+    "id_token": "eyJ-test-id-token-not-real"
+  }
+}

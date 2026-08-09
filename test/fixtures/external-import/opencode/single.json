@@ -1,0 +1,9 @@
+{
+  "provider": "openai",
+  "model": "gpt-test-single",
+  "baseURL": "http://127.0.0.1:18020/v1",
+  "apiKey": "sk-test-opencode-single-abcdef123456",
+  "headers": {
+    "X-Custom-Header": "test-value"
+  }
+}

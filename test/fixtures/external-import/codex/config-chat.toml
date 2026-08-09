@@ -1,0 +1,9 @@
+# Codex fixture — wire_api=chat variant (spec §12)
+model = "model-B"
+model_provider = "chatprov"
+
+[model_providers.chatprov]
+name = "Chat Provider"
+base_url = "http://127.0.0.1:18001/v1"
+wire_api = "chat"
+api_key = "sk-test-codex-chat-0987654321fedcba"

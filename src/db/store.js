@@ -54,7 +54,7 @@ function normalizeModels(models) {
 
 const connections = {
   list() {
-    return db().prepare('SELECT id,name,provider,base_url,api_key_masked,headers_json,models_json,tested,tested_at,last_error,latency_ms,created_at,updated_at FROM api_connections ORDER BY created_at').all()
+    return db().prepare('SELECT id,name,provider,base_url,api_key_masked,headers_json,models_json,tested,tested_at,last_error,latency_ms,import_source,import_source_path,created_at,updated_at FROM api_connections ORDER BY created_at').all()
       .map(r => ({ ...r, headers: p(r.headers_json, {}), models: normalizeModels(p(r.models_json, [])), has_key: !!r.api_key_masked }));
   },
   get(id) {
@@ -71,10 +71,11 @@ const connections = {
   create(body) {
     const id = uuid(); const t = now();
     const key = body.api_key || '';
-    db().prepare(`INSERT INTO api_connections (id,name,provider,base_url,api_key_enc,api_key_masked,headers_json,models_json,tested,created_at,updated_at)
-      VALUES (?,?,?,?,?,?,?,?,0,?,?)`)
+    db().prepare(`INSERT INTO api_connections (id,name,provider,base_url,api_key_enc,api_key_masked,headers_json,models_json,tested,import_source,import_source_path,created_at,updated_at)
+      VALUES (?,?,?,?,?,?,?,?,0,?,?,?,?)`)
       .run(id, body.name || '新连接', body.provider || 'openai', body.base_url || 'https://api.openai.com/v1',
-        sec.encrypt(key), sec.mask(key), j(body.headers || {}), j(body.models || []), t, t);
+        sec.encrypt(key), sec.mask(key), j(body.headers || {}), j(body.models || []),
+        body.import_source || '', body.import_source_path || '', t, t);
     return connections.get(id);
   },
   update(id, body) {
@@ -93,8 +94,10 @@ const connections = {
     const testedAt = body.tested_at ?? cur.tested_at;
     const lastError = body.last_error ?? cur.last_error;
     const latency = body.latency_ms ?? cur.latency_ms;
-    db().prepare(`UPDATE api_connections SET name=?,provider=?,base_url=?,api_key_enc=?,api_key_masked=?,headers_json=?,models_json=?,tested=?,tested_at=?,last_error=?,latency_ms=?,updated_at=? WHERE id=?`)
-      .run(name, provider, baseUrl, enc, masked, headers, models, tested ? 1 : 0, testedAt, lastError, latency, now(), id);
+    const importSource = body.import_source ?? cur.import_source;
+    const importSourcePath = body.import_source_path ?? cur.import_source_path;
+    db().prepare(`UPDATE api_connections SET name=?,provider=?,base_url=?,api_key_enc=?,api_key_masked=?,headers_json=?,models_json=?,tested=?,tested_at=?,last_error=?,latency_ms=?,import_source=?,import_source_path=?,updated_at=? WHERE id=?`)
+      .run(name, provider, baseUrl, enc, masked, headers, models, tested ? 1 : 0, testedAt, lastError, latency, importSource, importSourcePath, now(), id);
     return connections.get(id);
   },
   setTestResult(id, { ok, error, latency }) {

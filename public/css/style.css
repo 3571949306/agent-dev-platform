@@ -266,6 +266,19 @@ pre.preview { max-height: 60vh; overflow: auto; }
 #toast.error { border-color: var(--red); color: #ffa198; }
 #toast.warn { border-color: var(--yellow); color: #e3c07b; }
 
+/* ---------- v2.5.0 External Config Import ---------- */
+.ob-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.ob-actions .btn { min-width: 80px; }
+.ext-source-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 8px; margin-top: 8px; }
+.ext-source-btn { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; padding: 10px 12px; text-align: left; }
+.ext-source-btn .ext-source-name { font-size: 13px; font-weight: 600; }
+.ext-source-btn .muted.small { font-size: 11px; line-height: 1.4; }
+#ext-preview-tbl td { vertical-align: top; }
+#ext-preview-tbl input[type="password"] { display: inline-block; width: 100%; margin-top: 4px; }
+#ext-preview-tbl select { display: inline-block; width: 100%; }
+.ext-row .chip { margin-right: 4px; }
+
+
 /* ---------- full-page overlay ---------- */
 .page-overlay { position: absolute; inset: 0; background: var(--bg); z-index: 50; display: flex; flex-direction: column; }
 .page-head { display: flex; align-items: center; gap: 12px; padding: 14px 20px; border-bottom: 1px solid var(--border); background: var(--bg2); }

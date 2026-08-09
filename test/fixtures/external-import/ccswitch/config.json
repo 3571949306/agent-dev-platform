@@ -1,0 +1,20 @@
+[
+  {
+    "name": "OpenAI Provider",
+    "settingsConfig": {
+      "env": {
+        "OPENAI_API_KEY": "sk-test-ccswitch-openai-abcdef123456",
+        "OPENAI_BASE_URL": "http://127.0.0.1:18030/v1"
+      }
+    }
+  },
+  {
+    "name": "Anthropic Provider",
+    "settingsConfig": {
+      "env": {
+        "ANTHROPIC_API_KEY": "sk-test-ccswitch-anthropic-abcdef",
+        "ANTHROPIC_BASE_URL": "http://127.0.0.1:18031"
+      }
+    }
+  }
+]

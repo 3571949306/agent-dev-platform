@@ -1,0 +1,7 @@
+{
+  "name": "JSON File Provider",
+  "provider": "openai",
+  "baseURL": "http://127.0.0.1:18050/v1",
+  "apiKey": "sk-test-json-file-abcdef123456",
+  "model": "model-json-test"
+}

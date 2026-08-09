@@ -2,7 +2,7 @@
 
 > 本地 AI Agent IDE（智能体开发环境）—— 一个真正能读项目、改代码、跑命令、调子 Agent、把活干完的 Windows 桌面 Coding Agent。
 
-![platform](https://img.shields.io/badge/platform-Windows%2010%2F11-0078d4) ![electron](https://img.shields.io/badge/electron-31-47848F) ![node](https://img.shields.io/badge/node-20-339933) ![sqlite](https://img.shields.io/badge/sqlite-WAL-003B57) ![tests](https://img.shields.io/badge/tests-83%2F83-3fb950)
+![platform](https://img.shields.io/badge/platform-Windows%2010%2F11-0078d4) ![electron](https://img.shields.io/badge/electron-31-47848F) ![node](https://img.shields.io/badge/node-20-339933) ![sqlite](https://img.shields.io/badge/sqlite-WAL-003B57) ![tests](https://img.shields.io/badge/tests-386%2B23-3fb950)
 
 ## 它能做什么
 
@@ -19,6 +19,10 @@
 ## 智能 API 快速接入
 
 v2.4.0 新增。在「API 连接」页面点击 **⚡ 快速接入**，把 API 地址、密钥、ENV、JSON、curl、代码片段或 CC Switch 配置粘贴进去，平台自动识别 URL / Key / Provider / 协议，安全预览后一键检测连接、发现模型并分配给主智能体。详见 [`docs/SMART_API_ONBOARDING.md`](docs/SMART_API_ONBOARDING.md)。
+
+## 外部 API 配置一键迁移
+
+v2.5.0 新增。在「API 连接」页面点击 **📥 从其他工具导入**，可从 Codex、Claude Code、OpenCode、CC Switch、环境变量或配置文件（.env / JSON / TOML）一键迁移已有 API 配置。自动发现 → 预览 → 冲突检测 → 批量导入，全程只读、密钥掩码、不迁移账号登录态或 OAuth 凭据。详见 [`docs/EXTERNAL_CONFIG_IMPORT.md`](docs/EXTERNAL_CONFIG_IMPORT.md)。
 
 ## 安装
 
@@ -63,6 +67,7 @@ npm run dist                 # 打 NSIS + Portable 到 dist-electron/
 
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — 模块、数据流、设计权衡
 - [`docs/SMART_API_ONBOARDING.md`](docs/SMART_API_ONBOARDING.md) — 智能 API 快速接入（v2.4.0）
+- [`docs/EXTERNAL_CONFIG_IMPORT.md`](docs/EXTERNAL_CONFIG_IMPORT.md) — 外部 API 配置一键迁移（v2.5.0）
 - [`docs/TEST_REPORT.md`](docs/TEST_REPORT.md) — 真实测试结果
 - [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) — 第三方开源项目声明
 - [`CHANGELOG.md`](CHANGELOG.md) — 版本变更

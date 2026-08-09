@@ -291,9 +291,9 @@ async function renderConnections(body) {
   const list = await api.connections();
   state.connections = list;
   body.innerHTML = `
-    <div class="page-actions"><button class="btn primary" id="conn-smart">⚡ 快速接入</button><button class="btn" id="conn-add">+ 手动新建</button>
+    <div class="page-actions"><button class="btn primary" id="conn-smart">⚡ 快速接入</button><button class="btn" id="conn-external">📥 从其他工具导入</button><button class="btn" id="conn-add">+ 手动新建</button>
       <span class="muted">API Key 使用 Windows DPAPI（safeStorage）加密后存入本地数据库，界面只显示掩码。</span></div>
-    ${list.length ? `<table class="tbl"><thead><tr><th>名称</th><th>协议</th><th>Base URL</th><th>Key</th><th>状态</th><th>模型</th><th></th></tr></thead><tbody>
+    ${list.length ? `<table class="tbl"><thead><tr><th>名称</th><th>协议</th><th>Base URL</th><th>Key</th><th>状态</th><th>模型</th><th>来源</th><th></th></tr></thead><tbody>
       ${list.map(c => `<tr>
         <td><b>${esc(c.name)}</b></td>
         <td>${esc((PROVIDERS.find(p => p[0] === c.provider) || [c.provider, c.provider])[1])}</td>
@@ -301,6 +301,7 @@ async function renderConnections(body) {
         <td class="mono small">${esc(c.api_key_masked || '未设置')}</td>
         <td>${c.tested ? '<span class="chip ok">已连通</span>' : (c.last_error ? `<span class="chip bad" title="${esc(c.last_error)}">失败</span>` : '<span class="chip">未测试</span>')}</td>
         <td>${(c.models || []).length}</td>
+        <td>${c.import_source ? `<span class="chip small">${esc(c.import_source)}</span>` : '<span class="muted small">手动</span>'}</td>
         <td class="right">
           <button class="btn tiny" data-models="${c.id}">拉取模型</button>
           <button class="btn tiny" data-view="${c.id}">查看模型</button>
@@ -308,9 +309,10 @@ async function renderConnections(body) {
           <button class="btn tiny" data-edit="${c.id}">编辑</button>
           <button class="btn tiny danger" data-del="${c.id}">删除</button>
         </td></tr>`).join('')}
-    </tbody></table>` : '<div class="empty">还没有 API 连接，点击「快速接入」或「手动新建」开始。</div>'}`;
+    </tbody></table>` : '<div class="empty">还没有 API 连接，点击「快速接入」或「从其他工具导入」开始。</div>'}`;
 
   $('#conn-smart').onclick = () => smartOnboard();
+  $('#conn-external').onclick = () => externalImport();
   $('#conn-add').onclick = () => connForm(null);
   body.querySelectorAll('[data-edit]').forEach(b => b.onclick = () => connForm(list.find(c => c.id === b.dataset.edit)));
   body.querySelectorAll('[data-del]').forEach(b => b.onclick = async () => {
@@ -838,6 +840,390 @@ function smartOnboard() {
         if (assignMain) window.dispatchEvent(new CustomEvent('models-updated'));
       } catch (e) { toast('保存失败：' + e.message, 'error'); }
     }
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* v2.5.0 External Config Import — 从其他工具导入                       */
+/* ------------------------------------------------------------------ */
+
+const EXT_SOURCE_LABELS = {
+  'codex': 'Codex',
+  'claude-code': 'Claude Code',
+  'opencode': 'OpenCode',
+  'ccswitch': 'CC Switch',
+  'environment': '环境变量',
+  'env-file': '.env 文件',
+  'json-file': 'JSON 文件',
+  'toml-file': 'TOML 文件'
+};
+
+/** §35/§43 冲突状态 → chip 样式 + 中文 */
+const CONFLICT_CHIP = {
+  NEW: '<span class="chip ok">新增</span>',
+  DUPLICATE: '<span class="chip warn">重复</span>',
+  CONFLICT: '<span class="chip bad">冲突</span>',
+  MISSING_SECRET: '<span class="chip warn">缺少密钥</span>',
+  INVALID: '<span class="chip bad">无效</span>'
+};
+
+/**
+ * spec §33: 从其他工具导入弹窗 ——
+ *   Step 1: 选择来源（按钮列表）
+ *   Step 2: 自动发现 / 选择文件
+ *   Step 3: 预览候选 + 冲突检测 + 手动补 key
+ *   Step 4: 批量导入 + 结果展示
+ *   Step 5: 可选分配给主智能体
+ */
+function externalImport() {
+  /** @type {{sourceType:string, sourceName:string, candidates:any[], conflicts:any[], items:Map<number,{checked:boolean,manualKey:string,action:string}>}} */
+  const ctx = { sourceType: null, sourceName: null, candidates: [], conflicts: [], items: new Map() };
+
+  openModal('从其他工具导入 API', '', { noFooter: true });
+  renderSourceStep();
+
+  // ─── Step 1: 选择来源 ───────────────────────────────────────────────
+  async function renderSourceStep() {
+    const modal = $('#modal');
+    let sources = [];
+    try { sources = await api.externalImportListSources(); }
+    catch (e) { toast('加载导入源失败：' + e.message, 'error'); closeModal(); return; }
+
+    const tools = sources.filter(s => !s.requiresFile);
+    const fileSources = sources.filter(s => s.requiresFile);
+
+    modal.querySelector('.modal-body').innerHTML = `
+      <p class="muted">选择已安装的工具，自动发现本机可导入的 API 配置；或选择文件手动导入。所有导入仅读取公开配置，不迁移账号登录态、OAuth 或会员凭据。</p>
+      <h3 style="margin-top:12px">已安装工具</h3>
+      <div class="ext-source-grid">${tools.map(s => `
+        <button class="btn ext-source-btn" data-src="${esc(s.id)}">
+          <div class="ext-source-name">${esc(s.name)}</div>
+          <div class="muted small">${esc(s.description || '')}</div>
+        </button>`).join('') || '<div class="muted">无可用工具</div>'}</div>
+      <h3 style="margin-top:14px">从文件导入</h3>
+      <div class="ext-source-grid">${fileSources.map(s => `
+        <button class="btn ext-source-btn" data-file="${esc(s.id)}">
+          <div class="ext-source-name">${esc(s.name)}</div>
+          <div class="muted small">${esc(s.description || '')}</div>
+        </button>`).join('')}</div>
+      <div class="ob-actions" style="margin-top:14px">
+        <button class="btn" id="ext-cancel">取消</button>
+      </div>`;
+    $('#ext-cancel').onclick = closeModal;
+    modal.querySelectorAll('[data-src]').forEach(b => b.onclick = () => onPickSource(b.dataset.src, sources));
+    modal.querySelectorAll('[data-file]').forEach(b => b.onclick = () => onPickFile(b.dataset.file));
+  }
+
+  // ─── Step 2a: 选择工具后自动发现 + 解析 ─────────────────────────────
+  async function onPickSource(sourceType, sources) {
+    const src = sources.find(s => s.id === sourceType);
+    ctx.sourceType = sourceType;
+    ctx.sourceName = src ? src.name : sourceType;
+    const modal = $('#modal');
+    modal.querySelector('.modal-body').innerHTML = `
+      <h3>正在检查 ${esc(ctx.sourceName)} 配置…</h3>
+      <div class="muted small" id="ext-status">发现中…</div>
+      <div id="ext-warnings"></div>`;
+    try {
+      const r = await api.externalImportParse(sourceType, {});
+      ctx.candidates = (r && r.candidates) || [];
+      const src2 = r && r.source;
+      const warnings = (r && r.warnings) || (src2 && src2.warnings) || [];
+      const errors = (src2 && src2.errors) || [];
+      if (errors.length) {
+        $('#ext-status').textContent = '发现失败：' + errors.join('; ');
+      } else if (!ctx.candidates.length) {
+        $('#ext-status').textContent = '未发现可导入的 API 配置';
+      } else {
+        $('#ext-status').textContent = `发现 ${ctx.candidates.length} 个 Provider`;
+      }
+      const wbox = $('#ext-warnings');
+      const wHtml = warnings.map(w => {
+        if (w.type === 'unsupported_credential') return `<div class="warn-box">${esc(w.message)}</div>`;
+        if (w.type === 'parse_warning') return `<div class="warn-box">解析警告：${esc(w.message)}</div>`;
+        return `<div class="muted small">${esc(w.message || '')}</div>`;
+      }).join('') + errors.map(e => `<div class="error small">${esc(e)}</div>`).join('');
+      wbox.innerHTML = wHtml;
+      if (!ctx.candidates.length) {
+        wbox.innerHTML += `<div class="ob-actions" style="margin-top:12px">
+          <button class="btn primary" id="ext-back">返回</button>
+          ${src && src.requiresFile === false && src.supportsDiscovery !== false ? `<button class="btn" id="ext-manual">手动选择文件</button>` : ''}
+        </div>`;
+        $('#ext-back').onclick = renderSourceStep;
+        const mb = $('#ext-manual'); if (mb) mb.onclick = onPickFileInCtx;
+        return;
+      }
+      // 进入预览步骤
+      await runConflictCheckAndRender();
+    } catch (e) {
+      $('#ext-status').textContent = '错误：' + e.message;
+      $('#ext-warnings').innerHTML = `<div class="ob-actions"><button class="btn primary" id="ext-back">返回</button></div>`;
+      $('#ext-back').onclick = renderSourceStep;
+    }
+  }
+
+  // ─── Step 2b: 用户手动选择文件 ──────────────────────────────────────
+  async function onPickFile(fileSourceType) {
+    ctx.sourceType = fileSourceType;
+    ctx.sourceName = EXT_SOURCE_LABELS[fileSourceType] || fileSourceType;
+    const modal = $('#modal');
+    modal.querySelector('.modal-body').innerHTML = `
+      <h3>选择文件</h3>
+      <p class="muted small">支持的格式：.env / .json / .toml</p>
+      <div class="ob-actions"><button class="btn primary" id="ext-pick">选择文件…</button><button class="btn" id="ext-back">返回</button></div>`;
+    $('#ext-back').onclick = renderSourceStep;
+    $('#ext-pick').onclick = async () => {
+      try {
+        const pick = await api.externalImportSelectFile();
+        if (!pick || pick.canceled) return;
+        const r = await api.externalImportParseFile(pick.filePath);
+        ctx.candidates = (r && r.candidates) || [];
+        const warnings = (r && r.warnings) || [];
+        if (!ctx.candidates.length) {
+          modal.querySelector('.modal-body').innerHTML = `
+            <h3>未发现可导入配置</h3>
+            <div id="ext-warnings">${warnings.map(w => `<div class="warn-box">${esc(w.message || '')}</div>`).join('')}</div>
+            <div class="ob-actions"><button class="btn primary" id="ext-back">返回</button></div>`;
+          $('#ext-back').onclick = renderSourceStep;
+          return;
+        }
+        await runConflictCheckAndRender(warnings);
+      } catch (e) { toast('文件解析失败：' + e.message, 'error'); }
+    };
+  }
+
+  /** 用户在工具发现失败时手动选择文件（沿用当前 sourceType 的 importer） */
+  async function onPickFileInCtx() {
+    try {
+      const pick = await api.externalImportSelectFile();
+      if (!pick || pick.canceled) return;
+      const r = await api.externalImportParse(ctx.sourceType, { filePath: pick.filePath, userSelected: true });
+      ctx.candidates = (r && r.candidates) || [];
+      const warnings = (r && r.warnings) || [];
+      if (!ctx.candidates.length) {
+        const modal = $('#modal');
+        modal.querySelector('.modal-body').innerHTML = `
+          <h3>未发现可导入配置</h3>
+          <div id="ext-warnings">${warnings.map(w => `<div class="warn-box">${esc(w.message || '')}</div>`).join('')}</div>
+          <div class="ob-actions"><button class="btn primary" id="ext-back">返回</button></div>`;
+        $('#ext-back').onclick = renderSourceStep;
+        return;
+      }
+      await runConflictCheckAndRender(warnings);
+    } catch (e) { toast('文件解析失败：' + e.message, 'error'); }
+  }
+
+  // ─── Step 3: 预览 + 冲突检测 + 手动补 key ──────────────────────────
+  async function runConflictCheckAndRender(extraWarnings = []) {
+    try {
+      const r = await api.externalImportResolveConflicts(ctx.candidates);
+      ctx.conflicts = Array.isArray(r) ? r : [];
+    } catch (e) {
+      ctx.conflicts = ctx.candidates.map(c => ({ candidate: c, conflict: { state: 'NEW', reason: '冲突检测失败：' + e.message } }));
+    }
+    // 初始化 items map
+    ctx.items = new Map();
+    ctx.conflicts.forEach((row, i) => {
+      const st = (row.conflict && row.conflict.state) || 'NEW';
+      let action = 'import';
+      if (st === 'DUPLICATE') action = 'skip';        // §39 默认跳过重复
+      if (st === 'CONFLICT') action = 'skip';          // §40 默认跳过冲突
+      if (st === 'INVALID') action = 'skip';
+      ctx.items.set(i, { checked: st !== 'INVALID', manualKey: '', action });
+    });
+    renderPreviewStep(extraWarnings);
+  }
+
+  function renderPreviewStep(extraWarnings = []) {
+    const modal = $('#modal');
+    const rows = ctx.conflicts.map((row, i) => {
+      const c = row.candidate || {};
+      const cf = row.conflict || { state: 'NEW' };
+      const st = cf.state;
+      const item = ctx.items.get(i) || { checked: false, manualKey: '', action: 'skip' };
+      const srcMeta = c.source || {};
+      const showKey = c.apiKey ? maskKey(c.apiKey) : '<span class="muted">无</span>';
+      const dupName = cf.duplicateName ? `<div class="muted small">现有连接：<b>${esc(cf.duplicateName)}</b></div>` : '';
+      const dupActions = (st === 'DUPLICATE' || st === 'CONFLICT') ? `
+        <select data-dup-act="${i}">
+          <option value="skip" ${item.action === 'skip' ? 'selected' : ''}>跳过</option>
+          <option value="import" ${item.action === 'import' ? 'selected' : ''}>另存为新连接</option>
+          <option value="overwrite" ${item.action === 'overwrite' ? 'selected' : ''}>更新现有连接</option>
+        </select>` : '';
+      const missingKeyInput = (st === 'MISSING_SECRET') ? `
+        <input type="password" data-manual-key="${i}" value="${esc(item.manualKey)}" placeholder="输入 API Key…">` : '';
+      const reason = cf.reason ? `<div class="muted small">${esc(cf.reason)}</div>` : '';
+      return `<tr class="ext-row" data-row="${i}">
+        <td><input type="checkbox" data-check="${i}" ${item.checked ? 'checked' : ''} ${st === 'INVALID' ? 'disabled' : ''}></td>
+        <td><b>${esc(c.name || '未命名')}</b>
+          <div class="muted small">${esc(protoLabel(c.protocolHint))} · 可信度 ${Math.round((srcMeta.confidence || 0) * 100)}%</div>
+        </td>
+        <td class="mono small">${esc(c.baseUrl || '无地址')}</td>
+        <td class="mono small">${showKey}${missingKeyInput}</td>
+        <td>${CONFLICT_CHIP[st] || st}${dupName}${reason}</td>
+        <td>${dupActions}</td>
+      </tr>`;
+    }).join('');
+
+    const warnHtml = extraWarnings.map(w => `<div class="warn-box">${esc(w.message || '')}</div>`).join('');
+
+    modal.querySelector('.modal-body').innerHTML = `
+      <h3>预览候选配置</h3>
+      <p class="muted small">来源：${esc(ctx.sourceName)} · 共 ${ctx.candidates.length} 个候选。勾选要导入的项，缺少密钥的可手动补充，重复/冲突可选择跳过 / 另存 / 覆盖。</p>
+      ${warnHtml}
+      <table class="tbl" id="ext-preview-tbl"><thead><tr>
+        <th></th><th>名称</th><th>Base URL</th><th>密钥</th><th>状态</th><th>操作</th>
+      </tr></thead><tbody>${rows}</tbody></table>
+      <div class="ob-actions" style="margin-top:12px">
+        <button class="btn primary" id="ext-import">导入选中</button>
+        <button class="btn" id="ext-back">返回</button>
+        <button class="btn" id="ext-cancel">取消</button>
+      </div>`;
+
+    $('#ext-back').onclick = renderSourceStep;
+    $('#ext-cancel').onclick = closeModal;
+    modal.querySelectorAll('[data-check]').forEach(cb => cb.onchange = () => {
+      const i = Number(cb.dataset.check);
+      const it = ctx.items.get(i) || {};
+      it.checked = cb.checked;
+      ctx.items.set(i, it);
+    });
+    modal.querySelectorAll('[data-manual-key]').forEach(inp => inp.oninput = () => {
+      const i = Number(inp.dataset.manualKey);
+      const it = ctx.items.get(i) || {};
+      it.manualKey = inp.value;
+      ctx.items.set(i, it);
+    });
+    modal.querySelectorAll('[data-dup-act]').forEach(sel => sel.onchange = () => {
+      const i = Number(sel.dataset.dupAct);
+      const it = ctx.items.get(i) || {};
+      it.action = sel.value;
+      // 选 overwrite/import 时自动勾选
+      if (it.action === 'overwrite' || it.action === 'import') {
+        it.checked = true;
+        const cb = modal.querySelector(`[data-check="${i}"]`);
+        if (cb) cb.checked = true;
+      }
+      ctx.items.set(i, it);
+    });
+    $('#ext-import').onclick = onImportBatch;
+  }
+
+  // ─── Step 4: 批量导入 + 结果 ────────────────────────────────────────
+  async function onImportBatch() {
+    const items = [];
+    ctx.conflicts.forEach((row, i) => {
+      const it = ctx.items.get(i);
+      if (!it || !it.checked) return;
+      items.push({
+        candidate: row.candidate,
+        action: it.action || 'import',
+        manualKey: it.manualKey || null
+      });
+    });
+    if (!items.length) { toast('请至少勾选一项', 'warn'); return; }
+
+    const modal = $('#modal');
+    modal.querySelector('.modal-body').innerHTML = `
+      <h3>正在导入 ${items.length} 个配置…</h3>
+      <div class="muted small" id="ext-import-status">处理中…</div>`;
+
+    let results;
+    try {
+      results = await api.externalImportImportBatch(items);
+    } catch (e) {
+      modal.querySelector('.modal-body').innerHTML = `
+        <h3>导入失败</h3><p class="error">${esc(e.message)}</p>
+        <div class="ob-actions"><button class="btn primary" id="ext-back">返回</button></div>`;
+      $('#ext-back').onclick = renderPreviewStep;
+      return;
+    }
+
+    renderResultStep(results);
+  }
+
+  function renderResultStep(results) {
+    const modal = $('#modal');
+    const rows = results.map(r => {
+      const ok = r.result && r.result.ok;
+      const skipped = r.result && r.result.skipped;
+      const conn = r.result && r.result.connection;
+      const err = r.result && r.result.error;
+      const dup = r.result && r.result.duplicate;
+      const name = (r.candidate && r.candidate.name) || '未命名';
+      let chip;
+      if (skipped) chip = '<span class="chip">⊘ 跳过</span>';
+      else if (ok && conn) chip = '<span class="chip ok">✓ 已导入</span>';
+      else if (dup && conn) chip = '<span class="chip warn">↻ 已更新</span>';
+      else if (err) chip = '<span class="chip bad">⚠ 失败</span>';
+      else chip = '<span class="chip">未知</span>';
+      const detail = err ? `<div class="error small">${esc(err)}</div>` :
+        (conn ? `<div class="muted small">${esc(conn.provider)} · ${esc(conn.base_url)}</div>` : '');
+      return `<tr><td><b>${esc(name)}</b></td><td>${chip}</td><td>${detail}</td></tr>`;
+    }).join('');
+
+    const okCount = results.filter(r => r.result && r.result.ok && !r.result.skipped).length;
+    const skipCount = results.filter(r => r.result && r.result.skipped).length;
+    const failCount = results.filter(r => !r.result || !r.result.ok).length;
+
+    modal.querySelector('.modal-body').innerHTML = `
+      <h3>导入完成</h3>
+      <p class="muted small">成功 ${okCount} · 跳过 ${skipCount} · 失败 ${failCount}</p>
+      <table class="tbl"><thead><tr><th>名称</th><th>结果</th><th>详情</th></tr></thead><tbody>${rows}</tbody></table>
+      <div id="ext-assign-area"></div>
+      <div class="ob-actions" style="margin-top:12px">
+        <button class="btn primary" id="ext-done">完成</button>
+        <button class="btn" id="ext-back">返回来源选择</button>
+      </div>`;
+    $('#ext-back').onclick = renderSourceStep;
+    $('#ext-done').onclick = () => { closeModal(); open('connections'); };
+
+    // §48: 可选分配主智能体（只展示已导入连接的下拉）
+    renderAssignStep(results);
+  }
+
+  async function renderAssignStep(results) {
+    const area = $('#ext-assign-area');
+    if (!area) return;
+    const importedConns = results
+      .map(r => r.result && r.result.connection)
+      .filter(c => c && c.id);
+    if (!importedConns.length) { area.innerHTML = ''; return; }
+
+    let agents = [], main = null;
+    try { agents = await api.agents(); main = agents.find(a => a.is_main) || null; }
+    catch { /* ignore */ }
+
+    if (!main) { area.innerHTML = '<div class="muted small">未找到主智能体，可稍后在「智能体」页面手动分配。</div>'; return; }
+
+    const curConn = main.api_connection_id ? importedConns.find(c => c.id === main.api_connection_id) : null;
+    area.innerHTML = `
+      <h3 style="margin-top:14px">分配给主智能体（可选）</h3>
+      <div class="warn-box" id="ext-main-warn">主智能体当前使用：${curConn ? esc(curConn.name) : (main.api_connection_id ? '其他连接' : '未配置')} / ${esc(main.model || '未设置模型')}</div>
+      <div class="form2" style="margin-top:8px">
+        <label>连接<select id="ext-assign-conn">
+          ${importedConns.map(c => `<option value="${c.id}" ${curConn && curConn.id === c.id ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}
+        </select></label>
+        <label>模型<input id="ext-assign-model" value="${esc(main.model || '')}" placeholder="模型 ID"></label>
+      </div>
+      <div class="ob-actions" style="margin-top:8px">
+        <button class="btn primary" id="ext-assign-btn">分配给主智能体</button>
+      </div>`;
+    $('#ext-assign-btn').onclick = async () => {
+      const connId = $('#ext-assign-conn').value;
+      const model = $('#ext-assign-model').value.trim();
+      // 切换主智能体已有连接时二次确认
+      if (main.api_connection_id && main.api_connection_id !== connId) {
+        const ok = await confirmBox('切换主智能体 API', '主智能体当前已配置 API，确定切换？');
+        if (!ok) return;
+      }
+      try {
+        await api.agentUpdate(main.id, { api_connection_id: connId, model: model || main.model });
+        toast('已分配给主智能体', 'ok');
+        window.dispatchEvent(new CustomEvent('models-updated'));
+        closeModal(); open('connections');
+      } catch (e) { toast('分配失败：' + e.message, 'error'); }
+    };
   }
 }
 

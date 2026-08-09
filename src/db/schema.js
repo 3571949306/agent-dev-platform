@@ -33,6 +33,8 @@ CREATE TABLE IF NOT EXISTS api_connections (
   tested_at TEXT,
   last_error TEXT DEFAULT '',
   latency_ms INTEGER,
+  import_source TEXT DEFAULT '',          -- v2.5.0: 来源标识 manual/codex/claude-code/opencode/ccswitch-local/environment/env-file/json-file/toml-file/smart-paste
+  import_source_path TEXT DEFAULT '',     -- v2.5.0: 来源路径（仅元数据，不含原文）
   created_at TEXT,
   updated_at TEXT
 );
@@ -330,7 +332,10 @@ const COLUMN_MIGRATIONS = [
   ['agent_messages', 'depth', 'INTEGER'],
   // v2.1.0 — external agent run state
   ['external_agents', 'last_status', 'TEXT'],
-  ['external_agents', 'last_run_at', 'TEXT']
+  ['external_agents', 'last_run_at', 'TEXT'],
+  // v2.5.0 — External Config Import source tracking
+  ['api_connections', 'import_source', 'TEXT'],
+  ['api_connections', 'import_source_path', 'TEXT']
 ];
 
 function ensureColumns(db) {

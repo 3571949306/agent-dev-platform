@@ -1,0 +1,6 @@
+{
+  "name": "Malformed Provider",
+  "provider": "openai",
+  "model": "model-malformed",
+  "apiKey": "sk-test-opencode-malformed-no-baseurl"
+}

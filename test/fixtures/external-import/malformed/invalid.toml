@@ -1,0 +1,3 @@
+# Malformed fixture — no baseUrl, no apiKey, no model (INVALID)
+[model_providers.invalid]
+name = "Invalid Provider"

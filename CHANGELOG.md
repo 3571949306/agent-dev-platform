@@ -1,5 +1,84 @@
 # Changelog
 
+## v2.5.0 — 2026-08-09
+
+> External Config Import — 外部 API 配置一键迁移。把其他 Agent / AI 开发工具中已经配好的 API（Codex / Claude Code / OpenCode / CC Switch / 环境变量 / .env / JSON / TOML 文件）安全地一键迁移到 Agent Dev Platform。**严格只读、密钥掩码、不迁移会员登录态 / OAuth Session / 软件内部认证。** 导入后仍走现有 ImportCandidate → Probe → Connection 链路，Runtime 不感知来源。
+
+### 一、统一 External Import 架构
+
+* 新增 `src/providers/onboarding/external/`：
+  * `registry.js` — Importer Registry，GUI 从此获取来源列表，不在 `pages.js` 写死。
+  * `index.js` — 入口：`listSources` / `discover` / `parse` / `importBatch`。
+  * `externalSource.js` — 统一 `ExternalSource` 结构（`sourceType` / `sourceName` / `sourcePath` / `exists` / `readable` / `lastModified` / `configType` / `candidates`）。
+  * `importNormalizer.js` — 统一归一化为 `ImportCandidate`，保留 `_missingSecret` / `_unsupportedCredential` 字段供 GUI 处理。
+  * `conflictResolver.js` — 冲突检测，输出 `NEW` / `DUPLICATE` / `CONFLICT` / `MISSING_SECRET` / `INVALID` 五态。
+* 每个外部软件独立 Importer（`importers/`）：`codex.js` / `claudeCode.js` / `openCode.js` / `ccSwitchLocal.js` / `environment.js` / `envFile.js` / `jsonFile.js` / `tomlFile.js`，禁止在一个文件里写全部解析逻辑。
+* 安全层 `security/`：`pathPolicy.js`（路径白名单，禁止递归扫描 `C:\Users`）+ `secretSanitizer.js`（日志/审计脱敏）。
+* Importer 不直接写数据库，最终输出 `ImportCandidate`，复用 v2.4.0 Smart API Onboarding 的 Probe → Connection 链路。
+
+### 二、各 Importer 实现
+
+* **Codex**（`importers/codex.js`）：解析 `~/.codex/config.toml`，识别 `model` / `model_provider` / `[model_providers.xxx]` / `name` / `base_url` / `wire_api` / `env_key` / `api_key`；`wire_api=responses → openai-responses`，`wire_api=chat → openai`；`env_key` 仅在用户主动点击导入时读取对应进程环境变量；OAuth / ChatGPT 订阅 / 内部 auth token 一律标记 `unsupported_credential` 不导入（§8/§14）。
+* **Claude Code**（`importers/claudeCode.js`）：识别 `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_BASE_URL`；第三方网关不强判 Anthropic Official，交 Probe 验证（§17）；Claude.ai login / Pro / Max / OAuth / session 凭据拒绝导入（§18）。
+* **OpenCode**（`importers/openCode.js`）：一个 Provider → 一个 ImportCandidate，支持 Batch Import；`${ENV_VAR}` 引用在用户主动导入时读取，缺失显示 `Credential Missing` 允许手动补 key（§21）。
+* **CC Switch Local**（`importers/ccSwitchLocal.js`）：基于 CC Switch commit `413c09e` 真实源码研究；SQLite 只读复制到 temp 再读，避免锁冲突；不依赖 CC Switch 运行；禁止 UPDATE/INSERT/DELETE（§24/§25）。
+* **Environment**（`importers/environment.js`）：用户主动点击才扫描 `process.env`；只查已知白名单（`OPENAI_API_KEY` / `OPENAI_BASE_URL` / `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_BASE_URL` / `DEEPSEEK_API_KEY` / `OPENROUTER_API_KEY` 等），禁止把 `process.env` 全部显示出来（§28）。
+* **File Import**（`importers/envFile.js` / `jsonFile.js` / `tomlFile.js`）：用户通过 `dialog.showOpenDialog` 主动选择 `.env` / `.json` / `.toml` 文件（§63 限制扩展名），读取后交给已有 Parser，不重新写解析器。
+
+### 三、安全原则（P0）
+
+* §7/§8 只迁移用户明确选择的 API Provider Credential；不迁移 Cookie / GitHub Token / 系统登录凭据 / OAuth Refresh Token / WorkBuddy 会员 Token / Codex / Claude 内部会员凭据 / session token。
+* §9 不读取外部软件内部网络流量（不抓包 / 不 Hook / 不 MITM / 不读内存 / 不拦截 IPC / 不逆向闭源认证），只处理公开配置文件 + 环境变量 + 用户主动选择的文件。
+* §10 所有 Importer READ ONLY，禁止修改 `~/.codex` / Claude 配置 / OpenCode 配置 / CC Switch 数据库。
+* §36 缺少 Secret 显示「需要补充密钥」并允许用户手动补 key。
+* §40 冲突时密钥不同必须提示，不自动覆盖；§41 比较时只显示 `sk-abcd••••1234` 掩码。
+* §51 Secret 走 safeStorage / DPAPI；§52 原始配置不永久保存（不把整个 config.toml / .env 写进数据库）；§53/§54 日志和审计不记录 apiKey / Authorization / 原始配置。
+* §55/§56 Path Security：读取路径前过 `pathPolicy`，禁止递归扫描用户目录。
+* §59 不硬编码 `C:\Users\Administrator`，统一用 `os.homedir()` / `process.env.USERPROFILE` / `app.getPath('home')`。
+
+### 四、Conflict Resolution（§37-§43）
+
+* 复用 / 扩展 duplicate detection，依据 Normalized Base URL + Protocol + Provider metadata + Name 判断。
+* 五态：`NEW`（直接导入）/ `DUPLICATE`（更新现有 / 跳过 / 另存为新连接）/ `CONFLICT`（密钥不同提示）/ `MISSING_SECRET`（手动补 key）/ `INVALID`。
+* Batch Import 每个 Candidate 独立状态，一个失败不让整批 rollback（§42/§43/§70）。
+* 并发 Probe 限制 2~3，避免同时请求 20 个 API（§45）。
+
+### 五、IPC 与 GUI
+
+* 新增 IPC：`externalImport:listSources` / `externalImport:discover` / `externalImport:parse` / `externalImport:selectFile` / `externalImport:checkConflicts` / `externalImport:import` / `externalImport:testSetFilePick`（测试钩子，仅测试中激活）。
+* `externalImport:selectFile` 通过 `dialog.showOpenDialog` 限制 `.env` / `.json` / `.toml` 扩展名（§63），生产环境走真实 dialog，E2E 通过 `testSetFilePick` 一次性注入路径。
+* GUI（`public/js/pages.js`）：API 连接页新增「📥 从其他工具导入」按钮（不增加顶级导航），弹窗流程 = 来源选择 → 自动发现 / 手动选文件 → 预览（密钥掩码）→ 冲突检测 → 手动补 key → 批量导入 → 结果展示 → 可选分配主智能体（§48 不强制）。
+* `import_source` 字段（`manual` / `smart-paste` / `codex` / `claude-code` / `opencode` / `ccswitch` / `environment` / `env-file` / `json-file` / `toml-file`）仅用于显示 / 审计 / 诊断，Runtime 不依赖来源（§49/§50）。
+
+### 六、测试与质量
+
+* 新增 `test/externalimport.test.js`（63 用例）：Codex（config.toml / responses / chat / env_key / missing env / unsupported OAuth）/ Claude（API KEY / AUTH TOKEN / custom BASE_URL / session rejected）/ OpenCode（single / multi / env reference / headers / malformed）/ CC Switch local / Environment whitelist / .env / JSON file / TOML file / Conflict（NEW/DUPLICATE/CONFLICT/MISSING_SECRET/INVALID）/ Batch（3 Provider / 2 成功 / 1 失败）/ Security（OAuth/Session/Membership 不导入 / Log 不泄漏 / Audit 不泄漏 / Raw Config 不持久化 / Preview Mask）。
+* 新增 `test/e2e/external-import.spec.js`（6 用例）：Case 18 Codex → Preview → Import（wire_api=responses → openai-responses）/ Case 19 Claude Code ENV → anthropic / Case 20 OpenCode multi-provider → Batch（A+B 导入，C 不导入）/ Case 21 Conflict detection → DUPLICATE / Case 22 Missing Secret → 手动补 Key → Import / Case 23 OAuth/Session credential rejected。全部使用 fixture，不依赖开发电脑真实配置（§72/§73，fixture 仅含 `sk-test-*`）。
+* `npm test`：**386 / 386 PASS / 0 FAIL / 0 SKIP**（v2.4.1 323 + 新增 externalimport 63）。
+* `npm run e2e`：**23 / 23 PASS**（原 17 + 新增 Case 18-23）。
+
+### 七、文档
+
+* 新增 `docs/EXTERNAL_CONFIG_IMPORT.md`：支持的来源 / 导入流程 / 安全边界 / 不迁移凭据 / 冲突处理 / Batch Import / 各 Importer 实现细节。
+* 更新 `README.md`：新增「外部 API 配置一键迁移」简介 + 文档链接；测试徽章更新为 `386+23`。
+* 更新 `docs/TEST_REPORT.md`：真实记录 386/386 单测 + 23/23 E2E。
+* `CHANGELOG.md` 新增 v2.5.0 条目。
+
+### 八、版本
+
+* `package.json` / `package-lock.json` 版本升级 `2.4.1 → 2.5.0`。
+
+### 九、完成标准（§95）
+
+* [x] Codex / Claude Code / OpenCode / CC Switch / Environment / .env / JSON / TOML Importer
+* [x] ImportCandidate 统一 / External Import Registry / Discovery / Preview / Batch Import / Conflict Detection
+* [x] NEW / DUPLICATE / CONFLICT / MISSING_SECRET / INVALID 五态
+* [x] OAuth / Session / Membership credential rejected
+* [x] Secret Mask / safeStorage / No Log Leak / No Audit Leak / Raw Config Not Persisted
+* [x] Codex / Claude / OpenCode / Conflict / Missing Secret / Unsupported Credential E2E
+* [x] 原 323 tests 保留 + npm test 全绿（386）
+* [x] 原 17 E2E 保留 + E2E >= 23（23）+ 全绿
+
 ## v2.4.1 — 2026-08-09
 
 > Smart Onboarding Reliability — 把 Smart API Onboarding 的协议检测与取消机制从「基本可用」修到「真实可靠」。**不新增功能，只修可靠性。** 让「快速接入 API」的自动检测结果值得信任，并且用户点击「取消检测」时，后台网络请求也真的停止。

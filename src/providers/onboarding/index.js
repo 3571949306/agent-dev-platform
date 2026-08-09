@@ -17,6 +17,7 @@ const { ProbeManager } = require('./probeManager');
 const { createCandidate, sanitizeCandidate, isViable } = require('./candidate');
 const { normalizeBaseUrl, joinUrl, candidateModelPaths } = require('./urlNormalizer');
 const { listPresets, detectPreset, getPreset, suggestName } = require('./presets');
+const external = require('./external');
 
 /**
  * 把 ImportCandidate 写入数据库（用户确认后调用）。
@@ -30,6 +31,13 @@ function importCandidate(candidate, ctx) {
   const { store, sec } = ctx;
   if (!store || !sec) throw new Error('importCandidate 需要 store + sec 上下文');
   if (!isViable(candidate)) throw new Error('候选不可导入：缺少 baseUrl / apiKey / model');
+  if (!candidate.baseUrl || !String(candidate.baseUrl).trim()) {
+    throw new Error('候选不可导入：连接必须包含 baseUrl');
+  }
+
+  // v2.5.0 §49/§50/§52：保存 import_source 元数据（不持久化原始配置内容）
+  const importSource = (candidate.source && candidate.source.type) || 'manual';
+  const importSourcePath = (candidate.source && candidate.source.path) || '';
 
   const body = {
     name: candidate.name || suggestName(candidate.baseUrl) || '新连接',
@@ -37,7 +45,9 @@ function importCandidate(candidate, ctx) {
     base_url: candidate.baseUrl || '',
     api_key: candidate.apiKey || '',
     headers: candidate.headers || {},
-    models: (candidate.models || []).map(id => ({ id, source: 'remote', favorite: false, addedAt: null }))
+    models: (candidate.models || []).map(id => ({ id, source: 'remote', favorite: false, addedAt: null })),
+    import_source: importSource,
+    import_source_path: importSourcePath
   };
 
   // §47/§48：重复检测 —— 同 baseUrl + 同 provider 视为重复，返回 existing 让 GUI 决定
@@ -119,5 +129,6 @@ module.exports = {
   listPresets,
   detectPreset,
   getPreset,
-  suggestName
+  suggestName,
+  external
 };

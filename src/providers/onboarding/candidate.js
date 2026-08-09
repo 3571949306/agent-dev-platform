@@ -24,10 +24,11 @@ function createCandidate() {
     headers: {},                 // 自定义 header（非 secret）
     notes: null,                 // 备注
     source: {                    // 解析来源元数据
-      type: null,                // plain-text/env/json/toml/curl/js/python/powershell-env/ccswitch-deeplink/ccswitch-config/unknown
+      type: null,                // plain-text/env/json/toml/curl/js/python/powershell-env/ccswitch-deeplink/ccswitch-config/unknown/codex/claude-code/opencode/ccswitch-local/environment/env-file/json-file/toml-file
       parser: null,              // 实际命中的 parser 名
       confidence: 0,             // 0~1
-      rawLength: 0               // 原始输入长度（仅元数据，不含原文）
+      rawLength: 0,              // 原始输入长度（仅元数据，不含原文）
+      path: null                 // v2.5.0: 来源配置文件路径（仅元数据，不持久化原文）
     }
   };
 }

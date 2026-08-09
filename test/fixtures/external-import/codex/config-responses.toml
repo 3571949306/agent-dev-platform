@@ -1,0 +1,10 @@
+# Codex fixture for unit tests (spec §74)
+# Uses sk-test-* fake keys only — no real credentials.
+model = "model-A"
+model_provider = "test"
+
+[model_providers.test]
+name = "Test Provider"
+base_url = "http://127.0.0.1:18000/v1"
+wire_api = "responses"
+api_key = "sk-test-codex-responses-1234567890abcdef"

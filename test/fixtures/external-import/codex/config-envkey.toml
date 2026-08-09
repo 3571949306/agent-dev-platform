@@ -1,0 +1,10 @@
+# Codex fixture — env_key reference (spec §13)
+# Importer should read env var MY_CODEX_KEY at import time.
+model = "model-C"
+model_provider = "envprov"
+
+[model_providers.envprov]
+name = "Env Key Provider"
+base_url = "http://127.0.0.1:18002/v1"
+wire_api = "responses"
+env_key = "MY_CODEX_KEY"

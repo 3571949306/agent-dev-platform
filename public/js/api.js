@@ -58,6 +58,16 @@ export const api = {
   onboardingDuplicate: (baseUrl, provider) => call('onboarding:duplicate', baseUrl, provider),
   diagListActiveProbes: () => call('diagnostics:listActiveProbes'),
 
+  // external import (v2.5.0 External Config Import)
+  externalImportListSources: () => call('externalImport:listSources'),
+  externalImportDiscover: (sourceType) => call('externalImport:discover', sourceType),
+  externalImportDiscoverAll: () => call('externalImport:discoverAll'),
+  externalImportParse: (sourceType, opts) => call('externalImport:parse', sourceType, opts),
+  externalImportResolveConflicts: (candidates) => call('externalImport:resolveConflicts', candidates),
+  externalImportImportBatch: (items) => call('externalImport:importBatch', items),
+  externalImportSelectFile: () => call('externalImport:selectFile'),
+  externalImportParseFile: (filePath) => call('externalImport:parseFile', filePath),
+
   // diagnostics (P1-5) — live capability probing + call-record audit
   diagCapabilities: (connId, modelId, which) => call('diagnostics:capabilities', connId, modelId, which),
   diagKnown: (connId, modelId) => call('diagnostics:known', connId, modelId),

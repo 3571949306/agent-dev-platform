@@ -1327,23 +1327,27 @@ async function loadHubCards(body) {
     cardsEl.innerHTML = `<div class="muted small">注册表不可用：${esc(e.message)}</div>`;
     return;
   }
-  if (!Array.isArray(available) || !available.length) {
-    cardsEl.innerHTML = '<div class="empty">注册表中没有可用 Agent</div>';
+  // v2.7.1 — 渲染所有已注册 Agent（来自 manifests），而不仅是当前可用的。
+  // 不可用的 Agent 显示 "不可用" 健康状态，但仍展示卡片（spec §37 要求）。
+  if (!Array.isArray(manifests) || !manifests.length) {
+    cardsEl.innerHTML = '<div class="empty">注册表中没有已注册 Agent</div>';
     return;
   }
-  const manifestById = new Map((manifests || []).map(m => [m && m.id, m]));
-  cardsEl.innerHTML = available.map(a => {
-    const m = manifestById.get(a.id) || {};
-    const name = esc(m.displayName || a.id);
-    const transport = esc(a.transport || a.adapterType || 'unknown');
+  const availById = new Map((available || []).map(a => [a.id, a]));
+  cardsEl.innerHTML = manifests.map(m => {
+    const a = availById.get(m.id) || {};
+    const name = esc(m.displayName || m.id);
+    const transport = esc((m.transport || a.transport || a.adapterType || 'unknown').toUpperCase());
     const caps = (m.capabilities && typeof m.capabilities === 'object')
       ? Object.keys(m.capabilities).filter(k => m.capabilities[k])
       : (Array.isArray(a.capabilities) ? a.capabilities : []);
-    const healthStatus = (a.health && a.health.status) || a.healthStatus || 'unknown';
-    return `<div class="acard" data-hub-id="${esc(a.id)}">
+    const healthStatus = availById.has(m.id)
+      ? ((a.health && a.health.status) || a.healthStatus || 'unknown')
+      : 'unavailable';
+    return `<div class="acard" data-hub-id="${esc(m.id)}">
       <div class="acard-h"><b>${name}</b><span class="chip">${transport}</span><span class="chip ${hubHealthClass(healthStatus)}">${esc(hubHealthText(healthStatus))}</span></div>
       <div class="acard-meta">${caps.map(c => `<span class="chip">${esc(hubCapLabel(c))}</span>`).join('') || '<span class="muted small">无能力声明</span>'}</div>
-      <div class="acard-f"><button class="btn tiny" data-hub-test="${esc(a.id)}">测试</button></div>
+      <div class="acard-f"><button class="btn tiny" data-hub-test="${esc(m.id)}">测试</button></div>
     </div>`;
   }).join('');
   cardsEl.querySelectorAll('[data-hub-test]').forEach(b => b.onclick = async () => {

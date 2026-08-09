@@ -57,7 +57,7 @@ function createAgentHub(opts = {}) {
   const {
     registry, router, healthManager,
     lifecycleManager, eventNormalizer, runBridge,
-    emit
+    emit, projectLock
   } = opts;
 
   if (!registry) throw new Error('createAgentHub: registry 必填');
@@ -65,6 +65,19 @@ function createAgentHub(opts = {}) {
   if (!healthManager) throw new Error('createAgentHub: healthManager 必填');
   if (!lifecycleManager) throw new Error('createAgentHub: lifecycleManager 必填');
   if (!runBridge) throw new Error('createAgentHub: runBridge 必填');
+
+  /**
+   * v2.7.1 — 判断任务是否需要写锁。
+   * 写锁条件：required 含 coding/filesystem/terminal，或 task.readOnly !== true。
+   * @param {object} task
+   * @returns {boolean}
+   */
+  function needsWriteLock(task) {
+    const required = (task && Array.isArray(task.required)) ? task.required : [];
+    const hasWriteCap = required.some(c => c === 'coding' || c === 'filesystem' || c === 'terminal');
+    const isReadOnly = task && task.readOnly === true;
+    return hasWriteCap || !isReadOnly;
+  }
 
   /**
    * 注册 adapter（委托给 registry）。
@@ -141,6 +154,26 @@ function createAgentHub(opts = {}) {
       adapterType: adapter.adapterType || adapter.transport || null
     });
 
+    // v2.7.1 — Project Mutation Lock：在 adapter.startTask 之前获取锁
+    let lockAcquired = false;
+    if (projectLock && task.projectRoot) {
+      const isWrite = needsWriteLock(task);
+      const lockResult = isWrite
+        ? projectLock.acquireWrite(task.projectRoot, runId, agentId)
+        : projectLock.acquireRead(task.projectRoot, runId, agentId);
+      if (!lockResult.ok) {
+        // 锁被其他 Run 持有——不启动任务
+        runBridge.finishAgentRun(runId, 'failed', 'PROJECT_LOCKED');
+        return {
+          error: 'PROJECT_LOCKED',
+          errorCode: 'PROJECT_LOCKED',
+          lockHolder: lockResult.lockHolder,
+          runId
+        };
+      }
+      lockAcquired = true;
+    }
+
     // 4. 调用 adapter.startTask，传入 task context
     try {
       const startResult = await adapter.startTask(task, {
@@ -150,7 +183,16 @@ function createAgentHub(opts = {}) {
         projectRoot: task.projectRoot,
         projectId: task.projectId,
         // 包装 emit：经过 eventNormalizer 归一化后发射
+        // v2.7.1 — adapter 若已自行归一化（type 以 agent. 开头），直接发射，避免二次映射丢失事件类型。
         emit: (type, payload) => {
+          if (typeof type === 'string' && type.startsWith('agent.')) {
+            // 已归一化事件：补全 runId/agentId 后直接发射
+            const evt = (payload && typeof payload === 'object')
+              ? { ...payload, type, runId: payload.runId || runId, agentId: payload.agentId || agentId }
+              : { type, runId, agentId, data: payload };
+            safeEmit(emit, evt.type, evt);
+            return;
+          }
           if (eventNormalizer) {
             const evt = eventNormalizer.normalize(
               { type, ...payload },
@@ -170,12 +212,20 @@ function createAgentHub(opts = {}) {
           if (['completed', 'failed', 'cancelled', 'timeout'].includes(status)) {
             runBridge.finishAgentRun(runId, status, result);
           }
+          // v2.7.1 — 终态后释放项目锁
+          if (lockAcquired && projectLock) {
+            try { projectLock.release(runId); } catch { /* noop */ }
+            lockAcquired = false;
+          }
         }
       });
 
       // 5. 处理启动失败
       if (startResult && startResult.ok === false) {
         runBridge.finishAgentRun(runId, 'failed', startResult.error || '启动失败');
+        if (lockAcquired && projectLock) {
+          try { projectLock.release(runId); } catch { /* noop */ }
+        }
         return {
           error: startResult.error || '启动失败',
           errorCode: ec('AGENT_START_FAILED', 'AGENT_START_FAILED'),
@@ -191,6 +241,9 @@ function createAgentHub(opts = {}) {
     } catch (e) {
       // adapter.startTask 抛异常：完成 Run 为 failed，返回 error
       runBridge.finishAgentRun(runId, 'failed', e.message);
+      if (lockAcquired && projectLock) {
+        try { projectLock.release(runId); } catch { /* noop */ }
+      }
       return {
         error: e.message,
         errorCode: ec('AGENT_START_FAILED', 'AGENT_START_FAILED'),
@@ -254,7 +307,23 @@ function createAgentHub(opts = {}) {
    * @returns {object|null}
    */
   async function cancel(runId) {
-    return runBridge.cancelAgentRun(runId);
+    // v2.7.1 — 先调用 adapter.cancel() 让外部 Agent 真正停止（如 OpenCode session abort）
+    const mapping = runBridge.getRunMapping(runId);
+    if (mapping) {
+      const lifecycleRun = lifecycleManager.getRun(mapping.lifecycleRunId);
+      if (lifecycleRun && lifecycleRun.agentId) {
+        const adapter = registry.get(lifecycleRun.agentId);
+        if (adapter && typeof adapter.cancel === 'function') {
+          try { await adapter.cancel(runId); } catch { /* adapter cancel failure must not block hub cancel */ }
+        }
+      }
+    }
+    const result = runBridge.cancelAgentRun(runId);
+    // v2.7.1 — 取消时释放项目锁
+    if (projectLock) {
+      try { projectLock.release(runId); } catch { /* noop */ }
+    }
+    return result;
   }
 
   /**

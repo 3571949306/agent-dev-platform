@@ -594,6 +594,29 @@ const agentPrefs = {
   }
 };
 
+// v2.7.1 — External agent configurations（每个外部 Agent 的配置持久化在 settings 表）
+const extAgentConfigs = {
+  get(agentId) {
+    const row = db().prepare('SELECT value_json FROM settings WHERE key=?').get('ext_agent_' + agentId);
+    return row ? p(row.value_json, {}) : {};
+  },
+  set(agentId, config) {
+    const existing = db().prepare('SELECT key FROM settings WHERE key=?').get('ext_agent_' + agentId);
+    if (existing) {
+      db().prepare('UPDATE settings SET value_json=? WHERE key=?').run(j(config), 'ext_agent_' + agentId);
+    } else {
+      db().prepare('INSERT INTO settings (key, value_json) VALUES (?,?)').run('ext_agent_' + agentId, j(config));
+    }
+    return config;
+  },
+  getCline() { return extAgentConfigs.get('cline'); },
+  setCline(config) { return extAgentConfigs.set('cline', config); },
+  getOpenCode() { return extAgentConfigs.get('opencode'); },
+  setOpenCode(config) { return extAgentConfigs.set('opencode', config); },
+  getOpenHands() { return extAgentConfigs.get('openhands'); },
+  setOpenHands(config) { return extAgentConfigs.set('openhands', config); }
+};
+
 // ---------- runs (v2.3.1: Run 持久化，重启后把非终态标记为 interrupted) ----------
 const runs = {
   upsert(run) {
@@ -691,5 +714,5 @@ module.exports = {
   db, init: dbm.initDb, getDb: dbm.getDb,
   projects, connections, models, prompts, skills, agents, externalAgents,
   conversations, messages, events, tasks, runs, agentMessages, tools, mcpServers,
-  memories, checkpoints, fileChanges, usage, modelCalls, permissionGrants, audit, settings, agentPrefs, migrateFromJson
+  memories, checkpoints, fileChanges, usage, modelCalls, permissionGrants, audit, settings, agentPrefs, extAgentConfigs, migrateFromJson
 };

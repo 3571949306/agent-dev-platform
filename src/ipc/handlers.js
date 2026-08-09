@@ -38,6 +38,12 @@ const { BUILTIN_AGENT_MANIFESTS } = require('../agents/manifests/builtinAgents')
 const { NativeAgentAdapter } = require('../agents/adapters/nativeAgentAdapter');
 const { CodexAgentAdapter } = require('../agents/adapters/codexAgentAdapter');
 const { WorkBuddyAgentAdapter } = require('../agents/adapters/workBuddyAgentAdapter');
+// v2.7.1 — External Agent Pack
+const { ClineAgentAdapter } = require('../agents/adapters/clineAgentAdapter');
+const { OpenCodeAgentAdapter } = require('../agents/adapters/openCodeAgentAdapter');
+const { OpenHandsAgentAdapter } = require('../agents/adapters/openHandsAgentAdapter');
+const { createOpenCodeServerManager } = require('../agents/integrations/opencode/serverManager');
+const { createProjectMutationLock } = require('../security/projectMutationLock');
 
 const mcpManager = new McpManager();
 const browser = createBrowserTools();
@@ -68,7 +74,10 @@ const healthManager = createHealthManager({ registry: agentRegistry });
 const lifecycleManager = createLifecycleManager({ emit });
 const eventNormalizer = createEventNormalizer({ emit });
 const runBridge = createRunBridge({ runManager, lifecycleManager, emit });
-const agentHub = createAgentHub({ registry: agentRegistry, router: agentRouter, healthManager, lifecycleManager, eventNormalizer, runBridge, emit });
+// v2.7.1 — Project Mutation Lock & OpenCode server manager（在 createAgentHub 之前创建）
+const openCodeServerManager = createOpenCodeServerManager();
+const projectLock = createProjectMutationLock();
+const agentHub = createAgentHub({ registry: agentRegistry, router: agentRouter, healthManager, lifecycleManager, eventNormalizer, runBridge, emit, projectLock });
 setAgentHub(agentHub);
 
 // Register built-in adapters
@@ -78,6 +87,25 @@ const codexAdapter = new CodexAgentAdapter({ manifest: BUILTIN_AGENT_MANIFESTS[1
 agentHub.register(codexAdapter);
 const workBuddyAdapter = new WorkBuddyAgentAdapter({ manifest: BUILTIN_AGENT_MANIFESTS[2], computerManager: computer.manager });
 agentHub.register(workBuddyAdapter);
+
+// v2.7.1 — Register external adapters (Cline, OpenCode, OpenHands)
+const clineAdapter = new ClineAgentAdapter({ manifest: BUILTIN_AGENT_MANIFESTS.find(m => m.id === 'cline'), store });
+agentHub.register(clineAdapter);
+const openCodeAdapter = new OpenCodeAgentAdapter({ manifest: BUILTIN_AGENT_MANIFESTS.find(m => m.id === 'opencode'), store, serverManager: openCodeServerManager });
+agentHub.register(openCodeAdapter);
+const openHandsAdapter = new OpenHandsAgentAdapter({ manifest: BUILTIN_AGENT_MANIFESTS.find(m => m.id === 'openhands'), store });
+agentHub.register(openHandsAdapter);
+
+// v2.7.1 — cleanup on exit（guard：测试环境 mock 的 app 可能没有 .on）
+if (app && typeof app.on === 'function') {
+  app.on('before-quit', () => {
+    projectLock.clearAll();
+    // Also dispose external adapters
+    clineAdapter.dispose().catch(() => {});
+    openCodeAdapter.dispose().catch(() => {});
+    openHandsAdapter.dispose().catch(() => {});
+  });
+}
 
 // v2.4.1 — ProbeManager：真正的 GUI Probe Cancel（abort fetch）+ probeId 生命周期。
 const sec = require('../security/secret');
@@ -890,6 +918,20 @@ function register(window) {
   ipcMain.handle('hub:status', async (e, runId) => agentHub.status(runId));
   ipcMain.handle('hub:result', async (e, runId) => agentHub.result(runId));
 
+  // v2.7.1 — Project Mutation Lock IPC
+  ipcMain.handle('lock:isBusy', (e, projectRoot) => projectLock.isBusy(projectRoot));
+  ipcMain.handle('lock:getHolder', (e, projectRoot) => projectLock.getLockHolder(projectRoot));
+  ipcMain.handle('lock:listBusy', () => projectLock.listBusy());
+
+  // v2.7.1 — External agent config IPC
+  ipcMain.handle('extcfg:get', (e, agentId) => store.extAgentConfigs.get(agentId));
+  ipcMain.handle('extcfg:set', (e, agentId, config) => store.extAgentConfigs.set(agentId, config));
+  ipcMain.handle('extcfg:getAll', () => ({
+    cline: store.extAgentConfigs.getCline(),
+    opencode: store.extAgentConfigs.getOpenCode(),
+    openhands: store.extAgentConfigs.getOpenHands()
+  }));
+
   // v2.7.0 — Test helpers（仅测试模式可用）
   if (process.env.NODE_ENV === 'test') {
     const { TestAgentAdapter } = require('../agents/adapters/testAgentAdapter');
@@ -897,6 +939,101 @@ function register(window) {
       const adapter = new TestAgentAdapter(config);
       agentHub.register(adapter);
       return { ok: true, id: adapter.id };
+    });
+
+    // v2.7.1 — External Agent Pack test injection hooks
+    // 注入 fake Cline SDK（避免消耗真实 API）
+    const clineSdkBridge = require('../agents/integrations/cline/sdkBridge');
+    ipcMain.handle('test:injectClineSdk', (e, opts = {}) => {
+      const fakeSdk = require('../../test/fakes/fakeClineSdk');
+      clineSdkBridge.setSdkForTest(fakeSdk);
+      clineAdapter._detected = null; // 清除 detect 缓存，下次 detect 用 fake
+      clineAdapter._sdkInjected = true;
+      return { ok: true, version: 'fake-0.0.72', delayMs: opts.delayMs || 0 };
+    });
+    ipcMain.handle('test:resetClineSdk', () => {
+      clineSdkBridge.clearSdkForTest();
+      clineAdapter._detected = null;
+      clineAdapter._sdkInjected = false;
+      // v2.7.1 — 重置后让 health 缓存失效并标记不可用，避免后续 Case 路由误判为 healthy
+      clineAdapter.healthStatus = 'unavailable';
+      healthManager.invalidate('cline');
+      return { ok: true };
+    });
+
+    // 注入 fake OpenCode Server（在主进程内启动 fake HTTP server，注入 fake serverManager）
+    ipcMain.handle('test:injectOpenCodeServer', async (e, opts = {}) => {
+      const { createFakeOpenCodeServer } = require('../../test/fakes/fakeOpenCodeServer');
+      const fakeServer = createFakeOpenCodeServer({ port: 0 });
+      await fakeServer.start();
+      const baseUrl = fakeServer.baseUrl;
+      // 构造 fake serverManager：返回 fake server 的 baseUrl，不启动真实进程
+      const fakeServerManager = {
+        detect: async () => ({ available: true, path: '/fake/opencode' }),
+        getVersion: async () => 'fake-1.0.0',
+        start: async ({ projectRoot, runId }) => ({ baseUrl, password: null, refCount: 1 }),
+        release: () => true,
+        stop: () => true,
+        health: async () => ({ healthy: true, version: 'fake-1.0.0', latencyMs: 1 }),
+        getServer: () => null,
+        isRunning: () => true,
+        isProcessAlive: () => true,
+        dispose: async () => { try { await fakeServer.stop(); } catch { /* noop */ } }
+      };
+      openCodeAdapter.serverManager = fakeServerManager;
+      openCodeAdapter._detected = null;
+      openCodeAdapter._fakeServer = fakeServer;
+      return { ok: true, baseUrl, version: 'fake-1.0.0' };
+    });
+    ipcMain.handle('test:resetOpenCodeServer', async () => {
+      if (openCodeAdapter._fakeServer) {
+        try { await openCodeAdapter._fakeServer.stop(); } catch { /* noop */ }
+        openCodeAdapter._fakeServer = null;
+      }
+      openCodeAdapter.serverManager = openCodeServerManager;
+      openCodeAdapter._detected = null;
+      // v2.7.1 — 重置后让 health 缓存失效并标记不可用，避免后续 Case 路由误判为 healthy
+      openCodeAdapter.healthStatus = 'unavailable';
+      healthManager.invalidate('opencode');
+      return { ok: true };
+    });
+    // v2.7.1 — Cancel E2E：控制 fake OpenCode server 的 hang 模式 + 读取 abort 调用数
+    ipcMain.handle('test:setOpenCodeHang', () => {
+      if (openCodeAdapter._fakeServer && typeof openCodeAdapter._fakeServer.setHangNext === 'function') {
+        openCodeAdapter._fakeServer.setHangNext();
+        return { ok: true };
+      }
+      return { ok: false, error: 'fake server not injected' };
+    });
+    ipcMain.handle('test:getOpenCodeAbortCount', () => {
+      if (openCodeAdapter._fakeServer) {
+        return { ok: true, count: openCodeAdapter._fakeServer.abortCount || 0 };
+      }
+      return { ok: true, count: 0 };
+    });
+
+    // 注入 fake OpenHands Server（在主进程内启动 fake HTTP server，设置 adapter config.serverUrl）
+    ipcMain.handle('test:injectOpenHandsServer', async (e, opts = {}) => {
+      const { createFakeOpenHandsServer } = require('../../test/fakes/fakeOpenHandsServer');
+      const fakeServer = createFakeOpenHandsServer({ port: 0 });
+      await fakeServer.start();
+      const baseUrl = fakeServer.baseUrl;
+      openHandsAdapter.config = { ...(openHandsAdapter.config || {}), serverUrl: baseUrl, mode: 'remote' };
+      openHandsAdapter._detected = null;
+      openHandsAdapter._fakeServer = fakeServer;
+      return { ok: true, baseUrl, version: 'fake-1.41.0' };
+    });
+    ipcMain.handle('test:resetOpenHandsServer', async () => {
+      if (openHandsAdapter._fakeServer) {
+        try { await openHandsAdapter._fakeServer.stop(); } catch { /* noop */ }
+        openHandsAdapter._fakeServer = null;
+      }
+      openHandsAdapter.config = null;
+      openHandsAdapter._detected = null;
+      // v2.7.1 — 重置后让 health 缓存失效并标记不可用，避免后续 Case 路由误判为 healthy
+      openHandsAdapter.healthStatus = 'unavailable';
+      healthManager.invalidate('openhands');
+      return { ok: true };
     });
   }
 }

@@ -1,5 +1,55 @@
 # Changelog
 
+## v2.7.1 — 2026-08-09
+
+> First External Agent Pack —— 把 Cline / OpenCode / OpenHands 三个真实外部 Agent 接入 v2.7.0 的 Agent Integration Hub。新增三个适配器、Project Mutation Lock、动态 SDK 加载（ESM→CJS 桥接）、事件归一化保留，以及 GUI Agent Center 展示所有已注册 Agent（含不可用）。**不引入新依赖；不改变 Main Agent Runtime 核心；旧库与旧连接完全兼容。**
+
+### 一、外部 Agent 适配器（§4.2-§4.4）
+
+* `src/agents/adapters/clineAgentAdapter.js`：Cline SDK 适配器。`@cline/sdk` 为 ESM-only，通过 `src/agents/integrations/cline/sdkBridge.js` 用 `dynamic import()` 桥接到 CJS；`detect()` 探测 SDK 是否可加载；`startTask()` 创建 `ClineCore` 实例并订阅 `content_update` / `tool_call` / `task_completed` 事件，经 `mapClineEvent` 归一化为 `agent.*`。
+* `src/agents/adapters/openCodeAgentAdapter.js`：OpenCode HTTP 适配器。复用 `opencode serve`（127.0.0.1 + 口令）；`serverManager` 引用计数，同一 projectRoot 的多个 Run 复用同一 server；`startTask()` 建 session → `prompt_async` → 订阅 SSE → `mapOpenCodeEvent` 归一化 → 终态后拉 `/session/:id/diff` 填充 changedFiles；`cancel()` 调 `POST /session/:id/abort` 并 abort SSE 流。
+* `src/agents/adapters/openHandsAgentAdapter.js`：OpenHands HTTP/WebSocket 适配器。`detect()` 探测本地 CLI 或 `config.serverUrl`；`startTask()` 建 conversation → 发 `task` → 订阅 event stream → `mapOpenHandsEvent` 归一化 → 终态后取 final state。
+
+### 二、Project Mutation Lock（§38）
+
+* `src/security/projectMutationLock.js`：项目级读写锁，防止两个会修改文件的 Agent 并发操作同一 projectRoot。
+  * 写锁（exclusive）：`coding` / `filesystem` / `terminal` 任务获取；同一 root 上已有任意锁时失败。
+  * 读锁（shared）：`readOnly` 任务（review / research / analysis）可并行持有；已有写锁时失败。
+  * `agentHub.start()` 在 `adapter.startTask()` 之前获取锁，获取失败返回 `PROJECT_LOCKED`；Run 终态 / cancel 时释放。
+  * 仅内存 Map，不持久化；App 启动 `clearAll()` 清理崩溃残留。
+
+### 三、AgentHub 取消与事件归一化修正
+
+* `agentHub.cancel()` 在 `runBridge.cancelAgentRun()` 之前调用 `adapter.cancel()`，让外部 Agent 真正停止（如 OpenCode session abort），避免远程会话泄漏。
+* `agentHub.start()` 的 `emit` 包装器保留 adapter 已归一化的 `agent.*` 事件（type 以 `agent.` 开头直接发射），避免 EventNormalizer 二次映射把 `agent.tool.started` 误转为 `agent.message`。
+* 外部 Adapter 统一使用 `context.runId`（而非自行生成），与 Hub 的 Run 映射对齐。
+
+### 四、GUI Agent Center 增强
+
+* `loadHubCards` 渲染所有已注册 Agent（来自 `manifests`），不可用的显示 "不可用" 健康状态但仍展示卡片（spec §37）。
+* Transport 标签大写显示（SDK / HTTP / NATIVE / CLI / DESKTOP）。
+* 卡片展示能力标签（来自 manifest.capabilities）。
+
+### 五、测试（§36-§43）
+
+* `test/e2e/external-agent-pack.spec.js`：Case 36-43（8 个 E2E）。
+  * 36) External Pack Cards —— 三 Agent 卡片渲染
+  * 37) Cline SDK —— 注入 fake SDK → start → event → completed
+  * 38) OpenCode Server —— fake server → session → task → tool event → diff → completed
+  * 39) OpenCode Cancel —— hang + 停止 → abort 被调用 + cancelled + 无迟到 completed
+  * 40) OpenHands Server —— fake server → conversation → event → completed
+  * 41) Project Lock —— 写锁互斥 + cancel 释放 + 重试获锁
+  * 42) Router Diversity —— 不同能力 → Router 选出预期
+  * 43) External Failure → Native Fallback —— 外部 Agent 不可用 → 回退 Native → completed
+* `test/fakes/`：新增 `fakeClineSdk.js` / `fakeOpenCodeServer.js`（含 hang + abort 计数）/ `fakeOpenHandsServer.js`，不消耗真实 API。
+* `test/clineAdapter.test.js` / `test/openCodeAdapter.test.js` / `test/openHandsAdapter.test.js` / `test/externalAgentContract.test.js` / `test/projectMutationLock.test.js`：新增 Unit tests。
+* `test:resetClineSdk` / `test:resetOpenCodeServer` / `test:resetOpenHandsServer` 重置时同步 invalidate health 缓存并标记 `unavailable`，避免后续 Case 路由误判为 healthy。
+* **总计：Unit 890 PASS / E2E 43 PASS（新增 8）/ Smoke SMOKE_OK。**
+
+### 六、动态 SDK 加载（ESM→CJS）
+
+* `sdkBridge.js`：`loadSdk()` 使用 `dynamic import()` 加载 ESM-only `@cline/sdk`，缓存加载结果；`setSdkForTest()` / `clearSdkForTest()` 支持测试注入 fake SDK，避免真实依赖。
+
 ## v2.7.0 — 2026-08-09
 
 > Agent Integration Hub —— 统一智能体适配层。把 Agent Dev Platform 从「拥有多个 Agent 功能」升级为「可以统一管理和调度各种 Agent 的平台」。新增 AgentAdapter 统一接口、AgentRegistry 运行态注册表、AgentRouter 确定性评分路由、Capability Registry、Health Manager、Lifecycle Manager、Event Normalizer，以及 Native / Codex / WorkBuddy 三种适配器和 Generic CLI / HTTP / Desktop 适配器。**不改变 v2.6.0 的 Main Agent Runtime 核心逻辑；旧库、旧连接、旧外部智能体完全兼容。**

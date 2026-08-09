@@ -305,6 +305,7 @@ module.exports = {
   streamLines,
   interpretError,
   linkSignals,
+  attachLink,
   releaseResponse,
   normalizeAbort,
   throwIfAborted,

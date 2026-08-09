@@ -148,5 +148,13 @@ export const api = {
   hubStartAuto: (task) => call('hub:startAuto', { task }),
   hubCancel: (runId) => call('hub:cancel', runId),
   hubStatus: (runId) => call('hub:status', runId),
-  hubResult: (runId) => call('hub:result', runId)
+  hubResult: (runId) => call('hub:result', runId),
+
+  // v2.7.1 — External agent configs & project mutation lock
+  extcfgGet: (agentId) => call('extcfg:get', agentId),
+  extcfgSet: (agentId, config) => call('extcfg:set', agentId, config),
+  extcfgGetAll: () => call('extcfg:getAll'),
+  lockIsBusy: (projectRoot) => call('lock:isBusy', projectRoot),
+  lockGetHolder: (projectRoot) => call('lock:getHolder', projectRoot),
+  lockListBusy: () => call('lock:listBusy')
 };

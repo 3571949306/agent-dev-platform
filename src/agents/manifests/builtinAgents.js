@@ -87,11 +87,115 @@ const WORKBUDDY = {
   maxConcurrency: 1
 };
 
-const BUILTIN_AGENT_MANIFESTS = [NATIVE_MAIN, CODEX, WORKBUDDY];
+/** Cline：外部 SDK Agent（@cline/sdk，ESM-only），编码 / 文件系统 / 终端 / MCP / 计划，支持流式与 resume，非沙箱。 */
+const CLINE = {
+  id: 'cline',
+  displayName: 'Cline',
+  source: 'external',
+  transport: 'sdk',
+  capabilities: {
+    coding: true,
+    planning: true,
+    research: true,
+    review: true,
+    filesystem: true,
+    terminal: true,
+    git: false,
+    browser: false,
+    computer: false,
+    vision: false,
+    mcp: true,
+    longRunning: true,
+    parallel: false,
+    streaming: true,
+    resume: true,
+    diff: true,
+    sandbox: false
+  },
+  availability: false,
+  version: null,
+  path: '@cline/sdk',
+  maxConcurrency: 2
+};
+
+/**
+ * OpenCode：外部 HTTP Agent（opencode serve）。
+ * 编码 / 计划 / 研究 / 审查 / 终端 / git / 长任务 / 流式 / diff；非沙箱。
+ * 由本地受管 server（127.0.0.1）+ Basic Auth 接入，maxConcurrency=2。
+ */
+const OPENCODE = {
+  id: 'opencode',
+  displayName: 'OpenCode',
+  source: 'external',
+  transport: 'http',
+  capabilities: {
+    coding: true,
+    planning: true,
+    research: true,
+    review: true,
+    filesystem: true,
+    terminal: true,
+    git: true,
+    browser: false,
+    computer: false,
+    vision: false,
+    mcp: false,
+    longRunning: true,
+    parallel: false,
+    streaming: true,
+    resume: false,
+    diff: true,
+    sandbox: false
+  },
+  availability: false,
+  version: null,
+  path: 'opencode',
+  maxConcurrency: 2
+};
+
+/**
+ * OpenHands：外部 HTTP Agent（FastAPI Agent Server）。
+ * 编码 / 计划 / 研究 / 审查 / 终端 / 浏览器 / 长任务 / 流式 / diff；沙箱。
+ * 不自动安装；maxConcurrency=1。
+ */
+const OPENHANDS = {
+  id: 'openhands',
+  displayName: 'OpenHands',
+  source: 'external',
+  transport: 'http',
+  capabilities: {
+    coding: true,
+    planning: true,
+    research: true,
+    review: true,
+    filesystem: true,
+    terminal: true,
+    git: false,
+    browser: true,
+    computer: false,
+    vision: false,
+    mcp: false,
+    longRunning: true,
+    parallel: false,
+    streaming: true,
+    resume: false,
+    diff: true,
+    sandbox: true
+  },
+  availability: false,
+  version: null,
+  path: 'openhands-agent-server',
+  maxConcurrency: 1
+};
+
+const BUILTIN_AGENT_MANIFESTS = [NATIVE_MAIN, CODEX, WORKBUDDY, CLINE, OPENCODE, OPENHANDS];
 
 module.exports = {
   BUILTIN_AGENT_MANIFESTS,
   NATIVE_MAIN,
   CODEX,
-  WORKBUDDY
+  WORKBUDDY,
+  CLINE,
+  OPENCODE,
+  OPENHANDS
 };

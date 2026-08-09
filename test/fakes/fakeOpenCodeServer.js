@@ -27,11 +27,22 @@ function createFakeOpenCodeServer(opts = {}) {
   // v2.7.1 — Cancel 测试：hangNext=true 时下次 prompt_async 只发 running 不发 completed
   let hangNext = false;
   let abortCount = 0;
+  // v2.7.2 — 失败场景注入
+  let forcedCreateStatus = 200;   // createSession 强制返回的状态码
+  let forcedRecoveryStatus = 200; // /session/status 强制返回的状态码
+  let malformedBurst = 0;         // 下次 prompt_async 发送的畸形 SSE 行数（不发 completed）
 
   function broadcast(event) {
     const data = 'data: ' + JSON.stringify(event) + '\n\n';
     sseClients.forEach(c => {
       try { c.write(data); } catch { /* client gone */ }
+    });
+  }
+
+  // 发送原始（可能畸形的）SSE 行，不做 JSON.stringify
+  function broadcastRaw(line) {
+    sseClients.forEach(c => {
+      try { c.write(line); } catch { /* client gone */ }
     });
   }
 
@@ -69,6 +80,11 @@ function createFakeOpenCodeServer(opts = {}) {
 
     // Create session
     if (path === '/session' && req.method === 'POST') {
+      if (forcedCreateStatus !== 200) {
+        res.writeHead(forcedCreateStatus, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'forced status ' + forcedCreateStatus }));
+        return;
+      }
       let body = '';
       req.on('data', d => body += d);
       req.on('end', () => {
@@ -89,6 +105,17 @@ function createFakeOpenCodeServer(opts = {}) {
       req.on('end', () => {
         res.writeHead(204);
         res.end();
+        // 畸形 / 未知 schema SSE 突发（§25）：发送 N 个无法识别的事件类型
+        // （合法 JSON，但 schema 未知）。streamSSE 会原样下发，适配器据
+        // unrecognized 标记计数；连续达到阈值 -> PROTOCOL_ERROR。
+        if (malformedBurst > 0) {
+          const n = malformedBurst;
+          malformedBurst = 0;
+          for (let i = 0; i < n; i++) {
+            setTimeout(() => broadcast({ type: '__unknown_schema_' + i, junk: true }), (i + 1) * 20);
+          }
+          return;
+        }
         // Emit events to SSE clients
         const useHang = hangNext;
         hangNext = false; // 一次性
@@ -155,6 +182,11 @@ function createFakeOpenCodeServer(opts = {}) {
 
     // Session status
     if (path === '/session/status') {
+      if (forcedRecoveryStatus !== 200) {
+        res.writeHead(forcedRecoveryStatus, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'forced recovery status ' + forcedRecoveryStatus }));
+        return;
+      }
       res.writeHead(200, { 'Content-Type': 'application/json' });
       const status = {};
       sessions.forEach((s, id) => { status[id] = 'completed'; });
@@ -196,6 +228,12 @@ function createFakeOpenCodeServer(opts = {}) {
     get sessions() { return sessions; },
     /** 设置下次 prompt_async 进入 hang 模式（不发 completed）。 */
     setHangNext() { hangNext = true; },
+    /** 强制 createSession 返回指定状态码（§27：401/403/404/5xx 分类）。 */
+    setForcedCreateStatus(code) { forcedCreateStatus = code; },
+    /** 强制 /session/status 返回指定状态码（终态恢复失败测试）。 */
+    setForcedRecoveryStatus(code) { forcedRecoveryStatus = code; },
+    /** 下次 prompt_async 发送 count 个畸形 SSE 行（不发 completed，§25）。 */
+    setMalformedBurst(count) { malformedBurst = count; },
     /** 返回 abort 被调用的次数。 */
     get abortCount() { return abortCount; },
     port: null,

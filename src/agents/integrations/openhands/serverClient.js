@@ -31,6 +31,8 @@ const { linkSignals, attachLink, releaseResponse } = require('../../../providers
 
 const DEFAULT_TIMEOUT_MS = 30000;
 const POLL_INTERVAL_MS = 1000;
+// v2.7.2 §13/§28：轮询连续失败上限。超过后抛错，绝不无限空转伪装「还在跑」。
+const MAX_POLL_FAILURES = 5;
 
 /** 探测全局 WebSocket 是否可用（Node 22+ / Electron）。 */
 function getWebSocketImpl() {
@@ -120,6 +122,13 @@ function createOpenHandsClient(opts = {}) {
     releaseResponse(resp);
   }
 
+  /** v2.7.2 §27/§36：带 httpStatus 的错误，供适配器分类（401/403/404/5xx）。 */
+  function httpError(message, status) {
+    const e = new Error(message);
+    e.httpStatus = status;
+    return e;
+  }
+
   /** GET /health → { healthy, ... }。 */
   async function health(callOpts = {}) {
     const resp = await request('/health', { method: 'GET' }, callOpts);
@@ -143,7 +152,7 @@ function createOpenHandsClient(opts = {}) {
     }, callOpts);
     if (!resp.ok) {
       const t = await errorText(resp);
-      throw new Error(`createConversation failed: HTTP ${resp.status} ${t.slice(0, 200)}`);
+      throw httpError(`createConversation failed: HTTP ${resp.status} ${t.slice(0, 200)}`, resp.status);
     }
     return parseJson(resp);
   }
@@ -158,7 +167,7 @@ function createOpenHandsClient(opts = {}) {
     }, callOpts);
     if (!resp.ok) {
       const t = await errorText(resp);
-      throw new Error(`sendMessage failed: HTTP ${resp.status} ${t.slice(0, 200)}`);
+      throw httpError(`sendMessage failed: HTTP ${resp.status} ${t.slice(0, 200)}`, resp.status);
     }
     return parseJson(resp);
   }
@@ -170,7 +179,7 @@ function createOpenHandsClient(opts = {}) {
     }, callOpts);
     if (!resp.ok) {
       const t = await errorText(resp);
-      throw new Error(`getEvents failed: HTTP ${resp.status} ${t.slice(0, 200)}`);
+      throw httpError(`getEvents failed: HTTP ${resp.status} ${t.slice(0, 200)}`, resp.status);
     }
     const body = await parseJson(resp);
     return Array.isArray(body) ? body : (body && body.events) || [];
@@ -348,14 +357,27 @@ function createOpenHandsClient(opts = {}) {
       catch (e) { if (signal && signal.aborted) return; throw e; }
     }
     let seen = 0;
+    let consecutiveFailures = 0;
     while (true) {
       if (signal && signal.aborted) return;
       let events;
       try {
         events = await getEvents(conversationId, { signal });
+        consecutiveFailures = 0;
       } catch (e) {
         if (signal && signal.aborted) return;
-        // 网络瞬断：退避重试
+        // conversation 已不存在：不再空转轮询，交由上层裁定终态（v2.7.2 §13）
+        if (e && e.httpStatus === 404) throw e;
+        // 网络瞬断：退避重试，但连续失败超过阈值必须抛出（绝不无限伪装「运行中」）
+        consecutiveFailures++;
+        if (consecutiveFailures >= MAX_POLL_FAILURES) {
+          const err = new Error(
+            `openhands event polling failed ${consecutiveFailures} times in a row: ${e && e.message ? e.message : String(e)}`
+          );
+          if (e && e.httpStatus) err.httpStatus = e.httpStatus;
+          err.streamEnded = true;
+          throw err;
+        }
         await sleep(POLL_INTERVAL_MS);
         continue;
       }
@@ -388,4 +410,4 @@ function createOpenHandsClient(opts = {}) {
   };
 }
 
-module.exports = { createOpenHandsClient, getWebSocketImpl, DEFAULT_TIMEOUT_MS };
+module.exports = { createOpenHandsClient, getWebSocketImpl, DEFAULT_TIMEOUT_MS, MAX_POLL_FAILURES };

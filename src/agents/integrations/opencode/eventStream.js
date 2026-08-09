@@ -149,7 +149,11 @@ function mapOpenCodeEvent(rawEvent, runId, agentId) {
       break;
   }
 
-  return { type, runId: runId || null, agentId: agentId || null, data, rawType, rawMetadata, timestamp, terminal };
+  // 标记无法识别的事件 schema（§25：连续 N 个不可解析事件 -> PROTOCOL_ERROR）
+  const recognized = !/^(server\.connected|session\.(created|updated|completed|aborted|cancelled|failed)|message\.(updated|part\.updated|created)|tool_call(\.updated|\.completed|\.failed)?|file\.(changed|updated|read)|command(\.started|\.completed)?|test\.(failed|passed)|permission\.(required|request)|error|unknown)$/i.test(rawType);
+  const unrecognized = recognized && type === AGENT_EVENT.MESSAGE && !terminal;
+
+  return { type, runId: runId || null, agentId: agentId || null, data, rawType, rawMetadata, timestamp, terminal, unrecognized };
 }
 
 module.exports = { mapOpenCodeEvent, isCompletedPart };

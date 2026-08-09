@@ -1,5 +1,54 @@
 # Changelog
 
+## v2.7.2 — 2026-08-09
+
+> External Agent Runtime Reliability —— 让 Cline / OpenCode / OpenHands 三个外部 Adapter 在真实运行时的终态、取消、超时、打包与诚实性真正可靠。基于 v2.7.1 的 Agent Integration Hub，不引入新依赖、不改变 Main Agent Runtime 核心、旧连接完全兼容。
+
+### 一、统一终态闸门（§11-§23，spec P0）
+
+* 新增共享 `src/agents/runtime/externalTerminalGate.js`（`createExternalAgentTerminalGate`）：终态集合 `{COMPLETED, FAILED, CANCELLED, TIMEOUT}`，`transition()` 保证「终态一次」（`terminalCount` 恒为 1），晚期 `late event / late promise / late SSE / late WebSocket / late callback` 一律被忽略。
+* 三个 Adapter 全部经唯一漏斗 `_finish()` → `gate.transition()` → `finishRun`，消除各自脆弱的 `if (!run.terminal) status = COMPLETED` 误判。
+
+### 二、取消 / 超时分离（§16-§19，spec P0）
+
+* 引入 `run.abortReason`（`user_cancel` / `timeout` / `parent_cancel` / `shutdown` / `protocol_failure`），区分取消与超时意图（Node 18 不支持 `AbortSignal.reason` 可靠，故用独立字段）。
+* 超时 → `TIMEOUT` + 发 `agent.run.timeout`；用户取消 → `CANCELLED` + 发 `agent.run.cancelled`。二者不再共用一个 AbortController 语义、不再互相覆盖。
+* 晚期结果保护：终态之后才 resolve 的 `agent.run()` 结果被闸门丢弃，终态恰好一次（§20-§23 / §62 / §63）。
+
+### 三、Cline 适配器可靠性（§7-§9 / §35-§41）
+
+* `sdkBridge.js`：`probeSdk()` 三态分离（installed / configured / available）；版本从 SDK package metadata 动态读取（`readSdkVersion`，3 条路径回退），读不到即 `null`（标记 `unknown`），**不再硬编码 `'0.0.72'`**（§7）；导出校验 `inspectExports`（§8）；运行时可构造性探针 `verifyRuntime`（只查 `run()` 方法，不消耗真实 API，§9）。
+* `clineAgentAdapter.js`：
+  * `detect()` 返回 `{ installed, configured, available, version, versionSource, missing }`（§8）。
+  * `healthCheck()` 增加 runtime constructibility 校验，形状不对 → `DEGRADED` 而非谎报 `HEALTHY`（§9 / §51）。
+  * `classifyRunOutcome()`：返回值不含任何终态证据（null / 空对象）→ `FAILED` + `AGENT_STREAM_ENDED_WITHOUT_TERMINAL`，绝不默认 `COMPLETED`（§11/§12）。
+  * §37：`cwd` / `workspacePath` / `workingDirectory` 三别名一并传给 SDK 构造，并回读实例确认是否接住；未接住在结果 `warnings` 如实标注，不假装已沙箱化。
+  * §39-§41：统一结果契约 `buildExternalResult` + `sanitizeErrors` / `sanitizeRaw` / `stripSecrets`；结果只保留有限长度、已脱敏的 `sanitizedRaw`，不再落完整 `raw`。
+* 远端错误分类（§27）：401/403 → `AGENT_AUTH_FAILED`；404 session → `AGENT_SESSION_NOT_FOUND`；5xx → `AGENT_REMOTE_ERROR`。
+
+### 四、OpenCode / OpenHands（对照加固）
+
+* 取消 / 超时 / 晚期结果 / 终态闸门与 Cline 对齐；SSE / WebSocket 异常 EOF 且无终态 → `FAILED` + `AGENT_STREAM_ENDED_WITHOUT_TERMINAL`（§12/§13/§28/§29 Terminal Recovery）。
+* OpenHands 采用 spec §33 方案 B：未配置 `serverUrl` 时 `installed=true / configured=false / available=false`，GUI 显示「已检测到 OpenHands，尚未配置 Agent Server」，不谎报 healthy。
+
+### 五、Cline SDK 官方研究（§4-§7，spec P0）
+
+* 落 `docs/EXTERNAL_AGENT_RUNTIME_RESEARCH.md`：实测 `@cline/sdk` 最新版 **0.0.72**、`engines.node >=22`、ESM-only。
+* **集成决策：Sidecar Process**（spec §6）—— Electron 31 内置 Node 18 无法 in-process 加载 Node 22 依赖；不升级 Electron 大版本。当前 in-process `dynamic import()` 作为 facade 保留，`detect()` 在 SDK 未安装 / Node 不兼容时如实返回 `available=false`。
+
+### 六、Project Mutation Lock 健壮性（§42-§45，spec P1）
+
+* `canonical()` 强化：`fs.realpathSync.native()` 解析 symlink / junction 到真实目标（§45，防止 `A\link → B` 绕过同一把锁）+ Windows 大小写不敏感归一化（§44，`D:\Project` 与 `d:\project` 视为同一 root）+ `path.resolve` 回退（路径不存在时仍 normalize）。
+* 终态释放路径已覆盖（§42）：`finishRun` 在 completed/failed/cancelled/timeout 释放；启动失败、启动抛异常、hub fallback、显式 `cancel()` 均释放。
+
+### 七、测试
+
+* `test/clineReliability.test.js`（新增，17 项）：无终态 → FAILED、空对象 → FAILED、超时 → TIMEOUT、取消 → CANCELLED、晚期结果忽略、401/404/5xx 分类、secret 脱敏、`sanitizedRaw` 不落完整 raw、§37 projectRoot 真实下发、§7 版本不伪造、§8 导出缺失、§9 构造不出 → degraded。
+* `test/openCodeReliability.test.js` / `test/openHandsReliability.test.js`（新增）：abrupt disconnect / malformed SSE / 500 / 401 / session missing / half-open / timeout / late completed / duplicate terminal。
+* `test/externalAgentTerminalGate.test.js`（新增）：completed/failed/cancel/timeout once，late/duplicate ignored。
+* `test/projectMutationLock.test.js`（新增/扩展）：§44 大小写不敏感、§45 junction 不绕过锁、写锁互斥、读锁共享、PROJECT_LOCKED 返回 lockHolder、release 幂等。
+* 既有 `clineAdapter.test.js` / `externalAgentContract.test.js` 无回归（require.cache 注入契约仍通过）。
+
 ## v2.7.1 — 2026-08-09
 
 > First External Agent Pack —— 把 Cline / OpenCode / OpenHands 三个真实外部 Agent 接入 v2.7.0 的 Agent Integration Hub。新增三个适配器、Project Mutation Lock、动态 SDK 加载（ESM→CJS 桥接）、事件归一化保留，以及 GUI Agent Center 展示所有已注册 Agent（含不可用）。**不引入新依赖；不改变 Main Agent Runtime 核心；旧库与旧连接完全兼容。**

@@ -126,7 +126,9 @@ function createOpenCodeClient(opts = {}) {
     }, callOpts);
     if (!resp.ok) {
       const t = await errorText(resp);
-      throw new Error(`createSession failed: HTTP ${resp.status} ${t.slice(0, 200)}`);
+      const e = new Error(`createSession failed: HTTP ${resp.status} ${t.slice(0, 200)}`);
+      e.httpStatus = resp.status;
+      throw e;
     }
     return parseJson(resp);
   }
@@ -148,7 +150,9 @@ function createOpenCodeClient(opts = {}) {
     }, callOpts);
     if (!resp.ok) {
       const t = await errorText(resp);
-      throw new Error(`sendPromptAsync failed: HTTP ${resp.status} ${t.slice(0, 200)}`);
+      const e = new Error(`sendPromptAsync failed: HTTP ${resp.status} ${t.slice(0, 200)}`);
+      e.httpStatus = resp.status;
+      throw e;
     }
     // 204 无 body
     discardBody(resp);
@@ -215,6 +219,22 @@ function createOpenCodeClient(opts = {}) {
     return ok;
   }
 
+  /** GET /session/status → { [sessionId]: status }（终态恢复用，§28/§29）。 */
+  async function getSessionStatus(sessionId, callOpts = {}) {
+    const resp = await request('/session/status', { method: 'GET' }, callOpts);
+    if (!resp.ok) {
+      const t = await errorText(resp);
+      const e = new Error(`getSessionStatus failed: HTTP ${resp.status} ${t.slice(0, 200)}`);
+      e.httpStatus = resp.status;
+      throw e;
+    }
+    const body = parseJson(resp);
+    if (sessionId != null && body && typeof body === 'object' && !Array.isArray(body)) {
+      return body;
+    }
+    return body || {};
+  }
+
   /**
    * GET /event (SSE) — 异步生成器，逐个 yield 解析后的事件对象。
    *
@@ -250,7 +270,9 @@ function createOpenCodeClient(opts = {}) {
     if (!resp.ok) {
       releaseResponse(resp);
       link.dispose();
-      throw new Error(`opencode SSE /event failed: HTTP ${resp.status}`);
+      const e = new Error(`opencode SSE /event failed: HTTP ${resp.status}`);
+      e.httpStatus = resp.status;
+      throw e;
     }
     // attachLink 后 streamSSE → streamLines 会用 linkOf(resp) 取到 link，
     // 在流结束 / abort 时自动 dispose；无需再手动 dispose。
@@ -269,6 +291,7 @@ function createOpenCodeClient(opts = {}) {
     abort,
     getDiff,
     deleteSession,
+    getSessionStatus,
     events
   };
 }

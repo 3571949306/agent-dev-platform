@@ -21,6 +21,7 @@
  */
 
 const path = require('path');
+const fs = require('fs');
 
 /** 默认 waitForLock 超时（毫秒）。 */
 const DEFAULT_WAIT_TIMEOUT_MS = 30000;
@@ -29,12 +30,31 @@ const DEFAULT_WAIT_TIMEOUT_MS = 30000;
 const WAIT_POLL_INTERVAL_MS = 50;
 
 /**
- * 把任意路径归一化为 canonical absolute path。同一 projectRoot 的不同写法
- * （'./a/../b' vs '/b'）映射到同一 key，避免锁泄漏。
+ * 把任意路径归一化为 canonical absolute path，作为锁 key。
+ *
+ * 必须满足 spec §44 / §45：
+ *   - realpath：解析 symlink / junction 到真实目标，防止 `A\link → B` 绕过同一把锁；
+ *   - case-insensitive：Windows 路径大小写不敏感，`D:\Project` 与 `d:\project` 视为同一 root；
+ *   - normalize：`./a/../b` 与 `/b` 映射到同一 key。
+ *
+ * 路径不存在时（如尚未 clone 的 projectRoot）realpath 会失败，回退到 path.resolve，
+ * 仍保证 normalize + case-insensitive，避免锁泄漏。
+ *
+ * @param {string} projectRoot
+ * @returns {string|null}
  */
 function canonical(projectRoot) {
   if (!projectRoot || typeof projectRoot !== 'string') return null;
-  try { return path.resolve(projectRoot); } catch { return null; }
+  let resolved;
+  try {
+    // 优先解析符号链接 / junction 到真实目标（§45），让 A\link 与 A 真实根共享一把锁
+    resolved = fs.realpathSync.native(projectRoot);
+  } catch {
+    try { resolved = path.resolve(projectRoot); } catch { return null; }
+  }
+  // Windows 路径大小写不敏感：归一化为小写 key，避免 D:\Project 与 d:\project 视作不同（§44）
+  if (process.platform === 'win32') resolved = resolved.toLowerCase();
+  return resolved;
 }
 
 /**

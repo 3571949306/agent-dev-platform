@@ -30,11 +30,14 @@ const main = store.agents.listNative().find(a => a.is_main);
 const openai = store.connections.list().find(c => c.provider === 'openai');
 
 // E2E 专用 Fake 连接：创建 + 同步拉取模型 + 指向主智能体
+// v2.3.2：主智能体必须直接配为 Fake API + model-B，让每个 E2E Case 都能独立运行
+// （否则 -g 单跑 Case 3 时主智能体仍是 OpenAI + model=null，preflight 拦截发送）。
 const fakeConnName = 'Fake API';
 let fakeConn = store.connections.list().find(c => c.name === fakeConnName);
 if (!fakeConn && baseUrl) {
   fakeConn = store.connections.create({ name: fakeConnName, provider: 'openai', base_url: baseUrl, api_key: 'sk-e2e-fake' });
-  if (main && !main.api_connection_id) store.agents.update(main.id, { api_connection_id: fakeConn.id });
+  // 总是把主智能体更新为 Fake API 连接 + model-B（确定 E2E 起点）
+  if (main) store.agents.update(main.id, { api_connection_id: fakeConn.id, model: 'model-B' });
   try {
     const url = new URL(baseUrl + '/models');
     const models = new Promise((resolve, reject) => {
@@ -54,6 +57,9 @@ if (!fakeConn && baseUrl) {
 printSummary();
 
 function printSummary() {
+  // 重新读取 main agent，确认 update 真的写入了数据库
+  const mainAfter = main ? store.agents.get(main.id) : null;
   console.log('SEED_OK project=' + proj.id + ' mainAgent=' + (main ? main.id : 'none') + ' openaiConn=' + (openai ? openai.id : 'none') + ' fakeConn=' + (fakeConn ? fakeConn.id : 'none') + (baseUrl ? ' base=' + baseUrl : ''));
+  console.log('SEED_VERIFY main.model=' + (mainAfter ? mainAfter.model : 'null') + ' main.api_connection_id=' + (mainAfter ? mainAfter.api_connection_id : 'null') + ' main.is_main=' + (mainAfter ? mainAfter.is_main : 'null'));
   process.exit(0);
 }

@@ -1,0 +1,78 @@
+name: windows-test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  unit:
+    name: Unit + Integration (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Rebuild native modules (better-sqlite3)
+        run: npm run rebuild
+
+      - name: Run unit + integration tests
+        run: npm test
+
+  smoke:
+    name: Smoke (Windows GUI boot)
+    runs-on: windows-latest
+    timeout-minutes: 15
+    needs: unit
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Rebuild native modules (better-sqlite3)
+        run: npm run rebuild
+
+      - name: Run smoke probe (headless boot + renderer DOM check)
+        run: npm run smoke
+
+  e2e:
+    name: GUI E2E (Playwright + Electron)
+    runs-on: windows-latest
+    timeout-minutes: 30
+    needs: smoke
+    # E2E requires a stable desktop session; on GitHub-hosted Windows runners
+    # this is provided via the interactive session. If the runner loses the
+    # desktop session, this job is allowed to fail without blocking the build
+    # — Unit + Smoke remain required.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Rebuild native modules (better-sqlite3)
+        run: npm run rebuild
+
+      - name: Run GUI E2E (Playwright + real Electron window)
+        run: npm run e2e

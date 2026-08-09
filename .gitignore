@@ -22,3 +22,6 @@ npm-debug.log*
 # Playwright E2E artifacts
 test-results/
 playwright-report/
+test/e2e/report/
+test/e2e/results/
+*.trace.zip

@@ -72,13 +72,28 @@ async function launchApp(ud) {
     throw e;
   }
   await p.waitForTimeout(800);
-  // 安装终态事件探针（window._runTerms）
+  // 安装事件探针：终态事件 + 全量 agent:event + assistant_status + run_state_changed
+  // （v2.3.2 P0-2 诊断要求：超时时能立刻看到 RunManager 真实状态与事件流）
   await p.evaluate(() => {
     window._runTerms = [];
+    window._agentEvents = [];      // 最近 50 条 agent:event
+    window._assistantStatus = [];  // 最近 20 条 assistant_status
+    window._runStateChanges = [];  // 最近 20 条 run_state_changed
     if (window.api && window.api.onEvent) {
       window.api.onEvent(e => {
-        if (['run_completed', 'run_failed', 'run_cancelled', 'run_timeout', 'run_interrupted'].includes(e.type)) {
-          window._runTerms.push(e.type);
+        const t = e && e.type;
+        if (['run_completed', 'run_failed', 'run_cancelled', 'run_timeout', 'run_interrupted'].includes(t)) {
+          window._runTerms.push(t);
+        }
+        if (window._agentEvents.length > 50) window._agentEvents.shift();
+        window._agentEvents.push({ type: t, conv: e.conversationId, runId: e.runId, status: e.status, message: (e.message || '').slice(0, 200) });
+        if (t === 'assistant_status') {
+          if (window._assistantStatus.length > 20) window._assistantStatus.shift();
+          window._assistantStatus.push(e.status || '');
+        }
+        if (t === 'run_state_changed') {
+          if (window._runStateChanges.length > 20) window._runStateChanges.shift();
+          window._runStateChanges.push({ status: e.status, runId: e.runId, conv: e.conversationId });
         }
       });
     }
@@ -91,6 +106,78 @@ async function getTerminalDelta() {
   const delta = now.slice(terminalLog.length);
   terminalLog = now;
   return delta;
+}
+
+/**
+ * v2.3.2 (P0-3): 数据库 Run 状态一致性检查。
+ * 读取最新一条 runs row，确认其 status 与期望终态一致。
+ * 这等价于"直接读取测试 userData SQLite"，因为 IPC handler 直接调用 store.runs.list()。
+ */
+async function expectDbRunStatus(expectedStatus) {
+  const row = await page.evaluate(async (s) => {
+    const r = await window.api.invoke('runs:list', 1);
+    const list = r && r.data !== undefined ? r.data : r;
+    return Array.isArray(list) && list.length ? list[0] : null;
+  }, expectedStatus);
+  expect(row, '数据库 runs 表应有至少一条记录').not.toBeNull();
+  expect(row.status, `数据库 runs.status 应为 ${expectedStatus}，实际 ${row.status}`).toBe(expectedStatus);
+  return row;
+}
+
+/**
+ * v2.3.2 (P0-2 §12 诊断)：断言失败时输出完整状态快照到 stderr。
+ * 检查项：当前 runId / RunManager status / conversationId / activeRuns /
+ * 最后一个 agent:event / 最后一个 assistant_status / 数据库 runs row /
+ * renderer DOM 状态 / 主智能体配置。
+ */
+async function dumpDiagnostics(label) {
+  const tag = `[diag:${label || 'fail'}]`;
+  try {
+    const snap = await page.evaluate(async () => {
+      const call = async (ch, ...args) => {
+        try { const r = await window.api.invoke(ch, ...args); return r && r.data !== undefined ? r.data : r; }
+        catch (e) { return { _error: e.message }; }
+      };
+      const [runsDump, agents, convs] = await Promise.all([
+        call('diagnostics:dumpRuns'),
+        call('agents:list'),
+        call('conversations:list')
+      ]);
+      return {
+        dom: {
+          statusText: document.querySelector('#status-text')?.textContent || null,
+          btnStopHidden: document.querySelector('#btn-stop')?.classList.contains('hidden'),
+          btnSendDisabled: document.querySelector('#btn-send')?.disabled,
+          statusLine: document.querySelector('#status-line')?.textContent?.slice(0, 120) || null,
+          inputVal: document.querySelector('#input')?.value || null,
+          msgCount: document.querySelectorAll('.msg').length,
+          assistantBubbles: Array.from(document.querySelectorAll('.msg.assistant .bubble .md')).map(e => e.textContent.slice(0, 80)),
+          errCards: Array.from(document.querySelectorAll('.err-card')).map(e => e.textContent.slice(0, 200)),
+          preflightBlocks: Array.from(document.querySelectorAll('.preflight-block')).map(e => e.textContent.slice(0, 200)),
+          bodyTextHead: document.body.innerText.slice(0, 400)
+        },
+        runTerms: (window._runTerms || []).slice(),
+        agentEventsTail: (window._agentEvents || []).slice(-15),
+        assistantStatusTail: (window._assistantStatus || []).slice(-10),
+        runStateChangesTail: (window._runStateChanges || []).slice(-10),
+        runsDump,
+        mainAgent: (Array.isArray(agents) ? agents : []).find(a => a && a.is_main) || null,
+        conversationsCount: Array.isArray(convs) ? convs.length : 0
+      };
+    }).catch(e => ({ _evaluateError: e.message }));
+    const msg = `${tag} ${JSON.stringify(snap, null, 2)}\n`;
+    process.stderr.write(msg);
+    // 同步写一份到文件，避免 PowerShell 重定向缓冲丢失
+    try { fs.appendFileSync(path.join(os.tmpdir(), 'adp-e2e-diag.log'), msg); } catch { /* best effort */ }
+  } catch (e) {
+    process.stderr.write(`${tag} dumpDiagnostics 失败: ${e.message}\n`);
+  }
+}
+
+/** 包裹断言：失败时先 dump 诊断再 rethrow，让超时根因立刻可见。 */
+async function expectWithDiag(label, fn) {
+  try { await fn(); }
+  catch (e) { await dumpDiagnostics(label); throw e; }
 }
 
 /** 关闭 page-overlay（Esc 键 → pages.js 已绑定 keydown），回到聊天主界面 */
@@ -185,8 +272,12 @@ test('3) 【主路径】选好模型发送「你好」→ 无 ReferenceError →
   await page.locator('#input').fill('你好');
   await page.getByRole('button', { name: '发送 ▸' }).click();
   // 收到回复并完成（快任务可能直接跳过「运行中」，直接断言终态）
-  await expect(page.locator('#status-text')).toContainText('已完成', { timeout: 30000 });
-  await expect(page.locator('.msg.assistant')).toContainText('你好，我是测试智能体。', { timeout: 10000 });
+  await expectWithDiag('case3-status', async () => {
+    await expect(page.locator('#status-text')).toContainText('已完成', { timeout: 30000 });
+  });
+  await expectWithDiag('case3-bubble', async () => {
+    await expect(page.locator('.msg.assistant')).toContainText('你好，我是测试智能体。', { timeout: 10000 });
+  });
   // Spinner 消失：停止按钮隐藏、发送按钮恢复
   await expect(page.locator('#btn-stop')).toBeHidden();
   await expect(page.locator('#btn-send')).toBeEnabled();
@@ -194,6 +285,8 @@ test('3) 【主路径】选好模型发送「你好」→ 无 ReferenceError →
   const delta = await getTerminalDelta();
   expect(delta).toEqual(['run_completed']);
   expect(pageErrors.filter(e => /models is not defined|ReferenceError/.test(e))).toEqual([]);
+  // P0-3: 数据库 runs.status 与 UI 终态一致
+  await expectDbRunStatus('completed');
 });
 
 test('4) 业务失败：model-FAIL → 唯一终态 failed（绝不随后 completed）', async () => {
@@ -207,6 +300,8 @@ test('4) 业务失败：model-FAIL → 唯一终态 failed（绝不随后 comple
   await page.waitForTimeout(1500); // 留时间给“迟到的 completed”（若有 bug 会冒出来）
   const delta = await getTerminalDelta();
   expect(delta).toEqual(['run_failed'], '业务失败后不得再出现 run_completed');
+  // P0-3: 数据库 runs.status 与 UI 终态一致
+  await expectDbRunStatus('failed');
 });
 
 test('5) 停止：model-HANG + 点停止 → 唯一终态 cancelled', async () => {
@@ -222,6 +317,8 @@ test('5) 停止：model-HANG + 点停止 → 唯一终态 cancelled', async () =
   await page.waitForTimeout(1500);
   const delta = await getTerminalDelta();
   expect(delta).toEqual(['run_cancelled'], 'cancelled 后不得再出现 run_completed');
+  // P0-3: 数据库 runs.status 与 UI 终态一致
+  await expectDbRunStatus('cancelled');
 });
 
 test('6) 超时：model-HANG + 短 timeout → 唯一终态 timeout', async () => {
@@ -235,6 +332,8 @@ test('6) 超时：model-HANG + 短 timeout → 唯一终态 timeout', async () =
   await page.waitForTimeout(1500);
   const delta = await getTerminalDelta();
   expect(delta).toEqual(['run_timeout'], 'timeout 后不得再出现 run_completed');
+  // P0-3: 数据库 runs.status 与 UI 终态一致
+  await expectDbRunStatus('timeout');
   // 恢复正常模型
   await setMainModel('model-B', { timeout_ms: 600000 });
 });
@@ -261,7 +360,8 @@ test('7) 模型来源：手动添加 CUSTOM-X → 重启后仍在(source=manual)
   await expect(page.locator('#mm-list')).toContainText('CUSTOM-X');
   // 刷新模型（merge 语义：手动模型保留）
   await page.locator('#mm-refresh').click();
-  await expect(page.locator('body')).toContainText('已成功获取 3 个模型', { timeout: 15000 });
+  // v2.3.2: merge 后总数 = API 模型 + 手动模型，toast 文案含"已成功获取"即可
+  await expect(page.locator('body')).toContainText('已成功获取', { timeout: 15000 });
   await openFakeModels();
   await expect(page.locator('#mm-list')).toContainText('CUSTOM-X', { timeout: 10000 });
   // 重启 App（同一 userData）验证持久化

@@ -52,7 +52,6 @@ function start(preferredPort = 0) {
             'Cache-Control': 'no-cache',
             Connection: 'keep-alive'
           });
-          res.flushHeaders && res.flushHeaders();
           const reply = '你好，我是测试智能体。';
           let i = 0;
           const timer = setInterval(() => {
@@ -66,7 +65,9 @@ function start(preferredPort = 0) {
             i += 3;
             res.write(`data: ${JSON.stringify({ id: 'chatcmpl-fake', object: 'chat.completion.chunk', model, choices: [{ index: 0, delta: { content: chunk }, finish_reason: null }] })}\n\n`);
           }, 20);
-          req.on('close', () => clearInterval(timer));
+          // v2.3.2: 必须用 res.on('close') 而非 req.on('close') —— req 'close' 在请求体
+          // 接收完成后就触发，会立即清掉 timer，导致 SSE body 永远不发送（Case 3 卡死根因）。
+          res.on('close', () => clearInterval(timer));
         });
         return;
       }

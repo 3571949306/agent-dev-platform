@@ -72,7 +72,9 @@ const CHAT_TOOL_NAMES = ['list_project_chats', 'get_chat_summary', 'send_message
 function buildToolDefsFor(agent) {
   const mcpDefs = [...mcpToolMap.values()].map(m => m.def);
   const defs = buildToolDefs(agent, { mcpDefs, subAgents: subAgentsFor(agent) });
-  const isMain = agent.is_main || agent.type === 'computer' || /main/i.test(agent.name || '');
+  // v2.3.2 (§42): is_main 是唯一判据，不再依赖显示名称 /main/i.test(name)。
+  // Computer 操作员同样需要 browser+computer 工具集。
+  const isMain = !!(agent.is_main || agent.type === 'computer');
   if (isMain) defs.push(...browser.defs, ...computer.defs);
   if (isMain) {
     const have = new Set(defs.map(d => d.name));
@@ -398,6 +400,21 @@ function register(window) {
   });
   reg('diagnostics:modelCalls', (limit) => store.modelCalls.list(limit || 100));
   reg('diagnostics:mismatches', () => store.modelCalls.mismatches());
+  // v2.3.2 (P0-2 诊断)：E2E 超时排查用 —— 返回所有活跃 Run + 按 conversation 索引，
+  // 让测试在断言失败时能立刻看到 RunManager 真实状态（status / stage / lastActivityAt / error）。
+  reg('diagnostics:dumpRuns', () => ({
+    runs: runManager.list().map(r => ({
+      id: r.id, conversationId: r.conversationId, agentId: r.agentId, taskId: r.taskId,
+      status: r.status, stage: r.stage, startedAt: r.startedAt, lastActivityAt: r.lastActivityAt,
+      terminalAt: r.terminalAt, error: r.error, message: r.message,
+      logTail: (r.log || []).slice(-5)
+    })),
+    activeRunsByConversation: [...runManager.byConversation.entries()].map(([convId, runId]) => ({ convId, runId })),
+    activeAbortControllers: [...activeRuns.keys()]
+  }));
+  // v2.3.2 (P0-3): E2E 数据库一致性检查 —— 直接读 runs 表，确认 UI 终态 = runs.status。
+  reg('runs:get', (id) => store.runs.get(id));
+  reg('runs:list', (limit) => store.runs.list(limit || 100));
 
   // prompts / skills
   reg('prompts:list', () => store.prompts.list());
@@ -589,24 +606,30 @@ function register(window) {
   });
 
   // agent runtime
-  ipcMain.handle('agent:send', async (_e, { conversationId, agentId, message }) => {
-    // v2.3.1 (P0-2/P0-3): agent:send 通过 RunManager 创建 Run 并唯一宣布终态。
-    // Promise resolve ≠ 业务成功 —— 只有 runChatTurn 返回的 status 决定终态。
+  // v2.3.2 (P0-1): agent:send 必须「立即 ACK」—— 创建 Run 后立即返回 runId，
+  // 后台执行 runChatTurn，绝不让 Renderer 等待 Agent 完成。所有状态通过
+  // agent:event（run_state_changed + 终态事件）推送。后台 IIFE 完整 try/catch
+  // 收口，任何异常都经 runManager.finishRun() 进入唯一终态，禁止
+  // UnhandledPromiseRejection。
+  ipcMain.handle('agent:send', (_e, { conversationId, agentId, message }) => {
     const run = runManager.createRun({ conversationId, agentId });
     const runId = run.id;
-    try {
-      const result = await runChatTurn(conversationId, agentId, message, { runId, runManager });
-      const status = (result && result.status) || 'failed';
-      runManager.finishRun(runId, status, {
-        error: (result && result.error) || null,
-        message: (result && result.error) || null,
-        source: 'agent:send'
-      });
-    } catch (err) {
-      const c = classifyError(err);
-      emit('error', { conversationId, message: c.error });
-      runManager.finishRun(runId, c.status, { error: c.error, message: c.error, source: 'agent:send-catch' });
-    }
+    // 后台执行 —— 不 await，IPC Promise 立即 resolve，Renderer 立刻拿到 runId。
+    (async () => {
+      try {
+        const result = await runChatTurn(conversationId, agentId, message, { runId, runManager });
+        const status = (result && result.status) || 'failed';
+        runManager.finishRun(runId, status, {
+          error: (result && result.error) || null,
+          message: (result && result.error) || null,
+          source: 'agent:send'
+        });
+      } catch (err) {
+        const c = classifyError(err);
+        try { emit('error', { conversationId, message: c.error }); } catch { /* emit must not break finish */ }
+        runManager.finishRun(runId, c.status, { error: c.error, message: c.error, source: 'agent:send-catch' });
+      }
+    })();
     return { accepted: true, runId, conversationId, status: 'preparing' };
   });
   ipcMain.handle('agent:stop', (_e, { conversationId }) => {

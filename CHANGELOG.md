@@ -1,5 +1,62 @@
 # Changelog
 
+## v2.3.2 — 2026-08-09
+
+> Release Candidate：把 Agent Dev Platform 从「功能基本完成」修到「第一版可长期实际使用」。**禁止新增无关功能，禁止用扩大超时掩盖 GUI Bug，禁止把测试失败写成「部分成功」。** 本轮全部 E2E 在真实 Electron 窗口下 9/9 PASS。
+
+### P0-1 — agent:send 立即 ACK
+
+* `src/ipc/handlers.js#agent:send` 重构为「创建 Run 后立即 return `{ accepted:true, runId, conversationId, status:'preparing' }`」；runChatTurn 在 IIFE 内异步执行，绝不让 Renderer 等待 Agent 完成。
+* 后台 IIFE 完整 try/catch/finally：所有异常（failed / cancelled / timeout）都经 `runManager.finishRun()` 进入唯一终态，禁止 `UnhandledPromiseRejection`。
+* 新增 `test/agentack.test.js`（3 用例）：mock 5s 慢任务 → ACK 延迟 < 1s；后台异常收口为 failed 且无未处理 Promise；单 Run 单终态（重复 finishRun 不发第二次终态事件）。
+
+### P0-2 — GUI E2E 真正 9/9 PASS
+
+* 严格语义：`PASS = 所有断言成功`；`FAIL = 任意断言失败 / 超时`；`SKIP = 明确跳过`。不再使用「部分通过」「虽然超时但算成功」。
+* E2E 诊断 `dumpDiagnostics()`：断言失败时自动输出 RunManager 状态（list / byConversation / activeRuns）、最近 15 条 agent:event、最近 10 条 assistant_status / run_state_changed、DOM 状态、主智能体配置；同步写入 `%TEMP%\adp-e2e-diag.log`。
+* 新增 IPC `diagnostics:dumpRuns`：E2E 与未来线上排障统一接口。
+* 真实修复（不靠加大超时）：
+  * Case 3 卡死根因 = `test/e2e/fake-api.js` 用 `req.on('close')`，请求体接收完成即触发清掉 SSE 定时器，body 永不发送。改用 `res.on('close')`。
+  * Case 3 主智能体未配模型 = seed 假设 OpenAI 连接可用。改为 `seed-db.js` 总是把主智能体更新为 Fake API + model-B，输出 `SEED_VERIFY` 验证写入。
+  * Case 7 模型数量断言过严 = merge 后总数 = API 模型 + 手动模型。改为断言「已成功获取」文本。
+* 最终 `npm run e2e`：**9 passed (21.1s)**，真实 Electron 窗口。
+
+### P0-3 — Run/Stop/Timeout 真实 GUI 闭环 + 数据库一致性
+
+* 新增 IPC `runs:get` / `runs:list`：E2E 直接读 `runs` 表断言 `row.status === UI 终态`。
+* E2E Case 3/4/5/6 全部新增 `expectDbRunStatus(expected)` 双层断言：UI 终态事件 + 数据库 runs.status。
+* Run 隔离：`agent:stop` 通过 `runManager.cancelByConversation(conversationId)` 严格按 conversationId 取消，Run A 迟到事件无法关闭 Run B Spinner。
+
+### P0-4 — WorkBuddy Bridge 安全验收
+
+* 自动 Harness：`desktopbridge` 19 + `desktopvision` 19 + `workbuddy-emptyuia` 4 + `services` 26 = **68 / 68 PASS**。
+* 真窗口定位：`externalAgents:test` IPC 真实调用 `.NET UIAutomation` 列窗口 + 标题匹配 + 读 UI 文本，全程不发任务、不写文件、不执行命令。
+* **完整任务往返：NOT VERIFIED**。本开发会话即在 WorkBuddy 宿主中，按 §22 禁止递归发送任务。固定安全 prompt 已写入代码注释，留待独立新会话执行。
+
+### P1-5 — 测试产物清理 + 文档修正
+
+* `git rm -r --cached test/e2e/report`：Playwright HTML 报告 / trace / 截图 / zip 全部从 Git 移除。`git ls-files test/e2e/report` 输出为空。
+* `.gitignore` 新增 `test-results/` / `playwright-report/` / `test/e2e/report/` / `test/e2e/results/` / `*.trace.zip`。不全局忽略 `*.png` / `*.zip`（避免误伤合法资源）。
+* `docs/TEST_REPORT.md` 整体重写为 v2.3.2 真实数据：250/250 单测、9/9 E2E、SMOKE_OK、Build PASS。修复旧版「顶部 246 / 正文 222」矛盾。
+
+### P1-6 — GitHub Actions
+
+* 新增 `.github/workflows/windows-test.yml`：Windows runner，三 job（unit 必过 / smoke 必过 / e2e continue-on-error）。E2E 在 GitHub-hosted runner 桌面会话不保证，留给本地真机跑。
+* 真实 conclusion 待 push 后产生，未写「CI PASS」直到真实 run success。
+
+### 其他修复
+
+* `buildToolDefsFor` 不再依赖 `/main/i.test(name)` 判断 Main，改为 `agent.is_main` 唯一判据（Computer 操作员同等待遇）。
+* `package.json` 版本升级 `2.3.1 → 2.3.2`。
+
+### 测试与质量
+
+* `npm test`：**250 / 250 PASS / 0 FAIL**（v2.3.1 247 + 新增 agentack 3）。
+* `npm run e2e`：**9 / 9 PASS**（真实 Electron 窗口）。
+* `npm run smoke`：SMOKE_OK（含 SMOKE_DIAG 诊断页校验）。
+* `npm run dist`：`Agent Dev Platform Setup 2.3.2.exe` (80.8 MB) + `Agent Dev Platform 2.3.2 portable.exe` (80.6 MB) + `win-unpacked/Agent Dev Platform.exe`。
+* win-unpacked 真机启动：SMOKE_OK，主窗口出现、无白屏、无 Fatal、导航正常、智能体页正常、聊天页正常。
+
 ## v2.3.1 — 2026-08-08
 
 > Main Path Reliability Fix：在 v2.3.0 基础上，把「选模型 → 输入消息 → 发送 → 收到回复 → Spinner 正确结束」这条最核心主路径真正跑通，并消除一切「看似闭环但仍有自相矛盾状态」的缺陷。**禁止新增无关大功能，禁止用 `npm test 全绿` 替代真机 GUI 主路径验证。**

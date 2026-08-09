@@ -138,9 +138,11 @@ npm run dist
 
 | Job | 状态 | 说明 |
 | --- | --- | --- |
-| Unit | ⏳ | 推送后由 CI 验证（本地 `npm test` 已 617/617） |
-| Smoke | ⏳ | 推送后由 CI 验证（本地 `--smoke` 已 SMOKE_OK） |
-| E2E | ⏳ | 推送后由 CI 验证（本地 `npm run e2e` 已 30/30） |
+| Unit | ⏳ 已触发 / 未独立验证 | push `7660954` 触发 `ci.yml`+`windows-test.yml`；本地 `npm test` 已 617/617 |
+| Smoke | ⏳ 已触发 / 未独立验证 | 本地 `npm run smoke` 已 `SMOKE_OK` |
+| E2E | ⏳ 已触发 / 未独立验证 | 本地 `npm run e2e` 已 30/30（`windows-test.yml` 的 e2e job `continue-on-error: true`） |
+
+> 本轮未在会话内独立核对 GitHub Actions 运行结果（仓库私有 + 未登录 gh/浏览器）。本地三项全绿，CI 已随 push 触发；如需核验可在 Actions 页面查看 `7660954` 的运行。
 
 ---
 

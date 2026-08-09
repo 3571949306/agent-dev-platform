@@ -1,0 +1,9 @@
+{
+  "name": "fake-coding-project",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Fake Coding Project fixture for Main Agent Runtime E2E (spec §34). 故意有 bug 的 add 函数。",
+  "scripts": {
+    "test": "node --test test/math.test.js"
+  }
+}

@@ -23,6 +23,8 @@ const extAgents = require('../services/externalAgents');
 const { DesktopAgentBridge } = require('../services/desktopBridge');
 const { pickVisionModel } = require('../services/visionReader');
 const { RunManager } = require('../agent/runManager');
+// v2.6.0 — Main Agent Runtime（自主编码闭环）。独立 IPC 模块，避免 handlers.js 膨胀。
+const mainAgentIpc = require('./mainAgent');
 
 const mcpManager = new McpManager();
 const browser = createBrowserTools();
@@ -329,6 +331,14 @@ function reg(channel, fn) {
 function register(window) {
   mainWindow = window;
   rebuildMcpToolMap();
+
+  // v2.6.0 — Main Agent Runtime IPC（自主编码闭环）
+  mainAgentIpc.register({
+    store, emit, runManager, getTool, buildProvider, resolveModelFor,
+    activeRuns, requestPermission,
+    getCurrentProject: () => currentProjectId ? store.projects.get(currentProjectId) : null,
+    getAgentFull, PermissionEngine
+  });
 
   // projects
   reg('projects:list', () => store.projects.list());

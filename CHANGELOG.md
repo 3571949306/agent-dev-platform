@@ -1,5 +1,105 @@
 # Changelog
 
+## v2.6.0 — 2026-08-09
+
+> Main Agent Autonomous Coding Loop —— 让主智能体真正独立完成编码任务。在 v2.5.1 基础上新增状态机驱动的 Main Agent Runtime，主智能体不再依赖外部智能体（Codex / WorkBuddy）即可走完「理解需求 → 读项目 → 分析代码 → 制定计划 → 修改文件 → 运行命令 → 测试 → 错误检测 → 修复 → 输出结果」的完整闭环。**不改变 v2.4.x/v2.5.x 的 API 连接、Provider 请求路径与 External Import 链路；旧库与旧连接完全兼容。**
+
+### 一、Main Agent Runtime 状态机（§6）
+
+* 新增 `src/agent/runtime/`：15 个模块 + 1 个 prompts 目录，完整覆盖编排 / 循环 / 状态 / 上下文 / 工具 / 评估 / 黑板 / 检查点。
+* 状态机：`IDLE → PLANNING → READING_CONTEXT → EXECUTING ↔ WAITING_TOOL → TESTING → EVALUATING →（REPAIRING 循环）→ COMPLETED`，外加 `WAITING_PERMISSION` / `FAILED` / `CANCELLED` / `TIMEOUT` 四个旁支终态。
+* `states.js` 定义迁移规则：非法迁移被拒绝，全部走 `setState()` 统一出口，保证事件流与 RunManager 状态一致。
+* `agentLoop.js` 主循环：每轮做「中止检查 → 限额检查 → 构建上下文 → 模型决策 → 解析校验 → 执行 Action → 观察结果 → 评估」，超限自动 `FAILED(AGENT_LOOP_LIMIT)`，不假装 completed。
+
+### 二、结构化 Action Schema（§7）
+
+* `actionSchema.js` 定义 17 种 Action 类型：`read_file` / `read_file_range` / `list_directory` / `search_files` / `search_text` / `apply_patch` / `create_file` / `write_file` / `delete_file` / `move_file` / `run_command` / `git_status` / `git_diff` / `git_log` / `git_add` / `git_commit` / `finish`（含 `delegate` / `ask_permission` / `complete` / `checkpoint`）。
+* 模型输出强制走 JSON Schema 校验 + 容错解析（提取 ```json 块 / 宽松字段名 / 缺字段兜底），无效 Action 累计 `invalidActions`，超 `maxInvalidActions` 即 FAILED。
+* `actionExecutor.js` 做 Action → 工具映射，区分 mutating / test / read 三类用于状态切换与 checkpoint 触发。
+
+### 三、Test → Repair Loop（§8-§9）
+
+* `completionPolicy.js` 评估完成条件：verification 命令全部通过 + requiredFiles 已改 + blackboard 无未解 problem。
+* 测试失败时 `resultEvaluator.js` 从 stdout/stderr 提取问题描述写入 blackboard，状态转 `REPAIRING`，`repairRounds++`，下一轮把失败信息喂回模型。
+* `retryPolicy.js` 五重限额：`maxIterations` / `maxToolCalls` / `maxRepairRounds` / `maxRuntimeMs` / `maxInvalidActions`，任一超限即 FAILED 并附 `errorCode`。
+* 完成策略未满足但已达修复上限 → `FAILED(AGENT_REPAIR_LIMIT)`，不得返回 completed。
+
+### 四、模糊 Patch 匹配（§10）
+
+* `src/tools/patch.js` 三段式匹配：严格行号匹配 → 全文件模糊搜索上下文块 → 精确错误信息。
+* 解决 LLM 生成行号不准的问题：模型给错行号时不再直接失败，而是按上下文文本在整文件中搜索最相似位置应用。
+* 失败时返回 `context_not_found` + 期望上下文片段，便于模型下一轮自我修正。
+
+### 五、终端环境隔离与进程树取消（§11）
+
+* `src/tools/terminal.js` 子进程环境剥离 `NODE_TEST_CONTEXT` / `NODE_TEST_TMPDIR`：修复平台自身在 `node --test` 下运行时，子进程 `node --test` 误入 IPC 通信模式、退出码 0 吞掉真实测试失败的 bug。
+* Windows 保持 `detached:false`（cmd.exe 无控制台会导致孙进程 stdout 为空，破坏 read-error-fix 循环），进程树取消统一走 `taskkill /t /f`。
+* `abortSignal` 防御：必须含 `addEventListener` 才挂监听，普通对象（旧调用方 / 单元测试）不致 spawn 崩溃；已 aborted 直接 kill + resolve。
+
+### 六、Checkpoint 与 Blackboard（§12-§13）
+
+* `checkpoint.js`：首次 mutating Action 前创建检查点，`trackFileChange` 记录每次文件修改；新增 `ctx._changedFiles` 内存追踪，无 store 时 `listChangedFiles` 也能返回真实改动。
+* `blackboard.js`：事实 / 问题 / 重要文件 / 任务进度四类记录；新增 `resolveProblemsMatching` 模糊匹配清除 problem（修复「测试通过后 `resolveProblem('')` 空串不匹配导致 problem 永不清除、阻断完成」的 bug）。
+* `contextBuilder.js`：系统提示 + 项目摘要 + plan + blackboard + 最近工具结果 → 模型上下文；`compact()` 压缩历史避免上下文膨胀。
+
+### 七、IPC 与 GUI（§14-§16）
+
+* 新增 `src/ipc/mainAgent.js`：`mainAgent:run` / `mainAgent:stop` / `mainAgent:changedFiles` / `mainAgent:testSetModel`（测试钩子，仅 `NODE_ENV=test`）。
+* `public/js/chat.js` `handleMainAgentEvent` 处理 17 种 `mainAgent:*` 事件，渲染 plan 卡片 / action 卡片 / 修复横幅 / 时间线，并独立启动 Run 跟踪 + Watchdog（mainAgent:run 可不经 chat send() 触发）。
+* `public/js/panels.js` 新增 Timeline 面板：底部 tab + 右侧栏实时显示每一步（analyze / read / edit / run / repair / complete / error），最多 200 条。
+* `public/css/style.css` 新增 `.ma-plan-card` / `.ma-action-card` / `.ma-repair-banner` / `.tl-row` 等样式。
+* `public/js/i18n.js` 新增 `mainAgentState` / `mainAgentEvent` / `mainAgentAction` 中文映射。
+
+### 八、测试
+
+* 单元测试：**617 / 617 PASS**（v2.5.1 的 516 + v2.6.0 新增 101）。
+  * 新增 `mainAgentLoop.test.js`（11）/ `mainAgentRuntime.test.js` / `actionExecutor.test.js` / `actionSchema.test.js` / `completionPolicy.test.js` / `contextBuilder.test.js` / `runtimeStates.test.js` / `taskPlanner.test.js`。
+  * 覆盖：成功路径 / Repair Loop / Required Verification Fail / cancel / maxIterations / invalid action / tool failure / 路径逃逸 / blackboard 更新 / RunManager terminal gate / checkpoint / requiredFiles。
+* GUI E2E：**30 / 30 PASS**（v2.5.1 的 26 + v2.6.0 新增 Case 27-30）。
+  * Case 27 编码成功 / Case 28 修复循环 / Case 29 停止 / Case 30 必需验证失败。
+  * 全部用 `FakeCodingModel` 注入脚本（4 种构建器），不依赖真实 LLM API；fixture 为故意有 bug 的 `add` 函数。
+* Smoke：`SMOKE_OK`。
+
+### 九、关键 Bug 修复
+
+| Bug | 根因 | 修复 |
+| --- | --- | --- |
+| 终端命令退出码 0 但测试失败 | `NODE_TEST_CONTEXT` 让子进程 `node --test` 进入 IPC 通信模式 | `terminal.js` 子进程剥离 `NODE_TEST_CONTEXT` / `NODE_TEST_TMPDIR` |
+| Patch 应用失败 | LLM 行号不准，严格匹配失败 | `patch.js` 三段式：严格 → 模糊搜索 → 精确错误 |
+| 测试通过后未清除失败问题 | `resolveProblem(blackboard, '')` 空串不匹配 | `blackboard.js` 新增 `resolveProblemsMatching` 模糊匹配 |
+| RunManager 终态被覆盖 | 大写 'COMPLETED' 被当未知终态拒绝 | `agentLoop.js` 统一小写终态名 |
+| 内存中文件变更丢失 | 无 store 时 `listChangedFiles` 返回空 | `checkpoint.js` 新增 `ctx._changedFiles` 内存追踪 |
+| cancel 测试不工作 | `node -e "setTimeout"` 在 cmd.exe 下引号被吃掉 | `fakeCodingModel.js` 改用平台原生阻塞命令（ping/sleep） |
+| abortSignal 防御不足 | 非真正 AbortSignal 调用 addEventListener 报错 | `terminal.js` 检查 `typeof addEventListener === 'function'` |
+
+### 十、安全与边界
+
+* 项目沙箱：所有文件操作走 `guard(ctx.projectRoot, ...)`，符号链接 / 连接点逃逸被 `realpathSafe` 拦截（继承 v2.5.1 `pathPolicy.js`）。
+* 终端危险命令黑名单：`rm -rf` / `del /s` / `format` / `git push --force` / `npm publish` / `sudo` 等触发 `terminal.dangerous` 权限门。
+* Main Agent 终态门：一个 runId 最多一个 terminal event，Late Result 不得覆盖 cancelled/timeout（RunManager 保证）。
+* Fake 模型钩子 `mainAgent:testSetModel` 仅 `NODE_ENV=test` 可用，生产构建中不可注入。
+
+### 十一、文档
+
+* 新增 [`docs/MAIN_AGENT_RUNTIME.md`](docs/MAIN_AGENT_RUNTIME.md)：架构概览 / 状态机 / 模块职责 / Action Schema / Test-Repair Loop / 安全边界 / 测试方法。
+* 更新 [`docs/TEST_REPORT.md`](docs/TEST_REPORT.md)：v2.6.0 真实结果（617 单测 + 30 E2E + Smoke + Build + CI）。
+* 更新 `README.md`：新增「Main Agent 自主编码闭环」简介 + 测试徽章更新为 `617+30` + 文档链接。
+
+### 十二、版本
+
+* `package.json` / `package-lock.json` 版本升级 `2.5.1 → 2.6.0`。
+
+### 十三、已知遗留
+
+| 项 | 说明 | 风险 |
+| --- | --- | --- |
+| 46 依赖漏洞 | 全部在 dev/build 依赖（electron / electron-builder / node-fetch），无生产影响 | 低（dependabot 跟踪） |
+| WorkBuddy 端到端验证 | 需单独会话验证 | 不影响 Main Agent 自主编码 |
+| 真实第三方 API 验证 | 本轮用 Fake 模型验证闭环，未接真实 LLM | 闭环逻辑已覆盖，仅适配层待验 |
+| NSIS UI 回归 | electron-builder 版本差异 | 仅安装界面外观 |
+
+---
+
 ## v2.5.1 — 2026-08-09
 
 > External Import 安全性与兼容性收尾。在 v2.5.0 八个 Importer / 五态冲突检测 / Batch Import 基础上，补齐值级凭据分类、路径安全加固、同端异钥冲突、SQLite 加固、Hostile Input 防御、依赖漏洞审计、Migration 回归与取消响应性。**不新增 Importer、不改变 Runtime 请求路径、不破坏 v2.4.1 老库。**

@@ -1,4 +1,4 @@
-// Bottom dock: Terminal / Diff / Problems / Tasks / Computer / Logs / Usage
+// Bottom dock: Terminal / Diff / Problems / Tasks / Timeline / Computer / Logs / Usage
 import { api } from './api.js';
 import { state } from './state.js';
 import { $, $$, esc, h, renderDiff, fmtTime, truncate, toast, prettyJson } from './util.js';
@@ -6,6 +6,9 @@ import { eventName, ZH } from './i18n.js';
 
 let activeConv = null;
 const problems = [];
+
+// v2.6.0 — 运行时间线（紧凑视图，bottom tab + 右侧栏）
+const timeline = []; // [{ runId, entry: {kind, icon, text, detail, t} }]
 
 export function setActiveConversation(id) { activeConv = id; }
 
@@ -24,6 +27,7 @@ export function init() {
   renderTasks();
   renderDiffPane();
   renderProblems();
+  renderTimeline();
   renderComputer();
   renderLogs();
 }
@@ -32,6 +36,7 @@ function onShow(tab) {
   if (tab === 'tasks') refreshTasks();
   if (tab === 'usage') refreshUsage();
   if (tab === 'diff') renderDiffPane();
+  if (tab === 'timeline') renderTimeline();
   if (tab === 'computer') renderComputer();
 }
 
@@ -186,6 +191,70 @@ export function renderRightTasks() {
   const list = state.tasks.slice(0, 8);
   if (!list.length) { box.innerHTML = `<div class="empty small">暂无任务</div>`; return; }
   box.innerHTML = list.map(t => `<div class="rt"><div class="rt-title">${esc(truncate(t.title || '', 40))}</div>${statusChip(t.status)}</div>`).join('');
+}
+
+/* ---------------- Timeline (v2.6.0 Main Agent) ---------------- */
+const TL_KIND_LABEL = {
+  analyze: '分析', read: '读取', plan: '规划', edit: '修改', run: '运行',
+  'test-fail': '测试失败', repair: '修复', 'test-pass': '测试通过',
+  complete: '完成', error: '错误', info: '信息'
+};
+const TL_KIND_CLASS = {
+  analyze: 'tl-info', read: 'tl-info', plan: 'tl-info', edit: 'tl-edit', run: 'tl-run',
+  'test-fail': 'tl-fail', repair: 'tl-repair', 'test-pass': 'tl-ok',
+  complete: 'tl-ok', error: 'tl-fail', info: 'tl-info'
+};
+
+export function addTimelineEntry(runId, entry) {
+  if (!entry) return;
+  timeline.unshift({ runId, entry });
+  if (timeline.length > 200) timeline.length = 200;
+  renderTimeline();
+  renderRightTimeline();
+  flashTab('timeline');
+}
+
+export function clearTimeline() {
+  timeline.length = 0;
+  renderTimeline();
+  renderRightTimeline();
+}
+
+function renderTimeline() {
+  const pane = $('#bottom-timeline');
+  if (!pane) return;
+  if (!timeline.length) {
+    pane.innerHTML = `<div class="empty">暂无时间线（运行主智能体时会实时显示每一步）</div>`;
+    return;
+  }
+  pane.innerHTML = `<div class="tl-list">${timeline.slice(0, 100).map(item => {
+    const e = item.entry || {};
+    const kind = e.kind || 'info';
+    const label = TL_KIND_LABEL[kind] || kind;
+    const cls = TL_KIND_CLASS[kind] || 'tl-info';
+    const t = e.t ? new Date(e.t).toLocaleTimeString('zh-CN', { hour12: false }) : '';
+    const detail = e.detail ? `<div class="tl-detail">${esc(truncate(e.detail, 200))}</div>` : '';
+    return `<div class="tl-row ${cls}">
+      <span class="tl-icon">${esc(e.icon || '•')}</span>
+      <span class="tl-time">${esc(t)}</span>
+      <span class="tl-label">${esc(label)}</span>
+      <span class="tl-text">${esc(truncate(e.text || '', 120))}</span>
+      ${detail}
+    </div>`;
+  }).join('')}</div>`;
+}
+
+function renderRightTimeline() {
+  const box = $('#timeline-list');
+  if (!box) return;
+  const list = timeline.slice(0, 10);
+  if (!list.length) { box.innerHTML = `<div class="empty small">暂无时间线</div>`; return; }
+  box.innerHTML = list.map(item => {
+    const e = item.entry || {};
+    const kind = e.kind || 'info';
+    const cls = TL_KIND_CLASS[kind] || 'tl-info';
+    return `<div class="rtl ${cls}"><span class="rtl-ico">${esc(e.icon || '•')}</span><span class="rtl-text">${esc(truncate(e.text || '', 36))}</span></div>`;
+  }).join('');
 }
 
 /* ---------------- Computer ---------------- */

@@ -49,11 +49,25 @@ Note: The v2.5.0 spec mentioned ~46 vulnerabilities. After `npm audit fix` (safe
 
 ## Production Exposure Analysis
 
-**All 13 remaining vulnerabilities are in dev/build dependencies, NOT in production runtime.**
+> **v2.6.0 §3.3 修正**：Electron 不能简单归为「devDependency → Production-impacting = 0」。
+> Electron 是桌面应用的实际 Runtime —— 最终用户执行的 `Agent Dev Platform.exe` 内嵌了
+> Electron 的运行时二进制。任何针对 Electron 运行时的 advisory 都需要按 advisory 单独评估，
+> 不能在未检查 advisory 前宣称「完全属于 build-only」。
 
-- `electron` — Development framework. The shipped app bundles Electron's runtime, but the vulnerability is in the dev toolkit, not the runtime binary that end-users execute.
+### Runtime exposure（需要 advisory-specific review）
+
+| Package | 为什么是 Runtime | 处置 |
+|---------|------------------|------|
+| `electron` | 桌面应用实际 Runtime，最终用户进程内嵌其二进制 | **runtime exposure requires advisory-specific review** —— 每个 advisory 需判断是否影响渲染进程 / 主进程 / Node 集成路径。本轮不强行升级（大版本升级留到后续独立版本）。 |
+
+### Build-only（不进入最终用户进程）
+
 - `electron-builder` / `app-builder-lib` / `dmg-builder` / `electron-builder-squirrel-windows` / `electron-publish` / `builder-util` / `builder-util-runtime` — Build tools used only during `npm run dist`. Never shipped to end users.
 - `electron-rebuild` / `node-gyp` / `make-fetch-happen` / `cacache` / `tar` — Native module compilation tools used only during development. Never shipped to end users.
+
+> 注意：`electron-builder` / `electron-rebuild` / `node-gyp` / `tar` / `builder-util` 虽然与 Electron
+> 相关，但它们只在构建期运行，不进入最终用户进程；与 `electron` 本身的 runtime 暴露不同，
+> 必须区分对待。
 
 **Production dependencies (better-sqlite3, express, etc.) have 0 known vulnerabilities.**
 

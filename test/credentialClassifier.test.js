@@ -220,3 +220,50 @@ test('空值 / null / undefined → unknown not allowed', () => {
   assert.strictEqual(classifyCredentialValue(null).allowed, false);
   assert.strictEqual(classifyCredentialValue(undefined).allowed, false);
 });
+
+// v2.6.0 §3.1 — Basic Authorization 不得自动作为 API Key
+test('v2.6.0 §3.1 Basic Auth (classifyCredentialValue) → basic_auth allowed=false', () => {
+  const r = classifyCredentialValue('Basic dXNlcjpwYXNz', { fieldName: 'authorization' });
+  assert.strictEqual(r.allowed, false);
+  assert.strictEqual(r.classification, 'basic_auth');
+  assert.ok(r.reasons.some(x => /Basic Authentication/i.test(x)), '应提示 Basic Auth 不可自动迁移');
+});
+
+test('v2.6.0 §3.1 Basic Auth (classifyAuthorizationHeader) → basic_auth allowed=false', () => {
+  const r = classifyAuthorizationHeader('Basic dXNlcjpwYXNz');
+  assert.strictEqual(r.allowed, false);
+  assert.strictEqual(r.classification, 'basic_auth');
+  assert.ok(r.reasons.some(x => /Basic Authentication/i.test(x)));
+});
+
+test('v2.6.0 §3.1 Basic Auth admin:123456 → basic_auth allowed=false', () => {
+  const r = classifyAuthorizationHeader('Basic YWRtaW46MTIzNDU2');
+  assert.strictEqual(r.allowed, false);
+  assert.strictEqual(r.classification, 'basic_auth');
+});
+
+test('v2.6.0 §3.1 Bearer sk-xxx 仍允许（不受 Basic 改动影响）', () => {
+  const r = classifyAuthorizationHeader('Bearer sk-test-abc123456');
+  assert.strictEqual(r.allowed, true);
+  assert.strictEqual(r.classification, 'api_key');
+});
+
+test('v2.6.0 §3.1 Token sk-xxx 仍允许（不受 Basic 改动影响）', () => {
+  const r = classifyAuthorizationHeader('Token sk-test-abc123456');
+  assert.strictEqual(r.allowed, true);
+  assert.strictEqual(r.classification, 'api_key');
+});
+
+test('v2.6.0 §3.1 Basic 前缀大小写不敏感', () => {
+  const r = classifyAuthorizationHeader('basic dXNlcjpwYXNz');
+  assert.strictEqual(r.allowed, false);
+  assert.strictEqual(r.classification, 'basic_auth');
+});
+
+test('v2.6.0 §3.1 basic_auth reasons 不含原始 base64 凭据', () => {
+  const raw = 'Basic dXNlcjpwYXNz';
+  const r = classifyAuthorizationHeader(raw);
+  const allText = JSON.stringify(r) + r.reasons.join(' ');
+  // 不应泄漏 base64 凭据值
+  assert.ok(!allText.includes('dXNlcjpwYXNz'));
+});

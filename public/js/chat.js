@@ -2,7 +2,7 @@
 import { api } from './api.js';
 import { state, findAgent } from './state.js';
 import { $, esc, h, md, toast, renderDiff, prettyJson, truncate, fmtTime, confirmBox } from './util.js';
-import { toolName, eventName, runStatus, isTerminal } from './i18n.js';
+import { toolName, eventName, runStatus, isTerminal, mainAgentStateName, mainAgentActionName } from './i18n.js';
 import { preflightCheck } from './preflight.js';
 import * as panels from './panels.js';
 import * as pages from './pages.js';
@@ -426,6 +426,124 @@ function errorCard(message) {
 }
 
 /* ------------------------------------------------------------------ */
+/* v2.6.0 Main Agent — 富 UI 卡片                                       */
+/* ------------------------------------------------------------------ */
+
+/** 计划卡片：展示目标 + 任务列表（taskUpdated 时实时更新） */
+function planCard(goal, tasks) {
+  const card = h('div', { class: 'ma-plan-card', dataset: { runGoal: String(goal || '').slice(0, 60) } });
+  renderPlanCardBody(card, goal, tasks || []);
+  return card;
+}
+function renderPlanCardBody(card, goal, tasks) {
+  const taskRows = tasks.map((t, i) => {
+    const status = t.status || 'pending';
+    const chip = status === 'completed' ? '<span class="chip ok">✓</span>'
+      : status === 'failed' ? '<span class="chip bad">✕</span>'
+      : status === 'running' ? '<span class="chip run">●</span>'
+      : '<span class="chip">○</span>';
+    return `<div class="mp-task" data-tid="${esc(t.taskId || '')}" data-idx="${i}">${chip}<span class="mp-title">${esc(truncate(t.title || '', 80))}</span></div>`;
+  }).join('');
+  card.innerHTML = `
+    <div class="mp-head"><span class="mp-ico">📋</span><b>计划</b><span class="mp-goal">${esc(truncate(goal || '', 100))}</span></div>
+    <div class="mp-tasks">${taskRows || '<div class="muted small">（无任务）</div>'}</div>`;
+}
+function updatePlanCardTask(card, taskId, status, title) {
+  if (!card) return;
+  const tasks = state.mainAgent.planTasks;
+  let t = tasks.find(x => x.taskId === taskId);
+  if (!t) { t = { taskId, title: title || '', status }; tasks.push(t); }
+  else { t.status = status || t.status; if (title) t.title = title; }
+  renderPlanCardBody(card, card.dataset.runGoal || '', tasks);
+}
+
+/** Action 卡片：展示模型动作（thought + type + args），toolResult 填充结果 */
+function mainActionCard(action) {
+  const a = action || {};
+  const type = a.type || 'unknown';
+  const displayName = mainAgentActionName(type);
+  const card = h('div', { class: 'ma-action-card running', dataset: { type } });
+  const thought = a.thought ? `<div class="ma-thought">${esc(truncate(a.thought, 400))}</div>` : '';
+  const argsSummary = mainActionArgsSummary(a);
+  card.innerHTML = `
+    <div class="ma-ac-head">
+      <span class="ma-ac-type">${esc(displayName)}</span>
+      <span class="ma-ac-args">${esc(truncate(argsSummary, 100))}</span>
+      <span class="ma-ac-status">运行中…</span>
+      <button class="ma-ac-toggle" title="展开/折叠">▾</button>
+    </div>
+    ${thought}
+    <div class="ma-ac-body hidden"><pre class="ma-ac-in">${esc(prettyJson(a.args || {}))}</pre><div class="ma-ac-out"></div></div>`;
+  card.querySelector('.ma-ac-toggle').onclick = () => card.querySelector('.ma-ac-body').classList.toggle('hidden');
+  card.querySelector('.ma-ac-head').onclick = (e) => {
+    if (e.target.classList.contains('ma-ac-toggle')) return;
+    card.querySelector('.ma-ac-body').classList.toggle('hidden');
+  };
+  return card;
+}
+function mainActionArgsSummary(a) {
+  const args = a.args || {};
+  if (a.type === 'run_command' && args.command) return args.command;
+  if ((a.type === 'read_file' || a.type === 'read_file_range') && args.path) return args.path;
+  if ((a.type === 'create_file' || a.type === 'write_file') && args.path) return args.path;
+  if (a.type === 'apply_patch' && args.path) return args.path;
+  if (a.type === 'delete_file' && args.path) return args.path;
+  if (a.type === 'move_file' && (args.from || args.source)) return args.from || args.source;
+  if ((a.type === 'list_directory' || a.type === 'search_files') && args.path) return args.path;
+  if (a.type === 'search_text' && (args.pattern || args.query)) return args.pattern || args.query;
+  if (a.type === 'git_commit' && args.message) return truncate(args.message, 60);
+  if (a.type === 'finish' && args.summary) return truncate(args.summary, 80);
+  if (a.type === 'delegate' && args.task) return truncate(args.task, 80);
+  const k = Object.keys(args)[0];
+  return k ? `${k}=${truncate(String(args[k]), 50)}` : '';
+}
+function fillMainActionCard(card, result) {
+  if (!card) return;
+  card.classList.remove('running');
+  const out = card.querySelector('.ma-ac-out');
+  const status = card.querySelector('.ma-ac-status');
+  let obj = null;
+  try { obj = typeof result === 'string' ? JSON.parse(result) : result; } catch { obj = null; }
+  const ok = !(obj && obj.ok === false);
+  card.classList.add(ok ? 'done' : 'failed');
+  status.textContent = ok ? '完成' : '失败';
+  if (!ok && obj && obj.error) {
+    const e = obj.error;
+    status.textContent = '失败：' + (e.code || '');
+    out.innerHTML = `<div class="ma-ac-err">${esc(e.message || JSON.stringify(obj))}</div>`;
+    card.querySelector('.ma-ac-body').classList.remove('hidden');
+  } else {
+    const text = obj ? prettyJson(obj) : String(result || '');
+    out.innerHTML = `<pre class="ma-ac-res">${esc(truncate(text, 4000))}</pre>`;
+  }
+}
+
+/** 测试结果行（嵌入到 action card 的 out 区） */
+function fillMainActionTestResult(card, ev) {
+  if (!card) return;
+  card.classList.remove('running');
+  const out = card.querySelector('.ma-ac-out');
+  const status = card.querySelector('.ma-ac-status');
+  const passed = !!ev.passed;
+  card.classList.add(passed ? 'done' : 'failed');
+  status.textContent = passed ? '测试通过' : (ev.required ? '必需验证失败' : '测试失败');
+  const errs = ev.errors ? `<pre class="ma-ac-err">${esc(truncate(ev.errors, 3000))}</pre>` : '';
+  const sum = ev.summary ? `<pre class="ma-ac-res">${esc(truncate(ev.summary, 2000))}</pre>` : '';
+  out.innerHTML = `<div class="ma-test ${passed ? 'ok' : 'fail'}">
+    <div class="ma-test-head"><b>${passed ? '✓ 通过' : '✕ 失败'}</b> ${ev.required ? '<span class="chip bad">必需</span>' : ''}</div>
+    <code class="ma-test-cmd">${esc(truncate(ev.command || '', 120))}</code>
+    ${sum}${errs}
+  </div>`;
+  if (!passed) card.querySelector('.ma-ac-body').classList.remove('hidden');
+}
+
+/** 修复横幅 */
+function repairBanner(round, reason) {
+  return h('div', { class: 'ma-repair-banner' },
+    `<span class="mr-ico">↻</span><span class="mr-text">第 <b>${esc(String(round))}</b> 轮自动修复</span>${reason ? `<span class="mr-reason">${esc(truncate(reason, 200))}</span>` : ''}`);
+}
+
+/* ------------------------------------------------------------------ */
 /* live event stream                                                   */
 /* ------------------------------------------------------------------ */
 
@@ -435,6 +553,14 @@ export function handleEvent(ev) {
 
   // 更新活动时间
   if (mine && ev.conversationId) touchActivity(ev.conversationId);
+
+  // v2.6.0 Main Agent 事件（mainAgent:* 命名空间）
+  // 终态事件（runCompleted/Failed/Cancelled/Timeout）由 RunManager 的 run_* 标准事件统一处理，
+  // 这里只处理富 UI 事件（计划/动作/测试/修复/时间线/状态）。
+  if (typeof ev.type === 'string' && ev.type.startsWith('mainAgent:')) {
+    handleMainAgentEvent(ev, mine);
+    return;
+  }
 
   // Run 状态事件 — 只有正式 Run Terminal 事件有权停 Spinner。
   // assistant_message / task_complete / tool_result 一律无权完成 Run（P0-3）。
@@ -586,6 +712,180 @@ export function handleEvent(ev) {
     default:
       break;
   }
+}
+
+/* ------------------------------------------------------------------ */
+/* v2.6.0 Main Agent 事件分发                                           */
+/* ------------------------------------------------------------------ */
+
+function handleMainAgentEvent(ev, mine) {
+  // 时间线事件无论是否属于当前对话都推入时间线面板（便于跨对话查看）
+  if (ev.type === 'mainAgent:timeline') {
+    panels.addTimelineEntry(ev.runId, ev.entry);
+    return;
+  }
+  if (!mine) return;
+  touchActivity(ev.conversationId);
+
+  switch (ev.type) {
+    case 'mainAgent:runStarted': {
+      // 新 Run 开始：清空旧的 plan/action 跟踪 + 时间线
+      state.mainAgent.runId = ev.runId || null;
+      state.mainAgent.pendingActionEl = null;
+      state.mainAgent.planEl = null;
+      state.mainAgent.planTasks = [];
+      panels.clearTimeline();
+      // 绑定 Spinner 到此 Run（mainAgent:run 可能不经 chat send() 触发，
+      // 所以这里独立启动 Run 跟踪 + Watchdog，终态由 RunManager 的 run_* 事件收尾）
+      if (ev.conversationId) {
+        startRun(ev.conversationId, ev.runId);
+        startWatchdog(ev.conversationId);
+      }
+      statusLine('运行中…');
+      break;
+    }
+
+    case 'mainAgent:stateChanged': {
+      // 状态迁移 → 更新状态栏
+      const label = mainAgentStateName(ev.state);
+      statusLine(label ? `主智能体：${label}` : '运行中…');
+      break;
+    }
+
+    case 'mainAgent:planCreated': {
+      // 计划卡片
+      const plan = ev.plan || {};
+      state.mainAgent.planTasks = (plan.tasks || []).map(t => ({ taskId: t.taskId || t.id || '', title: t.title || '', status: t.status || 'pending' }));
+      const card = planCard(plan.goal || state.mainAgent.runId || '任务', state.mainAgent.planTasks);
+      state.mainAgent.planEl = card;
+      appendBeforeStatus(card);
+      break;
+    }
+
+    case 'mainAgent:taskUpdated': {
+      // 更新计划卡片中的任务状态
+      if (state.mainAgent.planEl) {
+        updatePlanCardTask(state.mainAgent.planEl, ev.taskId, ev.status, ev.title);
+      }
+      // 同步到 Tasks 面板（复用现有基础设施）
+      if (ev.taskId) {
+        if (ev.status === 'completed' || ev.status === 'failed' || ev.status === 'cancelled') {
+          panels.updateTask(ev.taskId, ev.status);
+        } else {
+          panels.addTask({ id: ev.taskId, title: ev.title || '', status: ev.status || 'running' });
+        }
+      }
+      break;
+    }
+
+    case 'mainAgent:action': {
+      // 新动作卡片（finish/delegate 不创建卡片，单独处理）
+      const action = ev.action || {};
+      if (action.type === 'finish') {
+        // finish 动作：显示为智能体总结气泡
+        if (action.args && action.args.summary) {
+          const sl = $('#status-line');
+          const b = assistantBubble(action.args.summary);
+          if (sl) msgsEl().insertBefore(b, sl); else msgsEl().appendChild(b);
+        }
+        state.mainAgent.pendingActionEl = null;
+        break;
+      }
+      const card = mainActionCard(action);
+      state.mainAgent.pendingActionEl = card;
+      appendBeforeStatus(card);
+      break;
+    }
+
+    case 'mainAgent:toolResult': {
+      // 填充当前 action 卡片
+      if (state.mainAgent.pendingActionEl) {
+        fillMainActionCard(state.mainAgent.pendingActionEl, { ok: ev.ok, summary: ev.summary, tool: ev.tool });
+        state.mainAgent.pendingActionEl = null;
+      }
+      break;
+    }
+
+    case 'mainAgent:testResult': {
+      // 测试结果 → 填充当前 action 卡片 + Problems
+      if (state.mainAgent.pendingActionEl) {
+        fillMainActionTestResult(state.mainAgent.pendingActionEl, ev);
+        state.mainAgent.pendingActionEl = null;
+      }
+      if (!ev.passed) {
+        panels.addProblem(`测试失败：${ev.command || ''}${ev.required ? '（必需验证）' : ''}`);
+      }
+      break;
+    }
+
+    case 'mainAgent:repairStart': {
+      // 修复横幅
+      appendBeforeStatus(repairBanner(ev.round || 1, ev.reason));
+      break;
+    }
+
+    case 'mainAgent:fileChanged': {
+      // 文件改动 → Diff 面板
+      panels.addDiff({ path: ev.path, diff: ev.diff });
+      break;
+    }
+
+    case 'mainAgent:checkpoint': {
+      // 检查点：仅在时间线显示（已由 timeline 事件处理）
+      break;
+    }
+
+    case 'mainAgent:permission': {
+      // 权限请求 → 复用权限弹窗
+      askPermission({ ...ev, scope: ev.scope, tool: ev.tool, args: ev.args, reqId: ev.reqId, agent: ev.agent });
+      break;
+    }
+
+    case 'mainAgent:assistantText': {
+      // 智能体文本（最终总结/思考） → 渲染为气泡
+      if (ev.text) {
+        const sl = $('#status-line');
+        const b = assistantBubble(ev.text);
+        if (sl) msgsEl().insertBefore(b, sl); else msgsEl().appendChild(b);
+        scrollBottom();
+      }
+      break;
+    }
+
+    // runCompleted/Failed/Cancelled/Timeout：RunManager 的 run_* 标准事件已处理终态，
+    // 这里只补充 Main Agent 专属的富展示
+    case 'mainAgent:runCompleted': {
+      if (ev.summary) {
+        const sl = $('#status-line');
+        const b = assistantBubble(ev.summary);
+        if (sl) msgsEl().insertBefore(b, sl); else msgsEl().appendChild(b);
+        scrollBottom();
+      }
+      break;
+    }
+
+    case 'mainAgent:runFailed': {
+      if (ev.error && !ev.errorCode) {
+        // 已有 error 事件处理，这里不重复
+      }
+      break;
+    }
+
+    case 'mainAgent:runCancelled':
+    case 'mainAgent:runTimeout':
+      // 终态由 run_* 标准事件处理
+      break;
+
+    default:
+      break;
+  }
+}
+
+/** 在 status-line 之前插入元素（保持 spinner 在最底） */
+function appendBeforeStatus(el) {
+  const sl = $('#status-line');
+  if (sl) msgsEl().insertBefore(el, sl); else msgsEl().appendChild(el);
+  scrollBottom();
 }
 
 function appendNote(text) {

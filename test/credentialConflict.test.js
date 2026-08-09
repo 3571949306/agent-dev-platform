@@ -69,6 +69,30 @@ test('§16 constantTimeCompare：非字符串 → false', () => {
   assert.strictEqual(constantTimeCompare(123, 123), false);
 });
 
+// v2.6.0 §3.2 — crypto.timingSafeEqual 实现的额外覆盖
+test('v2.6.0 §3.2 timingSafeEqual：unicode 不 crash', () => {
+  assert.strictEqual(constantTimeCompare('密钥-测试', '密钥-测试'), true);
+  assert.strictEqual(constantTimeCompare('密钥-测试', '密钥-测式'), false);
+});
+
+test('v2.6.0 §3.2 timingSafeEqual：空字符串正确处理', () => {
+  assert.strictEqual(constantTimeCompare('', ''), true);
+  assert.strictEqual(constantTimeCompare('', 'a'), false);
+  assert.strictEqual(constantTimeCompare('a', ''), false);
+});
+
+test('v2.6.0 §3.2 timingSafeEqual：相同长度不同内容 → false', () => {
+  assert.strictEqual(constantTimeCompare('sk-test-key-123', 'sk-test-key-124'), false);
+  assert.strictEqual(constantTimeCompare('aaaaaaaaaa', 'bbbbbbbbbb'), false);
+});
+
+test('v2.6.0 §3.2 timingSafeEqual：不抛异常（不同长度安全处理）', () => {
+  // 直接验证不同长度不会像裸 timingSafeEqual 那样抛 RangeError
+  assert.doesNotThrow(() => constantTimeCompare('short', 'much-longer-string'));
+  assert.doesNotThrow(() => constantTimeCompare('x', 'yy'));
+  assert.strictEqual(constantTimeCompare('sk-key', 'sk-key-longer'), false);
+});
+
 test('§14 同端同钥 → DUPLICATE (sameKey=true, requiresConfirmation=false)', () => {
   const candidate = {
     name: 'Test Import',

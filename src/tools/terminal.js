@@ -45,6 +45,14 @@ async function runCommand(ctx, command, cwd, timeoutMs, usePowershell, runId, ab
     let stdout = '', stderr = '';
     const shellBin = usePowershell ? 'powershell.exe' : 'cmd.exe';
     const shellArgs = usePowershell ? ['-NoProfile', '-Command', command] : ['/c', command];
+    // 子进程环境：剥离 node:test 的内部通信变量。
+    // 当平台自身在 `node --test` 下运行（单元测试 / CI），process.env 会带上
+    // NODE_TEST_CONTEXT=child-v8；若不剥离，子进程里的 `node --test`（如 npm test
+    // 跑的 node --test test/...）会误以为自己是被父测试运行器托管的子测试，
+    // 改走 IPC 通信模式并退出 0，从而吞掉真实的测试失败退出码。
+    const childEnv = { ...process.env };
+    delete childEnv.NODE_TEST_CONTEXT;
+    delete childEnv.NODE_TEST_TMPDIR;
     let child;
     try {
       // NOTE: `detached` must stay FALSE on Windows.
@@ -55,6 +63,7 @@ async function runCommand(ctx, command, cwd, timeoutMs, usePowershell, runId, ab
       // detaching buys us nothing here. On POSIX we keep it for `kill(-pid)`.
       child = spawn(shellBin, shellArgs, {
         cwd,
+        env: childEnv,
         detached: process.platform !== 'win32',
         windowsHide: true
       });
@@ -80,15 +89,26 @@ async function runCommand(ctx, command, cwd, timeoutMs, usePowershell, runId, ab
     }
     const onAbort = () => {
       if (child && !child.killed) { killTree(child.pid); child.killed = true; }
-      terminalManager.runs.get(runId).status = 'aborted';
+      const rec = terminalManager.runs.get(runId);
+      if (rec) rec.status = 'aborted';
       resolve(fail('TERMINAL_ABORTED', '命令已被中止', false));
     };
-    if (abortSignal) abortSignal.addEventListener('abort', onAbort, { once: true });
+    // 防御：abortSignal 必须是真正的 AbortSignal（含 addEventListener）才挂监听。
+    // 部分调用方（单元测试 / 旧路径）可能传入 { aborted:false } 这种普通对象，
+    // 此时无法监听中止，但不应该让 spawn 崩溃。
+    if (abortSignal && typeof abortSignal.addEventListener === 'function') {
+      if (abortSignal.aborted) { // 已中止：直接 kill + resolve
+        if (child && !child.killed) { killTree(child.pid); child.killed = true; }
+        resolve(fail('TERMINAL_ABORTED', '命令已被中止', false));
+        return;
+      }
+      abortSignal.addEventListener('abort', onAbort, { once: true });
+    }
 
     child.on('error', (err) => { if (timer) clearTimeout(timer); resolve(fail('SPAWN_FAILED', err.message)); });
     child.on('close', (code) => {
       if (timer) clearTimeout(timer);
-      if (abortSignal) abortSignal.removeEventListener('abort', onAbort);
+      if (abortSignal && typeof abortSignal.removeEventListener === 'function') abortSignal.removeEventListener('abort', onAbort);
       const rec = terminalManager.runs.get(runId);
       if (rec) { rec.status = 'exited'; rec.exitCode = code; }
       if (ctx.emit) ctx.emit('terminal_exit', { runId, exitCode: code });

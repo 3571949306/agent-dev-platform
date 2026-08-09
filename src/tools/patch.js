@@ -72,30 +72,81 @@ function applyToLines(lines, patchText) {
   const hunks = parseHunks(patchText);
   if (!hunks.length) throw new Error('未找到有效 hunk（@@ ... @@）');
   const result = [];
-  let li = 0; // 0-based index into lines
+  let li = 0; // 0-based index into lines（已消费到此处）
   for (const hunk of hunks) {
-    // advance to hunk.oldStart (1-based)
-    while (li < hunk.oldStart - 1) { result.push(lines[li]); li++; }
-    for (const op of hunk.ops) {
-      if (op.type === ' ') {
-        if (li >= lines.length) throw new Error(`上下文不匹配：第 ${hunk.oldStart} 行之后已无内容（可能文件已变化）`);
-        if (lines[li] !== op.text) {
-          throw new Error(`上下文不匹配（行 ${li + 1}）：期望「${op.text.slice(0, 40)}」实际「${lines[li].slice(0, 40)}」`);
-        }
-        result.push(lines[li]); li++;
-      } else if (op.type === '-') {
-        if (li >= lines.length) throw new Error(`删除失败：第 ${li + 1} 行不存在`);
-        if (lines[li] !== op.text) {
-          throw new Error(`删除内容不匹配（行 ${li + 1}）：期望「${op.text.slice(0, 40)}」实际「${lines[li].slice(0, 40)}」`);
-        }
-        li++;
-      } else if (op.type === '+') {
-        result.push(op.text);
-      }
-    }
+    const match = applyHunk(lines, hunk, li);
+    // match.consumedBefore：hunk 之前应原样保留的行数（可能 != oldStart-1，fuzz 时）
+    while (li < match.startIdx) { result.push(lines[li]); li++; }
+    for (const out of match.applied) result.push(out);
+    li = match.startIdx + match.consumed; // 跳过被 hunk 消费的旧行
   }
   while (li < lines.length) { result.push(lines[li]); li++; }
   return result;
+}
+
+/**
+ * 在 lines 中应用一个 hunk。
+ * 1. 先按 hunk 声明的 oldStart 严格匹配；
+ * 2. 若失败，做模糊搜索：在剩余文件中找到第一处 context+deletion 全部匹配的位置。
+ *    （LLM 经常把行号写错，coding agent 必须容忍。）
+ * 3. 模糊也失败时，抛出按声明位置生成的精确错误（保留行号便于 Agent 重读重试）。
+ *
+ * @returns {{ startIdx, applied: string[], consumed: number }}
+ *   startIdx  — 实际匹配到的 0-based 起始行
+ *   applied   — 该 hunk 产生的新行（含 context 与 + 行）
+ *   consumed  — 该 hunk 消费的旧行数（context + - 行数）
+ */
+function applyHunk(lines, hunk, fromIdx) {
+  const declaredStart = Math.max(0, (hunk.oldStart || 1) - 1);
+  // 1. 严格按声明位置尝试
+  const strict = tryHunkAt(lines, hunk, declaredStart);
+  if (strict) return strict;
+  // 2. 模糊搜索：从 fromIdx 起扫描整个文件，找第一处能完整匹配的位置
+  for (let i = fromIdx; i <= lines.length; i++) {
+    const m = tryHunkAt(lines, hunk, i);
+    if (m) return m;
+  }
+  // 3. 全部失败：按声明位置生成精确错误（与原 strict 实现一致的消息）
+  throw strictApplyError(lines, hunk, declaredStart);
+}
+
+/** 按声明位置逐 op 校验，返回精确的「不匹配」错误（用于 fuzzy 也失败时抛出）。 */
+function strictApplyError(lines, hunk, startIdx) {
+  let li = startIdx;
+  for (const op of hunk.ops) {
+    if (op.type === ' ') {
+      if (li >= lines.length) return new Error(`上下文不匹配：第 ${startIdx + 1} 行之后已无内容（可能文件已变化）`);
+      if (lines[li] !== op.text) return new Error(`上下文不匹配（行 ${li + 1}）：期望「${op.text.slice(0, 40)}」实际「${lines[li].slice(0, 40)}」`);
+      li++;
+    } else if (op.type === '-') {
+      if (li >= lines.length) return new Error(`删除失败：第 ${li + 1} 行不存在`);
+      if (lines[li] !== op.text) return new Error(`删除内容不匹配（行 ${li + 1}）：期望「${op.text.slice(0, 40)}」实际「${lines[li].slice(0, 40)}」`);
+      li++;
+    }
+  }
+  return new Error('上下文不匹配（已尝试模糊匹配仍未找到）');
+}
+
+/** 尝试在 lines[startIdx] 处应用 hunk；成功返回 {startIdx,applied,consumed}，失败返回 null。 */
+function tryHunkAt(lines, hunk, startIdx) {
+  if (startIdx < 0) return null;
+  const applied = [];
+  let li = startIdx;
+  let consumed = 0;
+  for (const op of hunk.ops) {
+    if (op.type === ' ') {
+      if (li >= lines.length) return null;
+      if (lines[li] !== op.text) return null;
+      applied.push(lines[li]); li++; consumed++;
+    } else if (op.type === '-') {
+      if (li >= lines.length) return null;
+      if (lines[li] !== op.text) return null;
+      li++; consumed++;
+    } else if (op.type === '+') {
+      applied.push(op.text);
+    }
+  }
+  return { startIdx, applied, consumed };
 }
 
 const tools = [
@@ -125,4 +176,4 @@ const tools = [
   }
 ];
 
-module.exports = { tools, diff, applyToLines, parseHunks };
+module.exports = { tools, diff, applyToLines, parseHunks, applyHunk, tryHunkAt };

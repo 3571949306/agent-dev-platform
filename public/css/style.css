@@ -305,3 +305,63 @@ pre.preview { max-height: 60vh; overflow: auto; }
   #right { display: none; }
   .grid2 { grid-template-columns: 1fr; }
 }
+
+/* ---------- v2.6.0 Main Agent — 计划/动作/修复卡片 ---------- */
+.ma-plan-card { border: 1px solid rgba(47,129,247,.4); border-radius: 8px; background: rgba(47,129,247,.06); margin: 6px 0 6px 36px; overflow: hidden; }
+.mp-head { display: flex; align-items: center; gap: 8px; padding: 8px 12px; font-size: 12px; }
+.mp-ico { font-size: 14px; }
+.mp-goal { color: var(--text-dim); font-size: 11px; margin-left: auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 280px; }
+.mp-tasks { padding: 4px 12px 10px; display: flex; flex-direction: column; gap: 4px; }
+.mp-task { display: flex; align-items: center; gap: 8px; font-size: 12px; padding: 3px 0; }
+.mp-task .chip { flex: none; min-width: 18px; text-align: center; padding: 1px 4px; }
+.mp-title { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.ma-action-card { border: 1px solid var(--border); border-radius: 8px; background: var(--bg2); overflow: hidden; margin: 4px 0 4px 36px; }
+.ma-action-card.running { border-left: 3px solid var(--yellow); }
+.ma-action-card.done { border-left: 3px solid var(--green); }
+.ma-action-card.failed { border-left: 3px solid var(--red); }
+.ma-ac-head { display: flex; align-items: center; gap: 8px; padding: 6px 10px; cursor: pointer; font-size: 12px; }
+.ma-ac-head:hover { background: var(--bg3); }
+.ma-ac-type { font-family: var(--mono); color: #79c0ff; font-size: 11px; flex: none; }
+.ma-ac-args { color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; font-family: var(--mono); font-size: 11px; }
+.ma-ac-status { font-size: 11px; color: var(--text-dim); flex: none; }
+.ma-action-card.running .ma-ac-status { color: var(--yellow); }
+.ma-action-card.done .ma-ac-status { color: var(--green); }
+.ma-action-card.failed .ma-ac-status { color: var(--red); }
+.ma-ac-toggle { background: none; border: none; color: var(--text-dim); cursor: pointer; }
+.ma-thought { padding: 4px 12px 6px; font-size: 12px; color: var(--text-dim); line-height: 1.5; border-bottom: 1px solid var(--border); }
+.ma-ac-body { border-top: 1px solid var(--border); padding: 8px 10px; background: #0a0d12; }
+.ma-ac-body pre { margin: 0 0 6px; font-family: var(--mono); font-size: 11px; white-space: pre-wrap; word-break: break-all; max-height: 260px; overflow: auto; color: var(--text-dim); }
+.ma-ac-res { color: var(--text-dim); }
+.ma-ac-err { color: #ffb4ae; font-size: 12px; }
+.ma-test { font-size: 12px; }
+.ma-test.ok { color: var(--green); }
+.ma-test.fail { color: var(--red); }
+.ma-test-head { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; }
+.ma-test-cmd { display: block; font-family: var(--mono); font-size: 11px; color: var(--text-dim); background: var(--bg3); padding: 4px 6px; border-radius: 4px; margin: 4px 0; word-break: break-all; }
+
+.ma-repair-banner { display: flex; align-items: center; gap: 8px; padding: 6px 12px; margin: 6px 0 6px 36px; border: 1px solid rgba(210,153,34,.4); background: rgba(210,153,34,.08); border-radius: 8px; font-size: 12px; color: var(--yellow); }
+.ma-repair-banner .mr-ico { font-size: 14px; }
+.ma-repair-banner .mr-reason { color: var(--text-dim); margin-left: 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ---------- v2.6.0 Timeline（底部 tab + 右侧栏） ---------- */
+.tl-list { display: flex; flex-direction: column; gap: 2px; max-height: 40vh; overflow: auto; }
+.tl-row { display: flex; align-items: center; gap: 8px; padding: 4px 8px; font-size: 12px; border-radius: 4px; border-left: 3px solid var(--border); }
+.tl-row.tl-ok { border-left-color: var(--green); }
+.tl-row.tl-fail { border-left-color: var(--red); }
+.tl-row.tl-repair { border-left-color: var(--yellow); }
+.tl-row.tl-run { border-left-color: var(--accent); }
+.tl-row.tl-edit { border-left-color: var(--accent2); }
+.tl-row.tl-info { border-left-color: var(--text-dim); }
+.tl-icon { flex: none; width: 16px; text-align: center; }
+.tl-time { flex: none; font-family: var(--mono); font-size: 10px; color: var(--text-dim); }
+.tl-label { flex: none; font-size: 11px; color: var(--text-dim); min-width: 56px; }
+.tl-text { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tl-detail { font-size: 11px; color: var(--text-dim); padding-left: 32px; white-space: pre-wrap; word-break: break-all; }
+
+.rtl { display: flex; align-items: center; gap: 6px; padding: 3px 0; font-size: 11px; border-radius: 3px; }
+.rtl-ico { flex: none; width: 14px; text-align: center; }
+.rtl-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-dim); }
+.rtl.tl-ok .rtl-ico { color: var(--green); }
+.rtl.tl-fail .rtl-ico { color: var(--red); }
+.rtl.tl-repair .rtl-ico { color: var(--yellow); }

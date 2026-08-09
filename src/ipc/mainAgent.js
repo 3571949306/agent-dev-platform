@@ -1,0 +1,120 @@
+'use strict';
+/**
+ * v2.6.0 — Main Agent IPC handlers（spec §4/§27/§36）。
+ *
+ * 把 Main Agent Runtime 的复杂逻辑从 ipc/handlers.js 抽离。
+ *
+ * IPC 通道：
+ *   mainAgent:run         — 启动 Main Agent 编码 Run（立即返回 runId，后台执行）
+ *   mainAgent:stop        — 停止 Main Agent Run（复用 activeRuns abort + RunManager terminal gate）
+ *   mainAgent:changedFiles— 返回本次 Run 修改的文件列表（Diff Viewer）
+ *   mainAgent:fileDiff    — 返回某文件 before/after/diff（Diff Viewer）
+ *   mainAgent:testSetModel— 测试钩子：注入 FakeCodingModel（仅测试激活）
+ *   mainAgent:listRuns    — 列出 Main Agent Run 历史（Crash Recovery §29）
+ */
+
+const { ipcMain } = require('electron');
+const { runMainAgent, EVENTS } = require('../agent/runtime/mainAgentRuntime');
+const { createProviderModelAdapter } = require('../agent/runtime/providerModelAdapter');
+const { createFakeCodingModel } = require('../agent/runtime/fakeCodingModel');
+const { changedFilesSummary, listChangedFiles } = require('../agent/runtime/checkpoint');
+const states = require('../agent/runtime/states');
+
+// 测试钩子：注入的 FakeCodingModel（仅测试中设置）
+let injectedModel = null;
+
+function reg(channel, fn) {
+  ipcMain.handle(channel, async (_e, ...args) => {
+    try { return { ok: true, data: await fn(...args) }; }
+    catch (err) { return { ok: false, error: err.message }; }
+  });
+}
+
+/**
+ * @param {object} deps {
+ *   store, emit, runManager, getTool, buildProvider, resolveModelFor,
+ *   activeRuns: Map,  // conversationId -> AbortController
+ *   requestPermission, getCurrentProject, getAgentFull, PermissionEngine
+ * }
+ */
+function register(deps) {
+  const { store, emit, runManager, getTool, buildProvider, resolveModelFor, activeRuns, requestPermission, getCurrentProject, getAgentFull, PermissionEngine } = deps;
+
+  reg('mainAgent:run', async ({ conversationId, agentId, goal, verification, requiredFiles, initialPlan, timeoutMs, useInjectedModel } = {}) => {
+    if (!goal) throw new Error('goal 必填（用户目标）');
+    const agent = getAgentFull ? getAgentFull(agentId) : null;
+    const project = getCurrentProject ? getCurrentProject() : null;
+    const projectRoot = project ? project.root_path : null;
+    const projectId = project ? project.id : null;
+    if (!projectRoot) throw new Error('未打开项目，Main Agent 无法执行本地编码');
+
+    // 选择 model：测试注入优先，否则用 ProviderModelAdapter
+    let model;
+    if (useInjectedModel && injectedModel) {
+      model = injectedModel;
+    } else if (agent) {
+      model = createProviderModelAdapter({ buildProvider, agent, resolveModel: resolveModelFor, timeoutMs: 120000 });
+    } else {
+      throw new Error('无可用模型（未注入测试模型且无 agent）');
+    }
+
+    const pe = PermissionEngine ? new PermissionEngine({ store, projectId }) : null;
+
+    const result = runMainAgent({
+      conversationId, agentId, agentName: agent ? agent.name : 'Main Agent',
+      goal, projectRoot, projectId, projectName: project ? project.name : null,
+      model, getTool, store, emit, runManager, requestPermission,
+      permissionEngine: pe,
+      verification, requiredFiles, initialPlan,
+      timeoutMs,
+      registerAbort: (convId, ac) => activeRuns.set(convId || goal, ac),
+      unregisterAbort: (convId) => activeRuns.delete(convId || goal)
+    });
+    return result; // { runId, conversationId }
+  });
+
+  reg('mainAgent:stop', ({ conversationId, runId } = {}) => {
+    const key = conversationId || runId;
+    const ac = activeRuns.get(key);
+    if (ac) ac.abort();
+    activeRuns.delete(key);
+    if (conversationId) {
+      try { runManager.cancelByConversation(conversationId); } catch { /* Late Result Guard */ }
+    }
+    return { stopped: !!ac };
+  });
+
+  reg('mainAgent:changedFiles', ({ taskId } = {}) => {
+    // 通过 taskId 查 file_changes
+    const ctx = { store, taskId, projectId: null, agentId: null };
+    return changedFilesSummary(ctx);
+  });
+
+  reg('mainAgent:fileDiff', ({ taskId, filePath } = {}) => {
+    const files = listChangedFiles({ store, taskId });
+    const f = files.find(x => x.path === filePath);
+    if (!f) return null;
+    return { path: f.path, before: f.before, after: f.after, diff: f.diff };
+  });
+
+  reg('mainAgent:listRuns', ({ limit = 20 } = {}) => {
+    try { return store.runs.list(limit); } catch { return []; }
+  });
+
+  // 测试钩子：注入 FakeCodingModel（spec §35，E2E 用）
+  reg('mainAgent:testSetModel', ({ script, opts } = {}) => {
+    if (process.env.NODE_ENV !== 'test' && !process.env.CI) {
+      throw new Error('testSetModel 仅在测试环境可用');
+    }
+    if (script) {
+      injectedModel = createFakeCodingModel(script, opts || {});
+    } else {
+      injectedModel = null;
+    }
+    return { injected: !!injectedModel };
+  });
+
+  reg('mainAgent:states', () => ({ NON_TERMINAL: states.NON_TERMINAL, TERMINAL: states.TERMINAL }));
+}
+
+module.exports = { register, EVENTS, _setInjectedModel: (m) => { injectedModel = m; } };

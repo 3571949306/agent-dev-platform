@@ -154,6 +154,19 @@ function classifyCredentialValue(value, context = {}) {
   }
 
   const fieldName = context.fieldName || '';
+
+  // v2.6.0 §3.1 — Basic Authorization 不得自动作为 API Key。
+  // Bearer / Token 剥离后继续 classification；Basic 默认 unsupported。
+  // 必须在 stripAuthPrefix 之前检测，否则 Basic 前缀会被剥掉变成裸 base64。
+  if (/^basic\s+/i.test(value.trim())) {
+    return {
+      classification: 'basic_auth',
+      allowed: false,
+      confidence: 1,
+      reasons: ['检测到 Basic Authentication Credential。当前版本不会自动迁移用户名/密码凭据，请手动配置。']
+    };
+  }
+
   const stripped = stripAuthPrefix(value);
 
   // 1. 字段名优先：如果是已知不可迁移字段名 → 直接拒绝
@@ -238,6 +251,15 @@ function classifyCredentialValue(value, context = {}) {
 function classifyAuthorizationHeader(headerValue) {
   if (!headerValue) {
     return { classification: 'unknown', allowed: false, confidence: 1, reasons: ['Authorization 值为空'] };
+  }
+  // v2.6.0 §3.1 — Basic Auth 直接拒绝，不剥离前缀继续分类。
+  if (/^basic\s+/i.test(headerValue.trim())) {
+    return {
+      classification: 'basic_auth',
+      allowed: false,
+      confidence: 1,
+      reasons: ['检测到 Basic Authentication Credential。当前版本不会自动迁移用户名/密码凭据，请手动配置。']
+    };
   }
   const stripped = stripAuthPrefix(headerValue);
   const result = classifyCredentialValue(stripped, { fieldName: 'authorization' });

@@ -2,7 +2,7 @@
 
 > 本地 AI Agent IDE（智能体开发环境）—— 一个真正能读项目、改代码、跑命令、调子 Agent、把活干完的 Windows 桌面 Coding Agent。
 
-![platform](https://img.shields.io/badge/platform-Windows%2010%2F11-0078d4) ![electron](https://img.shields.io/badge/electron-31-47848F) ![node](https://img.shields.io/badge/node-20-339933) ![sqlite](https://img.shields.io/badge/sqlite-WAL-003B57) ![tests](https://img.shields.io/badge/tests-386%2B23-3fb950)
+![platform](https://img.shields.io/badge/platform-Windows%2010%2F11-0078d4) ![electron](https://img.shields.io/badge/electron-31-47848F) ![node](https://img.shields.io/badge/node-20-339933) ![sqlite](https://img.shields.io/badge/sqlite-WAL-003B57) ![tests](https://img.shields.io/badge/tests-617%2B30-3fb950)
 
 ## 它能做什么
 
@@ -23,6 +23,23 @@ v2.4.0 新增。在「API 连接」页面点击 **⚡ 快速接入**，把 API �
 ## 外部 API 配置一键迁移
 
 v2.5.0 新增。在「API 连接」页面点击 **📥 从其他工具导入**，可从 Codex、Claude Code、OpenCode、CC Switch、环境变量或配置文件（.env / JSON / TOML）一键迁移已有 API 配置。自动发现 → 预览 → 冲突检测 → 批量导入，全程只读、密钥掩码、不迁移账号登录态或 OAuth 凭据。详见 [`docs/EXTERNAL_CONFIG_IMPORT.md`](docs/EXTERNAL_CONFIG_IMPORT.md)。
+
+## Main Agent 自主编码闭环
+
+v2.6.0 新增。主智能体现在能独立走完整个编码任务，**不依赖外部智能体（Codex / WorkBuddy）**：
+
+```
+理解需求 → 读项目 → 分析代码 → 制定计划 → 修改文件 → 运行命令 → 测试 → 错误检测 → 修复 → 输出结果
+```
+
+* **状态机驱动**：`IDLE → PLANNING → READING_CONTEXT → EXECUTING → TESTING → EVALUATING → REPAIRING → COMPLETED`，外加 `FAILED` / `CANCELLED` / `TIMEOUT` / `WAITING_PERMISSION` 旁支终态。
+* **结构化 Action**：17 种动作（read_file / apply_patch / run_command / git_* / finish …）走 JSON Schema 校验，无效输出累计超限即 FAILED，不假装完成。
+* **Test → Repair Loop**：测试失败自动提取错误 → 进入修复 → 把失败信息喂回模型 → 重测，受 `maxIterations` / `maxRepairRounds` / `maxRuntimeMs` 五重限额保护。
+* **模糊 Patch 匹配**：LLM 行号不准时按上下文在全文件搜索最相似位置应用，不再因行号偏差直接失败。
+* **Run Timeline GUI**：底部时间线面板 + 右侧栏实时显示每一步（analyze / read / edit / run / repair / complete / error），plan 卡片 / action 卡片 / 修复横幅完整呈现。
+* **随时停止**：AbortController 真正中断正在进行的模型请求与终端命令进程树，一个 runId 最多一个终态，Late Result 不覆盖 cancelled/timeout。
+
+详见 [`docs/MAIN_AGENT_RUNTIME.md`](docs/MAIN_AGENT_RUNTIME.md)。
 
 ## 安装
 
@@ -50,7 +67,7 @@ v2.5.0 新增。在「API 连接」页面点击 **📥 从其他工具导入**�
 ```bash
 npm install                  # 装依赖
 npm run rebuild              # 把 better-sqlite3 重新按 Electron ABI 编译
-npm run test                 # 跑 83 个单元 / 集成 / 服务端到端测试
+npm run test                 # 跑 617 个单元 / 集成 / 服务端到端测试
 npm run smoke                # 启 Electron + 探测渲染层是否挂载（headless 友好）
 npm run electron             # 开发模式启动
 npm run dist                 # 打 NSIS + Portable 到 dist-electron/
@@ -68,6 +85,7 @@ npm run dist                 # 打 NSIS + Portable 到 dist-electron/
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — 模块、数据流、设计权衡
 - [`docs/SMART_API_ONBOARDING.md`](docs/SMART_API_ONBOARDING.md) — 智能 API 快速接入（v2.4.0）
 - [`docs/EXTERNAL_CONFIG_IMPORT.md`](docs/EXTERNAL_CONFIG_IMPORT.md) — 外部 API 配置一键迁移（v2.5.0）
+- [`docs/MAIN_AGENT_RUNTIME.md`](docs/MAIN_AGENT_RUNTIME.md) — Main Agent 自主编码闭环（v2.6.0）
 - [`docs/TEST_REPORT.md`](docs/TEST_REPORT.md) — 真实测试结果
 - [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) — 第三方开源项目声明
 - [`CHANGELOG.md`](CHANGELOG.md) — 版本变更

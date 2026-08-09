@@ -28,9 +28,68 @@ export const ZH = {
     diff: '文件更改',
     problems: '问题',
     tasks: '任务',
+    timeline: '时间线',
     computer: '电脑控制',
     logs: '日志',
     usage: '用量',
+  },
+  // v2.6.0 Main Agent 状态机
+  mainAgentState: {
+    IDLE: '空闲',
+    PLANNING: '规划中',
+    READING_CONTEXT: '读取上下文',
+    EXECUTING: '执行中',
+    WAITING_TOOL: '等待工具',
+    TESTING: '测试中',
+    EVALUATING: '评估中',
+    REPAIRING: '修复中',
+    WAITING_PERMISSION: '等待权限',
+    COMPLETED: '已完成',
+    FAILED: '失败',
+    CANCELLED: '已取消',
+    TIMEOUT: '超时',
+  },
+  // v2.6.0 Main Agent 事件
+  mainAgentEvent: {
+    'mainAgent:runStarted': '运行开始',
+    'mainAgent:stateChanged': '状态变更',
+    'mainAgent:planCreated': '计划已创建',
+    'mainAgent:taskUpdated': '任务更新',
+    'mainAgent:action': '执行动作',
+    'mainAgent:toolResult': '工具结果',
+    'mainAgent:testResult': '测试结果',
+    'mainAgent:repairStart': '开始修复',
+    'mainAgent:fileChanged': '文件已修改',
+    'mainAgent:checkpoint': '检查点',
+    'mainAgent:permission': '权限请求',
+    'mainAgent:timeline': '时间线',
+    'mainAgent:assistantText': '智能体输出',
+    'mainAgent:runCompleted': '运行完成',
+    'mainAgent:runFailed': '运行失败',
+    'mainAgent:runCancelled': '运行已取消',
+    'mainAgent:runTimeout': '运行超时',
+  },
+  // v2.6.0 Main Agent Action 类型
+  mainAgentAction: {
+    read_file: '读取文件',
+    read_file_range: '读取文件片段',
+    list_directory: '查看目录',
+    search_files: '搜索文件',
+    search_text: '搜索代码',
+    apply_patch: '修改代码',
+    create_file: '创建文件',
+    write_file: '写入文件',
+    delete_file: '删除文件',
+    move_file: '移动文件',
+    run_command: '运行命令',
+    git_status: '查看 Git 状态',
+    git_diff: '查看 Git 更改',
+    git_log: '查看 Git 历史',
+    git_add: '暂存更改',
+    git_commit: 'Git 提交',
+    finish: '完成任务',
+    delegate: '委派子智能体',
+    checkpoint: '创建检查点',
   },
   // 状态
   status: {
@@ -196,9 +255,11 @@ export function toolName(rawId) {
   return ZH.tool[rawId] || rawId;
 }
 
-/** 查找 Event 的中文名 */
+/** 查找 Event 的中文名（含 v2.6.0 Main Agent 事件） */
 export function eventName(rawType) {
-  return ZH.event[rawType] || rawType;
+  if (ZH.event[rawType]) return ZH.event[rawType];
+  if (ZH.mainAgentEvent[rawType]) return ZH.mainAgentEvent[rawType];
+  return rawType;
 }
 
 /** 查找 Run 状态的中文名 */
@@ -209,6 +270,26 @@ export function runStatus(rawStatus) {
 /** 查找模型来源的中文名 */
 export function sourceName(src) {
   return ZH.source[src] || src || '';
+}
+
+/** v2.6.0 — Main Agent 状态中文名 */
+export function mainAgentStateName(s) {
+  return ZH.mainAgentState[s] || s || '';
+}
+
+/** v2.6.0 — Main Agent 事件中文名 */
+export function mainAgentEventName(type) {
+  return ZH.mainAgentEvent[type] || type || '';
+}
+
+/** v2.6.0 — Main Agent Action 中文名 */
+export function mainAgentActionName(t) {
+  return ZH.mainAgentAction[t] || t || '';
+}
+
+/** v2.6.0 — Main Agent 状态是否终态 */
+export function isMainAgentTerminal(s) {
+  return ['COMPLETED', 'FAILED', 'CANCELLED', 'TIMEOUT'].includes(s);
 }
 
 /** 终态判断 */

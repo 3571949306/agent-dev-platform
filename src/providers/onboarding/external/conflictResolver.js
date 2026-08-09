@@ -16,23 +16,29 @@
  *   - §16：constant-time compare 解密后的明文 key，立即丢弃
  */
 
+const crypto = require('crypto');
 const { normalizeBaseUrl } = require('../urlNormalizer');
 const { isViable } = require('../candidate');
 
 const CONFLICT_STATES = ['NEW', 'DUPLICATE', 'CONFLICT', 'MISSING_SECRET', 'UNSUPPORTED', 'INVALID'];
 
 /**
- * v2.5.1 §16：Constant-time string comparison。
- * 防止 timing attack，比较后立即丢弃明文。
+ * v2.6.0 §3.2：Constant-time string comparison using crypto.timingSafeEqual。
+ *
+ * 长度不同时不得直接把不同长度 Buffer 传给 timingSafeEqual（会抛异常），
+ * 先比较长度并返回 false。比较后立即丢弃明文 Buffer。
+ * 不把明文 Secret 写日志。
  */
 function constantTimeCompare(a, b) {
   if (typeof a !== 'string' || typeof b !== 'string') return false;
-  if (a.length !== b.length) return false;
-  let result = 0;
-  for (let i = 0; i < a.length; i++) {
-    result |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  const ba = Buffer.from(a, 'utf8');
+  const bb = Buffer.from(b, 'utf8');
+  if (ba.length !== bb.length) {
+    // 长度不同：仍然消耗固定时间后再返回 false，避免长度泄漏。
+    try { crypto.timingSafeEqual(ba, ba); } catch { /* ignore */ }
+    return false;
   }
-  return result === 0;
+  return crypto.timingSafeEqual(ba, bb);
 }
 
 /**

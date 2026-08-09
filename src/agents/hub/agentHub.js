@@ -162,6 +162,14 @@ function createAgentHub(opts = {}) {
           } else {
             safeEmit(emit, type, payload);
           }
+        },
+        // v2.7.0 — 允许 adapter 在任务完成时主动通知 Hub 更新生命周期终态。
+        // 异步 adapter（如 TestAgentAdapter / 未来的 HTTP adapter）可在后台完成
+        // 后调用此回调，使 hub:status / hub:result 返回正确的终态。
+        finishRun: (status, result) => {
+          if (['completed', 'failed', 'cancelled', 'timeout'].includes(status)) {
+            runBridge.finishAgentRun(runId, status, result);
+          }
         }
       });
 

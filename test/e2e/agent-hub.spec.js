@@ -97,7 +97,7 @@ async function openFixtureProject() {
 
 /** 导航到智能体页面 */
 async function openAgentsPage() {
-  await page.getByRole('button', { name: '智能体' }).click();
+  await page.getByRole('button', { name: '智能体', exact: true }).click();
   await page.waitForSelector('#hub-cards', { timeout: 10000 });
 }
 
@@ -156,25 +156,29 @@ test('31) Agent Center：Hub 区段可见 + 注册表 Agent + 能力标签', asy
   await expect(page.locator('#hub-route-input')).toBeVisible();
   await expect(page.locator('#hub-route-btn')).toBeVisible();
 
-  // 从注册表读取 Agent（非硬编码）—— hub:available 应返回 Native / Codex / WorkBuddy
+  // 从注册表读取 Agent（非硬编码）—— hub:manifests 应返回所有已注册 Agent
+  const manifests = await getHubManifests();
+  expect(Array.isArray(manifests), 'hub:manifests 应返回数组').toBe(true);
+  const manifestIds = manifests.map(m => m.id);
+  expect(manifestIds, '应包含 Native 主智能体').toContain('native-main');
+  expect(manifestIds, '应包含 Codex').toContain('codex');
+  expect(manifestIds, '应包含 WorkBuddy').toContain('workbuddy');
+
+  // hub:available 至少应包含 native-main（其他 Agent 取决于本机是否安装）
   const available = await getHubAvailable();
   expect(Array.isArray(available), 'hub:available 应返回数组').toBe(true);
-  const ids = available.map(a => a.id);
-  expect(ids, '应包含 Native 主智能体').toContain('native-main');
-  expect(ids, '应包含 Codex').toContain('codex');
-  expect(ids, '应包含 WorkBuddy').toContain('workbuddy');
+  const availIds = available.map(a => a.id);
+  expect(availIds, 'native-main 应可用').toContain('native-main');
 
-  // 等待卡片渲染（loadHubCards 是异步的）
+  // 等待卡片渲染（loadHubCards 是异步的）—— 至少 native-main 可用即渲染
   await page.waitForFunction(() => {
     const cards = document.querySelectorAll('#hub-cards .acard');
-    return cards.length >= 3;
+    return cards.length >= 1;
   }, null, { timeout: 10000 });
 
-  // 验证卡片中有 Native / Codex / WorkBuddy 的名字
+  // 验证卡片中有 Native 主智能体（其他 Agent 取决于本机是否安装）
   const cardsText = await page.locator('#hub-cards').textContent();
   expect(cardsText).toContain('主智能体');
-  expect(cardsText).toContain('Codex');
-  expect(cardsText).toContain('WorkBuddy');
 
   // 验证能力标签（chip）可见 —— Native 应有 Coding / Terminal / Git 等
   const nativeCard = page.locator('#hub-cards .acard', { hasText: '主智能体' });
@@ -184,7 +188,7 @@ test('31) Agent Center：Hub 区段可见 + 注册表 Agent + 能力标签', asy
   // 每个 Hub 卡片都应有"测试"按钮（健康检查）
   const testBtns = page.locator('#hub-cards [data-hub-test]');
   await expect(testBtns.first()).toBeVisible();
-  expect(await testBtns.count()).toBeGreaterThanOrEqual(3);
+  expect(await testBtns.count()).toBeGreaterThanOrEqual(1);
 
   const fatals = pageErrors.filter(e => /Cannot read|TypeError|ReferenceError|is not defined/.test(e));
   expect(fatals).toEqual([]);
@@ -234,24 +238,31 @@ test('32) Capability Routing：编码任务 → Native / Codex 得分高于 Work
 
 test('33) Fallback：Codex 启动失败 → 回退 Native + 时间线含 fallback 事件', async () => {
   pageErrors = [];
-  // 1. 注入一个"启动失败"的 fake Codex adapter（测试钩子）
-  //    hub:testRegisterAdapter 让测试向 Registry 注入 fake adapter，覆盖真实 Codex。
+  // 1. 注入一个"启动失败"的 fake Codex adapter（纯 JSON 配置，无函数属性）
+  //    hub:testRegisterAdapter 在后端创建 TestAgentAdapter，覆盖真实 Codex。
   await page.evaluate(async () => {
-    const fakeCodex = {
+    await window.api.invoke('hub:testRegisterAdapter', {
       id: 'codex',
       manifest: { id: 'codex', displayName: 'Codex', transport: 'cli', capabilities: { coding: true, filesystem: true, terminal: true, git: true } },
-      adapterType: 'cli',
       transport: 'cli',
       capabilities: ['coding', 'filesystem', 'terminal', 'git'],
-      disabled: false,
       healthStatus: 'healthy',
       maxConcurrency: 2,
-      activeRunCount: 0,
-      async detect() { return { available: true }; },
-      async healthCheck() { return { status: 'healthy' }; },
-      async startTask() { throw new Error('Codex 启动失败（测试注入）'); }
-    };
-    await window.api.invoke('hub:testRegisterAdapter', fakeCodex);
+      startFails: true
+    });
+    // 同时注入一个可成功的 fake native-main（真实 native-main 需要 model/runManager 上下文，
+    // Hub 的 start() 不提供这些字段，故用 TestAgentAdapter 替换以验证 fallback 流程）
+    // healthStatus 设为 'unknown' 使路由评分低于 codex(healthy)，确保 codex 被先尝试并触发 fallback
+    await window.api.invoke('hub:testRegisterAdapter', {
+      id: 'native-main',
+      manifest: { id: 'native-main', displayName: '主智能体', transport: 'native', capabilities: { coding: true, filesystem: true, terminal: true, git: true }, availability: true, maxConcurrency: 3 },
+      transport: 'native',
+      capabilities: ['coding', 'filesystem', 'terminal', 'git'],
+      healthStatus: 'unknown',
+      maxConcurrency: 3,
+      available: true,
+      resultText: 'Native fallback completed'
+    });
   });
 
   // 2. 清空事件探针
@@ -293,26 +304,20 @@ test('34) Cancel Isolation：取消一个 Run 不影响另一个', async () => {
   await page.evaluate(() => { window._hubEvents = []; window._runTerms = []; });
 
   // 1. 注册两个 fake adapter（各自挂起，模拟长时运行）
+  //    使用纯 JSON 配置（无函数属性），通过 hub:testRegisterAdapter 在后端创建 TestAgentAdapter。
+  //    delayMs 设为较大值（30s）模拟长时运行，使 Run 在测试期间保持 running 状态。
   await page.evaluate(async () => {
-    const makeFake = (id, transport) => ({
+    const config = (id, transport) => ({
       id,
       manifest: { id, displayName: id, transport, capabilities: { coding: true, filesystem: true } },
-      adapterType: transport,
       transport,
       capabilities: ['coding', 'filesystem'],
-      disabled: false,
       healthStatus: 'healthy',
       maxConcurrency: 1,
-      activeRunCount: 0,
-      async detect() { return { available: true }; },
-      async healthCheck() { return { status: 'healthy' }; },
-      async startTask(task, ctx) {
-        // 不立即完成 —— 模拟长时运行，等 cancel 才结束
-        return { ok: true, runId: ctx && ctx.runId };
-      }
+      delayMs: 30000
     });
-    await window.api.invoke('hub:testRegisterAdapter', makeFake('fake-agent-a', 'http'));
-    await window.api.invoke('hub:testRegisterAdapter', makeFake('fake-agent-b', 'http'));
+    await window.api.invoke('hub:testRegisterAdapter', config('fake-agent-a', 'http'));
+    await window.api.invoke('hub:testRegisterAdapter', config('fake-agent-b', 'http'));
   });
 
   // 2. 在两个 Agent 上各启动一个 Run
@@ -366,25 +371,19 @@ test('35) Main Agent Delegate：委派消息 → 路由选择 review Agent → M
   await page.evaluate(() => { window._hubEvents = []; window._runTerms = []; });
 
   // 1. 注册一个 fake review Agent（具备 review 能力）
+  //    使用纯 JSON 配置（无函数属性），通过 hub:testRegisterAdapter 在后端创建 TestAgentAdapter。
+  //    delayMs=0 使任务立即完成，resultText 作为 review 结果文本。
   await page.evaluate(async () => {
-    const fakeReview = {
+    await window.api.invoke('hub:testRegisterAdapter', {
       id: 'fake-review-agent',
       manifest: { id: 'fake-review-agent', displayName: 'Fake Review Agent', transport: 'http', capabilities: { coding: true, review: true, filesystem: true } },
-      adapterType: 'http',
       transport: 'http',
       capabilities: ['coding', 'review', 'filesystem'],
-      disabled: false,
       healthStatus: 'healthy',
       maxConcurrency: 1,
-      activeRunCount: 0,
-      async detect() { return { available: true }; },
-      async healthCheck() { return { status: 'healthy' }; },
-      async startTask(task, ctx) {
-        // 立即完成，返回 review 结果
-        return { ok: true, runId: ctx && ctx.runId, result: '代码审查通过：无明显问题。' };
-      }
-    };
-    await window.api.invoke('hub:testRegisterAdapter', fakeReview);
+      available: true,
+      resultText: '代码审查通过：无明显问题。'
+    });
   });
 
   // 2. 验证路由器会为 review 任务选择 fake-review-agent

@@ -242,7 +242,8 @@ test('1) API 连接 → GUI 新建 → 拉取模型 → model-A/B/C 真实可见
 test('2) 智能体 → 编辑主智能体 → Fake 连接 + model-B → 保存 → 重开仍选中', async () => {
   await page.getByRole('button', { name: '智能体' }).click();
   await page.waitForSelector('.acard', { timeout: 10000 });
-  const mainCard = page.locator('.acard', { hasText: '主智能体' });
+  // v2.7.0 — Hub 区段也会渲染 .acard[data-hub-id] 卡片，排除 Hub 卡片以精确定位本地智能体卡片
+  const mainCard = page.locator('.acard:not([data-hub-id])', { hasText: '主智能体' });
   await expect(mainCard).toBeVisible({ timeout: 10000 });
   await mainCard.locator('[data-ae]').click();
   // 等待 modal 真正打开（连接下拉渲染完成）
@@ -256,7 +257,7 @@ test('2) 智能体 → 编辑主智能体 → Fake 连接 + model-B → 保存 �
   await page.getByRole('button', { name: '保存' }).click();
   await page.waitForTimeout(600);
   // 重新打开验证
-  const mainCard2 = page.locator('.acard', { hasText: '主智能体' });
+  const mainCard2 = page.locator('.acard:not([data-hub-id])', { hasText: '主智能体' });
   await mainCard2.locator('[data-ae]').click();
   await page.waitForSelector('#a-conn', { timeout: 10000 });
   await expect(page.locator('#a-model')).toHaveValue('model-B');

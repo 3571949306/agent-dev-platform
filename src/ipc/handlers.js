@@ -869,11 +869,36 @@ function register(window) {
   ipcMain.handle('hub:detect', async () => { return agentHub.detect(); });
   ipcMain.handle('hub:health', async (e, { force = false } = {}) => agentHub.health({ force }));
   ipcMain.handle('hub:route', (e, task) => agentHub.route(task));
-  ipcMain.handle('hub:start', async (e, { agentId, task }) => agentHub.start(agentId, task));
-  ipcMain.handle('hub:startAuto', async (e, { task }) => agentHub.startAuto(task));
+  // hub:start 支持两种调用约定：
+  //   1) { agentId, task } 单参数对象（生产代码 / 内部调用）
+  //   2) (agentId, task) 两个参数（E2E 测试 / 委派场景）
+  ipcMain.handle('hub:start', async (e, agentIdOrObj, taskArg) => {
+    const agentId = typeof agentIdOrObj === 'string' ? agentIdOrObj : (agentIdOrObj && agentIdOrObj.agentId);
+    const task = typeof agentIdOrObj === 'string' ? taskArg : (agentIdOrObj && agentIdOrObj.task);
+    return agentHub.start(agentId, task);
+  });
+  ipcMain.handle('hub:startAuto', async (e, taskOrObj) => {
+    const task = taskOrObj && taskOrObj.task ? taskOrObj.task : taskOrObj;
+    return agentHub.startAuto(task);
+  });
+  // hub:delegate — Main Agent 委派子任务给合适的 Agent（防环由 delegationPath 保证）
+  ipcMain.handle('hub:delegate', async (e, { goal, required, preferred, delegationPath, parentRunId }) => {
+    const task = { goal, required: required || [], preferred: preferred || [], delegationPath: delegationPath || [], parentRunId };
+    return agentHub.startAuto(task);
+  });
   ipcMain.handle('hub:cancel', async (e, runId) => agentHub.cancel(runId));
   ipcMain.handle('hub:status', async (e, runId) => agentHub.status(runId));
   ipcMain.handle('hub:result', async (e, runId) => agentHub.result(runId));
+
+  // v2.7.0 — Test helpers（仅测试模式可用）
+  if (process.env.NODE_ENV === 'test') {
+    const { TestAgentAdapter } = require('../agents/adapters/testAgentAdapter');
+    ipcMain.handle('hub:testRegisterAdapter', (e, config) => {
+      const adapter = new TestAgentAdapter(config);
+      agentHub.register(adapter);
+      return { ok: true, id: adapter.id };
+    });
+  }
 }
 
 // connect MCP servers marked connected at startup

@@ -246,9 +246,24 @@ SMOKE_OK
 
 ### 6.2 真实 run 结果
 
-**结论：待 push 后填入。**
+push commit `db04a42` 后真实触发的 GitHub Actions run（`gh run view` 拉取的真实 conclusion）：
 
-> Workflow 已配置；v2.5.1 尚未 push 触发真实 run。push 后将通过 `gh run list / gh run view` 拉取真实 conclusion，只有三个 job 真实 success 才在此写「CI PASS」。在真实 run success 之前不写「CI PASS」。
+**Workflow 1: `windows-test` (run id 31299854837, 5m47s)**
+
+| Job | status | conclusion | 备注 |
+| --- | --- | --- | --- |
+| Unit + Integration (Windows) | completed | **success** | 必需 |
+| Smoke (Windows GUI boot) | completed | **success** | 必需 |
+| GUI E2E (Playwright + Electron) | completed | **success** | `continue-on-error: true`，但 job 自身 conclusion 真实为 success |
+
+**Workflow 2: `CI` (run id 31299854853, 2m54s)**
+
+| Job | status | conclusion |
+| --- | --- | --- |
+| 单元测试 (Electron Node) | completed | **success** |
+| 冒烟测试 (Electron GUI) | completed | **success** |
+
+**结论：CI Unit / Smoke / E2E 全部 PASS（5 个 job 真实 success，含 `continue-on-error: true` 的 E2E job 自身 conclusion 也是 success）。**
 
 ### 6.3 Computer CI SKIP
 
@@ -278,8 +293,7 @@ CI 环境下 Computer 列窗口测试使用 `t.skip()` 而非 `t.diagnostic() + 
 1. **真实 WorkBuddy 端到端桥接未验证**：本开发会话即在 WorkBuddy 宿主中，按 §22 禁止递归发送任务。
 2. **真实第三方 API 未验证**：当前环境无用户 API Key，未伪造结果。
 3. **本机真实 Codex / Claude Code / OpenCode / CC Switch 配置发现**：E2E 全部使用 fixture，不依赖开发电脑真实配置（§72/§73）。本机 Codex / Claude Code 已安装但 config.toml / settings.json 不直接含明文 apiKey（Codex 走 env_key 引用环境变量，Claude Code settings 不存 API Key），Importer 0 candidate —— 这是预期行为，未伪造 candidate。OpenCode / CC Switch 未安装。真实本机发现结果在最终报告中单独标注。
-4. **GitHub Actions 真实 run 结果待 push 后产生**：Workflow 已配置，未写「CI PASS」直到真实 run success。
-5. **NSIS 安装向导 UI 截图回归未覆盖**：electron-builder 默认产物。
+4. **NSIS 安装向导 UI 截图回归未覆盖**：electron-builder 默认产物。
 
 ---
 

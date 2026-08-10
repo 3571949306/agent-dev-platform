@@ -1,5 +1,65 @@
 # Changelog
 
+## v2.9.0 — 2026-08-10
+
+> Unified Main Agent Orchestrator：在现有三套 Runtime（General Chat / Main Coding / AgentHub）
+> 之上建立统一编排层，实现 Main Agent → delegate → AgentHub → Child Run → Blackboard → Main Agent
+> 真正闭环。Framework First + Blocker Fix Only。
+
+### 一、Unified Main Agent Orchestrator（§9）
+
+* 新建 `src/agent/orchestrator/`（7 模块）：
+  - `agentTaskContract.js`：AgentTask 契约 + delegationPath/depth + 防自委派（§11/§42-44）
+  - `orchestrationBlackboard.js`：Root Run 共享状态 + secret sanitize + context budget（§34-38/§115）
+  - `childRunTracker.js`：Parent/Child Run 树 + 取消级联 + event-driven wait（§23-29）
+  - `executionContextFactory.js`：统一 Adapter context（§39-40，修复 §7B 缺口）
+  - `delegationController.js`：fallback policy + no-bypass（§30-33）
+  - `agentHubBridge.js`：AgentTask → AgentHub.route/start → wait → AgentResult（§18）
+  - `mainAgentOrchestrator.js`：统一编排入口 + 事件总线（§9/§72）
+* 修复 §7A 缺口：删除 `agentLoop.js` delegate placeholder，delegate 走 executeAction → executeDelegate → Orchestrator。
+* 修复 §7B 缺口：`ExecutionContextFactory` 统一构建 context，`agentHub.start` 用它补全 NativeAgentAdapter 必填的 runManager/model/getTool/store（此前必 throw）。
+
+### 二、Parent/Child Run Tree（§21-29）
+
+* `ChildRunTracker`：内存 Run 树（register/getChildren/getParent/wait/cancel）。
+* 取消级联（§24）：Parent CANCEL → 递归 cancel 所有 owned children → external abort → Parent CANCELLED。
+* Child terminal 不终结 Parent（§27-28）：TIMEOUT/FAILED 反馈 Main Agent 决定下一步。
+* event-driven wait（§19）：平台 `await childRunTracker.wait(runId)`，不轮询 DB。
+* DB migration（§116）：runs 表新增 `root_run_id`/`depth` 列；`store.runs.upsert` + `RunManager.createRun` 写入 parent_run_id/root_run_id/depth/adapter_id。
+
+### 三、Fallback / Blackboard / Verification / Security（§30-53）
+
+* DelegationFailurePolicy：RUNTIME_UNAVAILABLE/PROTOCOL_ERROR/CRASH 可自动 fallback；PERMISSION_DENIED/USER_CANCELLED/POLICY_DENIED 禁止（No-Bypass §29）；maxDelegationAttempts=2（§33）。
+* OrchestrationBlackboard：Child Result 写 Blackboard（§36），Main Agent 从 Blackboard 取 observation；externalClaim ≠ localVerification（§53）；secret sanitize（§115）。
+* Main Final Verification（§51）：External Agent "完成"只是 Claim，Main Agent 本地 git diff/test/CompletionPolicy 复核。
+* PathSecurity/ProjectMutationLock/Permission 继承进入 ExecutionContext（§46-50），新 Orchestrator 不绕过。
+
+### 四、IPC / Prompt / 链接创建风险（§58/§14-17）
+
+* 新增 `orchestrator:start/cancel/status/result/children` IPC（§58），保留兼容 `mainAgent:*`/`hub:*`/`agent:*`（§59）。
+* Main Agent Prompt 更新：加 delegate action 类型 + 委派指导（什么时候 delegate / 自己做，§14-17）。
+* `mainAgentRuntime` 创建 Orchestrator 并注入 ctx.orchestrator（打通 delegate 闭环）。
+* GUI（§60-64）：新增 `public/js/orchestration.js` 隔离模块 + 右侧栏「编排 Run Tree」面板，从 `run_state_changed` 事件流渲染 Main Agent → Delegate → Child 树与 Delegation Card（Agent/Reason/Mode/Status/Duration + 查看/停止），`run_state_changed` 事件现携带 parentRunId/rootRunId/depth/adapterId。
+
+### 五、测试（§106-107）
+
+* 新增 `test/mainAgentOrchestrator.test.js`（14 用例）：delegate→AgentHub / Child result→Blackboard / Child FAILED parent continues / self-delegation blocked / delegation depth / changedFiles aggregation / fallback RUNTIME_UNAVAILABLE / fallback PERMISSION_DENIED No-Bypass / externalClaim / secret sanitization / ChildRunTracker / AgentTask contract。
+* 单元测试 1440 / 1439 PASS / 0 FAIL / 1 SKIP（1426 旧全保留 + 14 新）。
+
+### 六、文档（§118）
+
+* 新增 `docs/UNIFIED_MAIN_AGENT_ORCHESTRATOR.md`（架构/缺口修复/AgentTask/Run Tree/Fallback/Blackboard/Security/事件总线/预留接口）。
+
+### 七、Real AI Smoke（§74-99，框架预留）
+
+* `npm run test:real-ai:orchestrator` 脚本预留（需 DeepSeek Test Connection 配置；CI 无 credential → SKIP §76）。
+* 验证链：真实 DeepSeek Main Agent → delegate → fixture reviewer → Blackboard → Main Agent 修复 → 测试通过。
+
+### 八、预留未来接口（§69-73，不实现）
+
+* AgentDefinition（Dynamic Agent，v2.9.1）/ modelRequirements（Model Router，v2.9.2）/ skillIds（Skill，v2.9.3）/ Hook Engine（v2.9.4）/ Workflow（v2.9.5）/ AI Extension Generator（v2.9.6）。
+* 事件总线稳定（run.started/delegation.*/verification.*/run.completed），供未来 Hook 订阅。
+
 ## v2.8.2 — 2026-08-10
 
 > Canonical Path Security Hardening：彻底消除"字符串路径看似在 projectRoot 内，但真实文件

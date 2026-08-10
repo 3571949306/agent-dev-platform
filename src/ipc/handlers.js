@@ -81,7 +81,24 @@ const runBridge = createRunBridge({ runManager, lifecycleManager, emit });
 // v2.7.1 — Project Mutation Lock & OpenCode server manager（在 createAgentHub 之前创建）
 const openCodeServerManager = createOpenCodeServerManager();
 const projectLock = createProjectMutationLock();
-const agentHub = createAgentHub({ registry: agentRegistry, router: agentRouter, healthManager, lifecycleManager, eventNormalizer, runBridge, emit, projectLock });
+// v2.9.0 §39-40 — ExecutionContextFactory：统一 Adapter context 构建（修复 §7B Native Hub Context 缺口）
+//   注入 runManager/getTool/store/buildProvider/resolveModel/pathSecurity/projectMutationLock 等，
+//   hub.start 时 contextFactory.create(adapter, task, run, hubCtx) 补全 NativeAgentAdapter 必填字段。
+const _pathSecurity = require('../security/pathSecurity');
+const { createExecutionContextFactory, get: orchestratorGet } = require('../agent/orchestrator');
+const executionContextFactory = createExecutionContextFactory({
+  runManager,
+  getTool,
+  store,
+  buildProvider,
+  resolveModel: resolveModelFor,
+  requestPermission,
+  pathSecurity: _pathSecurity,
+  projectMutationLock: projectLock,
+  emit,
+  defaultModel: null   // 由 resolveModelFor(task) 在 create 时解析
+});
+const agentHub = createAgentHub({ registry: agentRegistry, router: agentRouter, healthManager, lifecycleManager, eventNormalizer, runBridge, emit, projectLock, contextFactory: executionContextFactory });
 setAgentHub(agentHub);
 
 // Register built-in adapters
@@ -1085,6 +1102,42 @@ function register(window) {
   });
   ipcMain.handle('hub:cancel', async (e, runId) => agentHub.cancel(runId));
   ipcMain.handle('hub:status', async (e, runId) => agentHub.status(runId));
+
+  // v2.9.0 §58 — Orchestrator IPC（统一编排层入口）
+  ipcMain.handle('orchestrator:children', async (e, runId) => {
+    const orch = orchestratorGet(runId);
+    if (!orch) return { ok: false, error: 'ORCHESTRATOR_NOT_FOUND', children: [] };
+    return { ok: true, children: orch.getChildren() };
+  });
+  ipcMain.handle('orchestrator:cancel', async (e, runId) => {
+    const orch = orchestratorGet(runId);
+    if (!orch) return { ok: false, error: 'ORCHESTRATOR_NOT_FOUND', cancelled: [] };
+    // §24 取消级联：Parent CANCEL → 所有 owned children CANCEL
+    const cancelled = await orch.cancelAllChildren(async (childId) => {
+      try { await agentHub.cancel(childId); } catch { /* noop */ }
+    });
+    return { ok: true, cancelled };
+  });
+  ipcMain.handle('orchestrator:status', async (e, runId) => {
+    const orch = orchestratorGet(runId);
+    if (!orch) return { ok: false, error: 'ORCHESTRATOR_NOT_FOUND' };
+    const snap = orch.blackboard.snapshot();
+    return {
+      ok: true,
+      parentRunId: orch.parentRunId,
+      parentAgentId: orch.parentAgentId,
+      children: orch.getChildren(),
+      childResults: snap.childResults.length,
+      changedFiles: snap.changedFiles,
+      findings: snap.findings.length,
+      blockers: snap.blockers.length
+    };
+  });
+  ipcMain.handle('orchestrator:result', async (e, runId) => {
+    const orch = orchestratorGet(runId);
+    if (!orch) return { ok: false, error: 'ORCHESTRATOR_NOT_FOUND' };
+    return { ok: true, observation: orch.getObservation(), snapshot: orch.blackboard.snapshot() };
+  });
   ipcMain.handle('hub:result', async (e, runId) => agentHub.result(runId));
 
   // v2.7.1 — Project Mutation Lock IPC

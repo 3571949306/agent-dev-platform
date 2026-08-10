@@ -116,6 +116,32 @@ async function executeAction(ctx, action, getTool) {
  * @returns {Promise<object>} Tool Result
  */
 async function executeDelegate(ctx, action, args) {
+  // v2.9.0 §7A 修复：优先用 orchestrator（如注入）走完整闭环
+  //   Orchestrator → AgentHubBridge → AgentHub.route/start → Child Run → wait → Blackboard
+  //   含 delegationPath/depth、fallback policy、no-bypass、Blackboard 写入。
+  if (ctx && ctx.orchestrator && typeof ctx.orchestrator.delegate === 'function') {
+    try {
+      const result = await ctx.orchestrator.delegate(args || {}, {
+        abortSignal: ctx.abortSignal,
+        conversationId: ctx.conversationId,
+        taskId: ctx.taskId,
+        delegationPath: ctx.delegationPath || []
+      });
+      return {
+        ok: !!result.ok,
+        tool: 'delegate',
+        action,
+        data: { runId: result.runId, agentId: result.agentId, status: result.status, result },
+        error: result.ok ? null : {
+          code: `DELEGATE_${String(result.status || 'FAILED').toUpperCase()}`,
+          message: (result.errors && result.errors[0]) || result.summary || 'delegate 未完成',
+          retryable: result.status === 'timeout' || result.status === 'unavailable'
+        }
+      };
+    } catch (e) {
+      return { ok: false, tool: 'delegate', action, error: { code: 'DELEGATE_START_FAILED', message: e.message, retryable: true } };
+    }
+  }
   const hub = getAgentHub();
   if (!hub) {
     return { ok: true, tool: 'delegate', data: { handledByLoop: true } };

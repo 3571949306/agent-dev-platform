@@ -193,13 +193,8 @@ async function runAgentLoop(deps) {
         continue;
       }
 
-      // 6. delegate / ask_permission（本轮保留接口，不依赖外部 agent）
-      if (action.type === 'delegate') {
-        // 无外部 agent 时 Main Agent 自己继续
-        addFact(blackboard, 'delegate 请求无可用子智能体，Main Agent 自行继续');
-        safeEmit(emit, EVENTS.TIMELINE, { runId, entry: timelineEntry('info', 'delegate 跳过（无子智能体）', action.args && action.args.task) });
-        continue;
-      }
+      // 6. delegate（v2.9.0 §7A 修复：不再 placeholder，走 executeAction → executeDelegate → Orchestrator/AgentHub）
+      //    ask_permission 仍由 loop 处理
       if (action.type === 'ask_permission') {
         if (typeof deps.requestPermission === 'function') {
           const d = await deps.requestPermission({ scope: action.args && action.args.scope, tool: action.args && action.args.tool, args: action.args, conversationId: ctx.conversationId });

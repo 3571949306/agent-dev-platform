@@ -7,6 +7,7 @@ import * as chat from './chat.js';
 import * as panels from './panels.js';
 import * as files from './files.js';
 import * as pages from './pages.js';
+import { initOrchestration } from './orchestration.js';
 
 async function boot() {
   try {
@@ -18,6 +19,7 @@ async function boot() {
 
   panels.init();
   wireShell();
+  initOrchestration(); // v2.9.0 — 编排 Run Tree / Delegation Card（隔离激活）
   onEvent(ev => {
     try { chat.handleEvent(ev); } catch (err) { console.error('event error', err, ev); }
     try { pages.handleDiagEvent(ev); } catch (err) { console.error('diag event error', err, ev); }

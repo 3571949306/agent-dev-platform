@@ -85,7 +85,8 @@ function createAgentHub(opts = {}) {
   const {
     registry, router, healthManager,
     lifecycleManager, eventNormalizer, runBridge,
-    emit, projectLock
+    emit, projectLock,
+    contextFactory   // v2.9.0 §39-40：统一 Adapter context 构建（修复 §7B 缺口）
   } = opts;
 
   if (!registry) throw new Error('createAgentHub: registry 必填');
@@ -204,7 +205,13 @@ function createAgentHub(opts = {}) {
 
     // 4. 调用 adapter.startTask，传入 task context
     try {
+      // v2.9.0 §39-40：用 contextFactory 构建完整 context（修复 §7B Native Hub Context 缺口）
+      //   contextFactory 注入 runManager/model/getTool/store/permissionEngine/pathSecurity 等，
+      //   让 NativeAgentAdapter.startTask 不再因 runManager/model 缺失而 throw。
+      const _runInfo = { runId, lifecycleRunId, agentId, parentRunId: task.parentRunId || null, projectRoot: task.projectRoot, projectId: task.projectId };
+      const _extraCtx = contextFactory ? contextFactory.create(adapter, task, _runInfo, {}) : {};
       const startResult = await adapter.startTask(task, {
+        ..._extraCtx,
         runId,
         lifecycleRunId,
         agentId,

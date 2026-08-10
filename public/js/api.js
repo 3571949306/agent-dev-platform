@@ -156,6 +156,13 @@ export const api = {
   // v2.8.1 — 验证级别（§44/§45：与 Health 分离，不可混用）
   hubVerification: () => call('hub:verification'),
 
+  // v2.9.0 — Unified Main Agent Orchestrator
+  orchStart: (task, opts) => call('orchestrator:start', { task, opts }),
+  orchCancel: (runId) => call('orchestrator:cancel', { runId }),
+  orchStatus: (runId) => call('orchestrator:status', { runId }),
+  orchResult: (runId) => call('orchestrator:result', { runId }),
+  orchChildren: (runId) => call('orchestrator:children', { runId }),
+
   // v2.7.1 — External agent configs & project mutation lock
   extcfgGet: (agentId) => call('extcfg:get', agentId),
   extcfgSet: (agentId, config) => call('extcfg:set', agentId, config),

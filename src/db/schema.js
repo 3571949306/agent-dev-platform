@@ -397,7 +397,10 @@ const COLUMN_MIGRATIONS = [
   // v2.7.0 — parent/child run tracking
   ['runs', 'provider_type', 'TEXT', "''"],
   ['runs', 'adapter_id', 'TEXT', "''"],
-  ['runs', 'parent_run_id', 'TEXT']
+  ['runs', 'parent_run_id', 'TEXT'],
+  // v2.9.0 — Run Tree（§21/§116）：root_run_id + depth 完整化 Run 树追踪
+  ['runs', 'root_run_id', 'TEXT'],
+  ['runs', 'depth', 'INTEGER', '0']
 ];
 
 function ensureColumns(db) {

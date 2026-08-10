@@ -634,22 +634,31 @@ const runs = {
   upsert(run) {
     const ex = db().prepare('SELECT id FROM runs WHERE id=?').get(run.id);
     const t = now();
+    // v2.9.0 §116：Run Tree 字段（parent_run_id 已有列但 v2.7 未写入；root_run_id/depth 新增）
+    const parentRunId = run.parentRunId || null;
+    const rootRunId = run.rootRunId || null;
+    const depth = run.depth || 0;
+    const adapterId = run.adapterId || run.adapterType || '';
     if (ex) {
       db().prepare(`UPDATE runs SET conversation_id=?,agent_id=?,task_id=?,status=?,stage=?,
-        started_at=?,updated_at=?,last_activity_at=?,terminal_at=?,error=?,message=? WHERE id=?`)
+        started_at=?,updated_at=?,last_activity_at=?,terminal_at=?,error=?,message=?,
+        parent_run_id=?,root_run_id=?,depth=?,adapter_id=? WHERE id=?`)
         .run(run.conversationId || null, run.agentId || null, run.taskId || null, run.status, run.stage,
           run.startedAt ? new Date(run.startedAt).toISOString() : t, t,
           run.lastActivityAt ? new Date(run.lastActivityAt).toISOString() : t,
           run.terminalAt ? new Date(run.terminalAt).toISOString() : null,
-          run.error || '', run.message || '', run.id);
+          run.error || '', run.message || '',
+          parentRunId, rootRunId, depth, adapterId, run.id);
     } else {
       db().prepare(`INSERT INTO runs (id,conversation_id,agent_id,task_id,status,stage,
-        started_at,updated_at,last_activity_at,terminal_at,error,message)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`)
+        started_at,updated_at,last_activity_at,terminal_at,error,message,
+        parent_run_id,root_run_id,depth,adapter_id)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
         .run(run.id, run.conversationId || null, run.agentId || null, run.taskId || null, run.status, run.stage,
           new Date(run.startedAt || Date.now()).toISOString(), t, t,
           run.terminalAt ? new Date(run.terminalAt).toISOString() : null,
-          run.error || '', run.message || '');
+          run.error || '', run.message || '',
+          parentRunId, rootRunId, depth, adapterId);
     }
     return runs.get(run.id);
   },

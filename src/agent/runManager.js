@@ -48,7 +48,8 @@ class RunManager {
   }
 
   /** 创建 Run（status=preparing），立即发 preparing 事件。 */
-  createRun({ conversationId, agentId, taskId = null, runId = null }) {
+  createRun({ conversationId, agentId, taskId = null, runId = null,
+              parentRunId = null, rootRunId = null, depth = 0, adapterId = null }) {
     const id = runId || crypto.randomUUID();
     const now = Date.now();
     const run = {
@@ -64,12 +65,22 @@ class RunManager {
       terminalAt: null,
       error: null,
       message: null,
+      // v2.9.0 §21/§116 — Run Tree
+      parentRunId: parentRunId || null,
+      rootRunId: rootRunId || parentRunId || id,   // 无 parent 则自身为 root
+      depth: depth || 0,
+      adapterId: adapterId || '',
       log: [{ t: now, status: 'preparing', previousStatus: null, source: 'create' }]
     };
     this.runs.set(id, run);
     if (conversationId) this.byConversation.set(conversationId, id);
     this._persist(run);
-    this._emit('run_state_changed', { conversationId, runId: id, status: 'preparing', stage: 'preparing', timestamp: now });
+    // v2.9.0 §21/§60-61 — 携带 Run Tree 字段，供 GUI 构建 Main Agent → Delegate → Child 树
+    this._emit('run_state_changed', {
+      conversationId, runId: id, agentId, adapterId,
+      parentRunId: run.parentRunId, rootRunId: run.rootRunId, depth: run.depth,
+      status: 'preparing', stage: 'preparing', timestamp: now
+    });
     return run;
   }
 

@@ -76,8 +76,28 @@ function runMainAgent(opts) {
     conversationId, taskId: null,
     store, emit, abortSignal: ac.signal,
     // 工具需要的字段
-    permissionEngine: opts.permissionEngine || null
+    permissionEngine: opts.permissionEngine || null,
+    // v2.9.0 §9 — MainAgentOrchestrator（delegate → AgentHub → Child Run → Blackboard）
+    orchestrator: null   // 下方注入（如 AgentHub 可用）
   };
+
+  // v2.9.0 §9 — 创建 Orchestrator 并注册（打通 delegate → AgentHub 闭环）
+  //   executeDelegate 优先用 ctx.orchestrator.delegate 走完整编排链。
+  //   AgentHub 不可用（隔离单测）时 orchestrator=null，delegate 回退现有逻辑。
+  try {
+    const { createMainAgentOrchestrator, register } = require('../orchestrator');
+    const { getAgentHub } = require('../../agents/hub/agentHub');
+    const _hub = getAgentHub();
+    if (_hub) {
+      const _orch = createMainAgentOrchestrator({
+        hub: _hub, parentRunId: runId, parentAgentId: agentId || 'native-main',
+        projectRoot, projectId, emit
+      });
+      _orch.start(goal);
+      register(runId, _orch);
+      ctx.orchestrator = _orch;
+    }
+  } catch { /* orchestrator 不可用时不阻塞 Main Agent（测试降级） */ }
 
   // 3. 注册到 activeRuns（供 agent:stop 中止）
   if (opts.registerAbort) opts.registerAbort(conversationId, ac);

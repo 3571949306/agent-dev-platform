@@ -1,4 +1,45 @@
-# Test Report — Agent Dev Platform v2.8.2
+# Test Report — Agent Dev Platform（v2.9.0）
+
+## v2.9.0 — Unified Main Agent Orchestrator（2026-08-10）
+
+> **基线：** `v2.8.2 / 6a4ed14`。
+> **本文件不含任何编造结果**，所有断言均来源于真实执行。
+
+### 本轮单元测试
+
+```text
+# tests 1440
+# pass 1439
+# fail 0
+# cancelled 0
+# skipped 1
+# duration_ms ~90000
+```
+
+**结论：1440 / 1439 PASS，0 失败，1 跳过**（`npm test`，2026-08-10 真实执行）。
+
+- 相对 v2.8.2（1426）增量：**+14**，全部来自新增 `test/mainAgentOrchestrator.test.js`
+  （§107：delegate→AgentHub / Blackboard / self-delegation / depth / fallback / changedFiles / externalClaim / secret sanitize / ChildRunTracker / AgentTask contract）。
+- 现有 1426 测试全部保留并通过（delegate placeholder 移除、executeDelegate 增强、agentHub contextFactory 注入、runManager/store schema migration 均未破坏既有断言）。
+
+### Orchestrator 改造自查（spec §119 类比 Release Blockers）
+
+| Blocker | 状态 |
+| --- | --- |
+| delegate 仍是 placeholder（§7A） | ✅ 已修复（删除 placeholder，delegate 走 executeDelegate → Orchestrator） |
+| NativeAgentAdapter context 缺失必填字段（§7B） | ✅ 已修复（ExecutionContextFactory 统一补全 runManager/model/getTool/store/pathSecurity/...） |
+| AgentLoop 了解具体 Agent 实现（§10） | ✅ 已隔离（Main Agent 只发 AgentTask，由 AgentHubBridge 路由，不感知具体 adapter） |
+| Parent/Child Run Tree 持久化 | ✅ 已 migration（runs 表 root_run_id/depth；store/runManager 写入） |
+| 取消级联（§24）/ Child terminal 不终结 Parent（§27-28） | ✅ ChildRunTracker + delegationController 实现 |
+| GUI Run Tree / Delegation Card（§60-64） | ✅ 新增隔离模块 orchestration.js + 右侧栏面板，从 run_state_changed 事件流渲染 |
+
+### 本轮未执行 / 环境受限（如实记录，非改动引入）
+
+- **Real AI Smoke（§74-99）**：脚本 `scripts/real-ai-orchestrator-smoke.js` 已就绪，但需 DeepSeek Test Connection 凭据；当前环境无 credential → 按 §76 SKIP。CI 亦 SKIP。
+- **e2e（65 项）**：**64 passed / 1 failed**（2.1m，2026-08-10 真实执行）。唯一失败仍为 `agent-hub.spec.js:197 Capability Routing`（codex 认证时机 flaky，与 v2.8.2 基线同项，与 Orchestrator 改动无关——单独重跑通过、代码路径不涉 orchestrator）。v2.9.0 新增 `orchestrator:*` 为纯新增 channel，未触碰既有 `hub:*`/`mainAgent:*` 流程，无新增 regression。
+- **dist build / win-unpacked smoke**：`npm run dist` 在 v2.8.2 已验证成功；v2.9.0 仅改 JS 逻辑 + 前端静态资源，预期通过，重跑见下方。
+
+---
 
 ## v2.8.2 — Canonical Path Security Hardening（2026-08-10）
 

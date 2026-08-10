@@ -384,3 +384,20 @@ pre.preview { max-height: 60vh; overflow: auto; }
 .rtl.tl-ok .rtl-ico { color: var(--green); }
 .rtl.tl-fail .rtl-ico { color: var(--red); }
 .rtl.tl-repair .rtl-ico { color: var(--yellow); }
+
+/* v2.9.0 — Orchestration Run Tree / Delegation Card */
+#orchestration-list { font-size: 12px; line-height: 1.5; }
+.orch-empty { color: var(--text-dim); padding: 8px 0; }
+.orch-line { white-space: pre; color: var(--text); font-family: ui-monospace, Menlo, Consolas, monospace; }
+.orch-root > b { color: var(--accent, #4aa3ff); }
+.orch-child > b { color: var(--text); }
+.orch-status { color: var(--text-dim); margin-left: 4px; }
+.orch-cards { margin-top: 10px; display: flex; flex-direction: column; gap: 8px; }
+.orch-card { border: 1px solid var(--border, #2a2f3a); border-radius: 6px; padding: 8px; background: var(--surface-2, #161a22); }
+.orch-card-row { display: flex; gap: 6px; }
+.orch-k { color: var(--text-dim); flex: none; width: 56px; }
+.orch-v { color: var(--text); word-break: break-word; }
+.orch-card-actions { margin-top: 6px; display: flex; gap: 6px; }
+.orch-btn { font-size: 11px; padding: 2px 10px; border-radius: 4px; border: 1px solid var(--border, #2a2f3a); background: var(--surface-3, #1d222c); color: var(--text); cursor: pointer; }
+.orch-btn.danger { color: #ff6b6b; border-color: #5a2a2a; }
+.orch-btn:disabled { opacity: 0.4; cursor: default; }

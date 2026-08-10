@@ -113,9 +113,14 @@ async function runCodingFixture(manager, root) {
 
 async function main() {
   const root = path.resolve(__dirname, '..');
+  // The runtime download cache is intentionally restored by CI, but Cline's
+  // mutable session/database state must never be restored across workflow
+  // runs. A per-process data directory keeps the real ClineCore smoke test
+  // deterministic and also exercises clean first-run initialization.
+  const runtimeDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'adp-cline-runtime-data-'));
   const manager = new ClineSidecarManager({
     runtimeRoot: path.join(root, 'build-runtime', 'cline-runtime'),
-    dataDir: path.join(root, '.cache', 'cline-runtime', 'smoke-data')
+    dataDir: runtimeDataDir
   });
   try {
     const probe = await manager.probe(root);
@@ -126,7 +131,11 @@ async function main() {
     await runCodingFixture(manager, root);
   } finally {
     const outcome = await manager.shutdown();
-    if (!outcome.ok) throw new Error(`Cline runtime did not shut down cleanly: ${outcome.error || 'unknown error'}`);
+    try {
+      if (!outcome.ok) throw new Error(`Cline runtime did not shut down cleanly: ${outcome.error || 'unknown error'}`);
+    } finally {
+      fs.rmSync(runtimeDataDir, { recursive: true, force: true });
+    }
   }
 }
 

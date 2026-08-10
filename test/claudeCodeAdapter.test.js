@@ -857,12 +857,12 @@ test('emit 监听器抛错不得影响 Run（宿主 UI 崩了不能拖垮执行�
 // ===========================================================================
 
 /** 跑一次 SDK Run，并在流中触发一次 canUseTool 审批。 */
-async function runWithPermission({ tool = 'Bash', task = {}, contextExtra = {}, adapterConfig = {} } = {}) {
+async function runWithPermission({ tool = 'Bash', task = {}, contextExtra = {}, adapterConfig = {}, command = 'ls' } = {}) {
   let decision;
   const sdk = fakeSdk({
     messages: [
       INIT_MSG,
-      async (rec) => { decision = await rec.options.canUseTool(tool, { command: 'ls' }, { toolUseID: 'tu-1' }); return null; },
+      async (rec) => { decision = await rec.options.canUseTool(tool, { command }, { toolUseID: 'tu-1' }); return null; },
       RESULT_OK
     ]
   });
@@ -874,10 +874,15 @@ async function runWithPermission({ tool = 'Bash', task = {}, contextExtra = {}, 
   return { decision: () => decision, c };
 }
 
-test('canUseTool：没有审批通道时缺省 deny（spec §36 —— 无人在场绝不自动放行）', async () => {
-  const { decision } = await runWithPermission({ tool: 'Bash' });
+test('canUseTool：危险命令无审批通道时 fail-closed 拒绝（spec §26/§76 —— 无人在场不自动放行）', async () => {
+  const { decision } = await runWithPermission({ tool: 'Bash', command: 'rm -rf /' });
   assert.strictEqual(decision().behavior, 'deny');
-  assert.match(decision().message, /无可用的审批通道/);
+  assert.match(decision().message, /默认拒绝|无 GUI/);
+});
+
+test('canUseTool：LOW 风险命令无审批通道时按 §26 自动放行（allow_once）', async () => {
+  const { decision } = await runWithPermission({ tool: 'Bash', command: 'git status' });
+  assert.strictEqual(decision().behavior, 'allow');
 });
 
 test('canUseTool：只读父 Run 下的 Bash 在 Broker 层就被拒，根本不惊动用户', async () => {

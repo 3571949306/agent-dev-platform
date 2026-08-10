@@ -34,6 +34,28 @@ const HEALTH_STATE = {
   DISABLED: 'disabled'
 };
 
+/**
+ * Agent 验证等级。与 HEALTH_STATE 不同：Health 表示运行时状态，Verification 表示实际验证深度。两者禁止混用 (spec §45)。
+ *
+ * 7 级偏序（spec §39）——从低到高：
+ *   NOT_VERIFIED              — 未验证（默认值，不可路由）
+ *   IMPLEMENTATION_VERIFIED   — 实现级：已确认 Agent 实现 / 代码存在
+ *   FIXTURE_VERIFIED          — Fixture 级：通过离线 fixture 测试
+ *   PACKAGED_VERIFIED         — 打包级：SDK / 二进制已随应用打包
+ *   LOCAL_DETECTION_VERIFIED  — 本地检测级：可执行文件 --version 成功
+ *   REAL_PROTOCOL_VERIFIED    — 真实协议级：真实 initialize / session / prompt 交互成功
+ *   REAL_AGENT_TASK_VERIFIED  — 真实任务级：真实 Agent 任务端到端完成
+ */
+const VERIFICATION_LEVEL = {
+  NOT_VERIFIED: 'not_verified',
+  IMPLEMENTATION_VERIFIED: 'implementation_verified',
+  FIXTURE_VERIFIED: 'fixture_verified',
+  PACKAGED_VERIFIED: 'packaged_verified',
+  LOCAL_DETECTION_VERIFIED: 'local_detection_verified',
+  REAL_PROTOCOL_VERIFIED: 'real_protocol_verified',
+  REAL_AGENT_TASK_VERIFIED: 'real_agent_task_verified'
+};
+
 /** 单次 Run 生命周期状态。终态：completed / failed / cancelled / timeout / unavailable。 */
 const LIFECYCLE = {
   IDLE: 'idle',
@@ -122,6 +144,7 @@ const AGENT_EVENT = {
 module.exports = {
   TRANSPORT,
   HEALTH_STATE,
+  VERIFICATION_LEVEL,
   LIFECYCLE,
   ERROR_CODE,
   AGENT_EVENT

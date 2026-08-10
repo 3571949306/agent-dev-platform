@@ -39,6 +39,8 @@ const { createStructuredStreamDecoder } = require('../runtime/structuredStreamDe
 const { createCliProcessSupervisor, buildEnvAllowlist } = require('../runtime/cliProcessSupervisor');
 const { createExternalAgentSessionManager } = require('../session/externalAgentSessionManager');
 const permissionBroker = require('../protocols/acp/permissionBroker');
+const { classifyRisk } = require('../../security/permissionRiskClassifier');
+const permissionAudit = require('../../security/permissionAudit');
 const { AUTH_STATE, AUTH_MODE } = require('../protocols/acp/authBroker');
 const { resolveCliInPath } = require('../../services/externalAgents');
 
@@ -580,33 +582,49 @@ class ClaudeCodeAgentAdapter extends BaseAgentAdapter {
       }
     );
 
+    const projectRoot = task.cwd || (context && context.cwd) || null;
+    const commandText = typeof input === 'string' ? input
+      : (input && (input.command || input.cmd || input.prompt || '')) || (opts && opts.decisionReason) || '';
+    const riskInfo = classifyRisk({ command: commandText, cwd: projectRoot, projectRoot }, operation, projectRoot);
+    const resolver = this.permissionResolver || (context && context.onPermission);
+    const hasResolver = typeof resolver === 'function';
+    const decision = permissionBroker.decidePermission(evaluation, riskInfo, { hasResolver });
+
     this._emit(context, AGENT_EVENT.PERMISSION_REQUIRED, {
       runId, agentId: this.id, tool: toolName, operation,
-      granted: evaluation.granted, reason: evaluation.reason
+      granted: evaluation.granted, reason: evaluation.reason,
+      risk: riskInfo.risk, riskReasons: riskInfo.reasons, decisionSource: decision.decisionSource
+    });
+
+    // v2.8.1 — 登记权限决策审计（spec §31/§32/§78）：含风险与决策来源，命令已脱敏。
+    const finalize = (granted, source) => permissionAudit.log({
+      runId, agentId: this.id, risk: riskInfo.risk, operation, decision: granted, decisionSource: source, command: commandText
     });
 
     if (!evaluation.granted) {
+      finalize(false, evaluation.reason);
       return { behavior: 'deny', message: `平台权限策略拒绝：${evaluation.reason || operation}` };
     }
-
-    const resolver = this.permissionResolver || (context && context.onPermission);
-    if (typeof resolver !== 'function') {
-      // 没有用户在场 → 不放行（spec §36：危险操作不得自动放行）
-      return { behavior: 'deny', message: '无可用的审批通道，默认拒绝' };
+    if (!hasResolver) {
+      // 没有用户在场 → 按风险 fail-closed（§26），不默认放行危险操作。
+      finalize(decision.granted, decision.decisionSource);
+      if (decision.granted) return { behavior: 'allow' };
+      return { behavior: 'deny', message: `无 GUI 审批通道且风险等级为 ${riskInfo.risk}，默认拒绝（spec §26）` };
     }
     try {
-      const decision = await resolver({
+      const userDecision = await resolver({
         kind: classifyTool(toolName), tool: toolName, operation,
         params: input, runId, agentId: this.id,
-        toolUseId: opts && opts.toolUseID
+        toolUseId: opts && opts.toolUseID,
+        risk: riskInfo.risk, riskReasons: riskInfo.reasons
       });
-      if (decision === true || decision === 'accept' || decision === 'approved' || decision === 'allow') {
-        return { behavior: 'allow' };
+      if (userDecision === true || userDecision === 'accept' || userDecision === 'approved' || userDecision === 'allow') {
+        finalize(true, 'USER'); return { behavior: 'allow' };
       }
-      if (decision && typeof decision === 'object' && decision.behavior) return decision;
-      return { behavior: 'deny', message: '用户拒绝了该操作' };
+      if (userDecision && typeof userDecision === 'object' && userDecision.behavior) { finalize(userDecision.behavior !== 'deny', 'USER'); return userDecision; }
+      finalize(false, 'USER'); return { behavior: 'deny', message: '用户拒绝了该操作' };
     } catch (e) {
-      return { behavior: 'deny', message: `审批失败，默认拒绝: ${e && e.message}` };
+      finalize(false, 'USER'); return { behavior: 'deny', message: `审批失败，默认拒绝: ${e && e.message}` };
     }
   }
 

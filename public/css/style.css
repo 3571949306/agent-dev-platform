@@ -258,6 +258,18 @@ pre.preview { max-height: 60vh; overflow: auto; }
 .perm-args { background: #0a0d12; border: 1px solid var(--border); border-radius: 6px; padding: 8px; font-family: var(--mono); font-size: 11px; max-height: 220px; overflow: auto; white-space: pre-wrap; word-break: break-all; }
 .perm-opts { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
 .perm-opts .btn { flex: 1; min-width: 110px; }
+/* v2.8.1 §29/§30 — 风险等级、判定原因与命令原文 */
+.perm-risk { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; border-radius: 6px; padding: 6px 10px; margin-bottom: 8px; font-size: 12px; border: 1px solid var(--border); }
+.perm-risk-badge { font-weight: 700; letter-spacing: .3px; }
+.perm-risk-impact { color: var(--text-dim); }
+.perm-risk.risk-low { background: rgba(63,185,80,.10); border-color: rgba(63,185,80,.35); color: #7ee787; }
+.perm-risk.risk-medium { background: rgba(210,153,34,.10); border-color: rgba(210,153,34,.35); color: #e3c07b; }
+.perm-risk.risk-high { background: rgba(219,109,40,.12); border-color: rgba(219,109,40,.40); color: #ffa657; }
+.perm-risk.risk-critical { background: rgba(248,81,73,.12); border-color: rgba(248,81,73,.45); color: #ff7b72; }
+.perm-sec-label { font-size: 11px; color: var(--text-dim); margin: 8px 0 4px; }
+.perm-cmd { background: #0a0d12; border: 1px solid var(--border); border-left: 3px solid var(--accent); border-radius: 6px; padding: 8px 10px; font-family: var(--mono); font-size: 12px; color: var(--text); max-height: 180px; overflow: auto; white-space: pre-wrap; word-break: break-all; }
+.perm-reasons { margin: 8px 0 0; padding-left: 18px; font-size: 11px; color: var(--text-dim); }
+.perm-reasons li { margin: 2px 0; }
 
 /* ---------- toast ---------- */
 #toast { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%) translateY(20px); background: var(--bg3); border: 1px solid var(--border); padding: 9px 16px; border-radius: 8px; font-size: 12px; opacity: 0; pointer-events: none; transition: .25s; z-index: 300; max-width: 70vw; }
@@ -300,6 +312,13 @@ pre.preview { max-height: 60vh; overflow: auto; }
 .acard-h { display: flex; align-items: center; gap: 8px; }
 .acard-meta { display: flex; flex-wrap: wrap; gap: 8px; font-size: 11px; color: var(--text-dim); }
 .acard-f { display: flex; gap: 6px; margin-top: auto; padding-top: 6px; }
+/* v2.8.1 §44/§82 — 验证级别的分维度明细（与 Health 视觉上区分开） */
+.ver-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 2px 12px; margin-top: 4px; padding: 6px 8px; border: 1px dashed var(--border); border-radius: 6px; }
+.ver-row { display: flex; justify-content: space-between; gap: 8px; font-size: 11px; }
+.ver-k { color: var(--text-dim); }
+.ver-v { font-family: var(--mono); }
+.ver-v.ok { color: #7ee787; }
+.ver-v.no { color: var(--text-dim); }
 
 @media (max-width: 1200px) {
   #right { display: none; }

@@ -556,6 +556,15 @@ const audit = {
   },
   list(limit) { return db().prepare('SELECT * FROM permissions_audit ORDER BY time DESC LIMIT ?').all(limit || 200); }
 };
+const permissionDecisions = {
+  record({ runId, agentId, risk, operation, decision, decisionSource, command } = {}) {
+    const id = uuid();
+    db().prepare('INSERT INTO permission_decisions (id,time,run_id,agent_id,risk,operation,decision,decision_source,command) VALUES (?,?,?,?,?,?,?,?,?)')
+      .run(id, now(), runId || '', agentId || '', risk || '', operation || '', decision || '', decisionSource || '', command || '');
+    return id;
+  },
+  list(limit) { return db().prepare('SELECT * FROM permission_decisions ORDER BY time DESC LIMIT ?').all(limit || 200); }
+};
 
 // ---------- settings ----------
 const settings = {
@@ -776,6 +785,6 @@ module.exports = {
   db, init: dbm.initDb, getDb: dbm.getDb,
   projects, connections, models, prompts, skills, agents, externalAgents,
   conversations, messages, events, tasks, runs, agentMessages, tools, mcpServers,
-  memories, checkpoints, fileChanges, usage, modelCalls, permissionGrants, audit, settings, agentPrefs, extAgentConfigs,
+  memories, checkpoints, fileChanges, usage, modelCalls, permissionGrants, audit, permissionDecisions, settings, agentPrefs, extAgentConfigs,
   externalAgentSessions, externalAgentAuthStates, migrateFromJson
 };

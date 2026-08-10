@@ -46,3 +46,36 @@ This matrix pins the sources used for the v2.7.3 Cline integration and the v2.8.
 - claude-agent-acp：https://github.com/agentclientprotocol/claude-agent-acp
 
 The `.research/cline-upstream` and `.research/upstream` checkouts are intentionally ignored by git and are not distributed.
+
+## v2.8.1 — Upstream re-audit（spec §63）
+
+**Re-audit date:** 2026-08-10
+**Method:** 对 `.research/upstream/` 下每个本地快照执行 `git rev-parse HEAD` 与
+`git log -1 --format=%cs`，逐仓库与上表 v2.8.0 记录的 pin 比对。
+
+| Repository | Pinned commit (v2.8.0) | Re-audited HEAD (2026-08-10) | Snapshot last commit date | Drift |
+| --- | --- | --- | --- | --- |
+| agent-client-protocol（ACP） | `e388d69b640060bcdd2b5449f01e1bb2b2a7d882` | `e388d69b640060bcdd2b5449f01e1bb2b2a7d882` | 2026-08-09 | 无 |
+| typescript-sdk（ACP TS SDK） | `e1054d0122e844cca9f1016a598a1da06f78ccef` | `e1054d0122e844cca9f1016a598a1da06f78ccef` | 2026-08-08 | 无 |
+| registry（ACP Registry） | `2ae27530cd78604cc468c785e939a5a0a8894611` | `2ae27530cd78604cc468c785e939a5a0a8894611` | 2026-08-10 | 无 |
+| codex | `21aa552e8727c03189d0f7d18bbd6e7583e88f88` | `21aa552e8727c03189d0f7d18bbd6e7583e88f88` | 2026-08-10 | 无 |
+| codex-acp | `9edc92458504a9653f539f2a515f59e4a95796a7` | `9edc92458504a9653f539f2a515f59e4a95796a7` | 2026-08-09 | 无 |
+| claude-code | `2bb60696142b493eafaeacfe00eac51d16c50c4f` | `2bb60696142b493eafaeacfe00eac51d16c50c4f` | 2026-08-08 | 无 |
+| claude-agent-sdk-typescript | `d13c50c54d591cb2355672c8259fbb6e159687f9` | `d13c50c54d591cb2355672c8259fbb6e159687f9` | 2026-08-08 | 无 |
+| claude-agent-acp | `3df1ede89f217312bc237124dc1eccc10c860f99` | `3df1ede89f217312bc237124dc1eccc10c860f99` | 2026-08-09 | 无 |
+
+**结论：8/8 仓库 pin 未漂移。** v2.8.1 未改动任何上游协议映射，
+`src/agents/protocols/acp/constants.js` 的 wire v1 常量层无需重新转写。
+
+### 本机 CLI 取证（re-audit 时实测）
+
+| CLI | 本机检测结果 | 用途 |
+| --- | --- | --- |
+| `claude` | **2.1.220 (Claude Code)** — 已安装 | Claude Code 集成的 local detection 证据来源 |
+| `codex` | **未安装** | 因此 Codex 适配器在本机最高只能达到 `FIXTURE_VERIFIED`，不得声明 local detection（见 `src/agents/verification/agentVerification.js`） |
+| `cline` | 未安装（不需要——走内置 sidecar，不依赖全局 CLI） | — |
+| `opencode` | 未安装 | 同 Codex 规则 |
+
+> Claude Code 为 **Anthropic Commercial Terms（非 OSS）**，本轮同样只做 flag/文档取证，
+> 不 vendor、不再分发。上表中的 `2.1.220` 是本机 `claude --version` 的真实输出，
+> 不代表上游最新发布版本。

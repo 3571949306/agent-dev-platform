@@ -1,5 +1,59 @@
 # Changelog
 
+## v2.8.1 — 2026-08-10
+
+> Runtime Truthfulness & Permission Hardening：外部 Agent 审批进 GUI、Cline 权限统一入口、
+> Verification Level 单一真相源、测试与依赖审计诚实化。所有数字均来自真实执行，无编造。
+
+### 一、外部 Agent GUI 审批通道（§27-§30）
+
+* 新增 `requestExternalAgentPermission` IPC 处理器：Codex / Claude Code 的 HIGH / CRITICAL
+  权限请求不再无脑 fail-closed，而是弹出 GUI 审批（风险档位 / 原始命令 / 判定原因 / cwd 全展示）。
+* 平台侧强制 `ranges:['once']`（§28）：外部 Agent 只能拿到"仅本次允许"，平台永不代选 allow_always。
+* `chat.js` 权限弹窗重写：风险徽章 + 影响说明 + 独立高亮命令原文（§30，绝不执行 HTML）+ 判定原因 +
+  工作目录 + 完整参数（4000 字上限）；所有动态值均转义。
+
+### 二、Verification Level 单一真相源（§39-§45/§82）
+
+* 新建 `src/agents/verification/`：`verificationLevel.js`（7 级偏序 + isClaimAllowed 声明约束）、
+  `verificationRegistry.js`（证据登记 / 脱敏 / 等级判定）、`agentVerification.js`（Agent 画像）。
+* 禁止各 Adapter / GUI 自由书写 `verified / working / real`；维度文案固定枚举。
+* Agent Center 三维度分离：运行（Health）≠ 认证 ≠ 验证级别；Health 绿绝不抬升验证等级。
+* 新增 `hub:verification` IPC 与 `test/agentVerification.test.js`（8 用例，含未安装/仅 --version/
+  Health 不抬级/sidecar 真握手/凭据不入证据等诚实性断言）。
+
+### 三、Cline 权限统一入口（§37）
+
+* `clineAgentAdapter._resolveAllowedScopes` 接入统一 Permission Broker：此前直接透传
+  allowedScopes、`task.readOnly` 被完全忽略；现在每个 scope 映射为 broker operation 逐个
+  evaluate，只读父 Run 的 write/terminal/network 全部剥离，未知 scope fail-closed。
+* 不重写 Cline Runtime（sidecar 协议无同步回问通道），权限中介粒度保持 scope-level，
+  命令级风险分级对 Cline 不可用（如实记录，不伪造）。
+
+### 四、依赖审计诚实化（§52-§57/§100）
+
+* 三路审计：Root production = 0；Root dev/build = 13（12 high + 1 critical，build-only，
+  `electron` 逐条评估为唯一 runtime exposure 项）；**Bundled Cline sidecar production = 19**
+  （1 high / 15 moderate / 3 low）。
+* 明确 `Remaining Advisories` 不是 0（§54）；`@cline/sdk` / `@cline/core` / OTEL core
+  无上游修复，记 `accepted upstream dependency advisory`（§56），不强行 override 破坏
+  已验证的 SDK 依赖闭包；OTEL 链经 `SAFE_ENV_KEYS` 白名单（无任何 `OTEL_*` 键）阻断外部导出。
+* 重写 `docs/SECURITY_DEPENDENCY_AUDIT.md`；纠正 v2.5.1 遗留的 `Production-impacting: 0` 错误结论。
+
+### 五、文档与测试历史（§46-§51/§63/§97-§99）
+
+* `docs/TEST_REPORT.md` 头部改为 v2.8.1，加入 v2.8.0 与 v2.7.3 历史节；用 git worktree + Junction
+  对精确基线复算：v2.8.0 = 1345/1344/0/1（与官方记录一致），v2.7.3 官方 943 vs 复算 942
+  （如实记录偏差并注明 Documentation correction）。
+* `docs/UPSTREAM_REFERENCE_MATRIX.md` 增补 v2.8.1 重新核对：`.research/upstream` 8/8 仓库
+  pin 无漂移；本机 CLI 取证 claude 2.1.220 / codex 未安装。
+* 新增 `docs/RUNTIME_VERIFICATION_LEVELS.md`。
+
+### 六、测试
+
+* 全量：unit **1402 tests（1401 PASS / 0 FAIL / 1 SKIP）**；E2E **65 PASS / 0 FAIL**；
+  相对 v2.8.0（1345）unit 增量 +57。
+
 ## v2.8.0 — 2026-08-10
 
 > Universal External Agent Runtime：Main Agent → Agent Router → Agent Hub → External Agent Runtime（ACP 优先 / Codex 深度集成 / Claude Code 集成）。不提取用户登录凭据、权限取交集、终态 exactly-once。

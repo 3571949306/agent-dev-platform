@@ -111,3 +111,54 @@ jobs:
 
       - name: Run real ClineCore fixture without a paid provider
         run: npm run integration-smoke
+
+  dist:
+    name: Packaging build (electron-builder)
+    runs-on: windows-latest
+    needs: [smoke, e2e, integration]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Cache pinned Cline Node runtime
+        uses: actions/cache@v4
+        with:
+          path: .cache/cline-runtime
+          key: cline-runtime-${{ runner.os }}-${{ hashFiles('sidecars/cline-runtime/runtime-manifest.json', 'sidecars/cline-runtime/package-lock.json') }}
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Rebuild native modules for Electron ABI
+        run: npm run rebuild
+
+      - name: Build distributable (NSIS + portable)
+        # 验证打包链路不回归（predist 会先 prepare-cline-runtime）。
+        # 不发布产物（--publish never），仅作为 CI gate；产物不作为下游 smoke 输入。
+        run: npm run dist
+
+  record-conclusion:
+    name: Record CI conclusion (truthfulness)
+    # CI 真实性（spec §105）：记录 workflow 与每个 job 的 conclusion。
+    # 若无此 CI 记录可访问，对应结果应视为 "NOT INDEPENDENTLY VERIFIED"。
+    runs-on: ubuntu-latest
+    if: always()
+    needs: [test, smoke, e2e, integration, dist]
+    steps:
+      - name: Record workflow/job/conclusion
+        shell: bash
+        run: |
+          echo "workflow=${{ github.workflow }}"
+          echo "run_id=${{ github.run_id }}"
+          echo "run_attempt=${{ github.run_attempt }}"
+          echo "test=${{ needs.test.result }}"
+          echo "smoke=${{ needs.smoke.result }}"
+          echo "e2e=${{ needs.e2e.result }}"
+          echo "integration=${{ needs.integration.result }}"
+          echo "dist=${{ needs.dist.result }}"

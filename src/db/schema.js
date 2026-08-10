@@ -293,6 +293,20 @@ CREATE TABLE IF NOT EXISTS permissions_audit (
   result TEXT
 );
 
+-- v2.8.1 — 统一权限决策审计（spec §31/§32/§78）。新建表，不改动旧表，避免迁移冲突。
+-- 记录每一次权限裁决的 runId / agentId / 风险等级 / 操作 / 决策 / 决策来源 / 命令（已脱敏）。
+CREATE TABLE IF NOT EXISTS permission_decisions (
+  id TEXT PRIMARY KEY,
+  time TEXT,
+  run_id TEXT,
+  agent_id TEXT,
+  risk TEXT,
+  operation TEXT,
+  decision TEXT,
+  decision_source TEXT,
+  command TEXT
+);
+
 CREATE TABLE IF NOT EXISTS settings (
   key TEXT PRIMARY KEY,
   value_json TEXT

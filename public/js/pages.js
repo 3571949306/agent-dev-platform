@@ -1304,6 +1304,17 @@ function hubHealthClass(status) {
   return '';
 }
 
+/**
+ * v2.8.1 §44/§45 — 验证级别 → chip 配色。
+ * 刻意与 Health 用不同判据：只有「真实协议 / 真实任务」才给绿色，
+ * 静态实现级 / Fixture 级一律中性，避免用户误以为跑通过真东西。
+ */
+function hubVerificationClass(level) {
+  if (level === 'real_agent_task_verified' || level === 'real_protocol_verified') return 'ok';
+  if (level === 'not_verified') return 'bad';
+  return '';
+}
+
 /** 健康状态 → 展示文本 */
 function hubHealthText(status) {
   return ({ healthy: '健康', degraded: '降级', unavailable: '不可用', checking: '检查中…', disabled: '已禁用', unknown: '未知' })[status] || '未知';
@@ -1346,10 +1357,12 @@ async function loadHubCards(body) {
   let connections = [];
   let clineConfig = {};
   let sessionData = { sessions: [], authStates: [] };
+  let verification = {};
   try {
-    [available, manifests, connections, clineConfig, sessionData] = await Promise.all([
+    [available, manifests, connections, clineConfig, sessionData, verification] = await Promise.all([
       api.hubAvailable(), api.hubManifests(), api.connections(), api.extcfgGet('cline'),
-      (typeof api.hubSessions === 'function' ? api.hubSessions() : Promise.resolve({ sessions: [], authStates: [] }))
+      (typeof api.hubSessions === 'function' ? api.hubSessions() : Promise.resolve({ sessions: [], authStates: [] })),
+      (typeof api.hubVerification === 'function' ? api.hubVerification().catch(() => ({})) : Promise.resolve({}))
     ]);
   } catch (e) {
     cardsEl.innerHTML = `<div class="muted small">注册表不可用：${esc(e.message)}</div>`;
@@ -1393,9 +1406,21 @@ async function loadHubCards(body) {
           <div><b>Health:</b> ${esc(hubHealthText(healthStatus))}${clineHealth.detail ? ` — ${esc(clineHealth.detail)}` : ''}</div>
         </div>`
       : '';
+    // v2.8.1 §44/§45/§82 — 运行状态 / 认证状态 / 验证级别三者分开展示，
+    // 避免一个绿色 Healthy 让用户以为所有东西都真跑过。
+    const ver = (verification && verification[m.id]) || null;
+    const verChip = ver
+      ? `<span class="chip ${hubVerificationClass(ver.level)}" title="验证级别（≠ 运行状态）">验证：${esc(ver.levelLabel || '')}</span>`
+      : '';
+    const verRows = ver && Array.isArray(ver.dimensions) && ver.dimensions.length
+      ? `<div class="ver-grid">${ver.dimensions.map(d =>
+          `<div class="ver-row"><span class="ver-k">${esc(d.label)}</span><span class="ver-v ${d.value === '已验证' || d.value === '是' ? 'ok' : (d.value === '未验证' || d.value === '未检测到' ? 'no' : '')}">${esc(d.value)}</span></div>`
+        ).join('')}</div>`
+      : '';
     return `<div class="acard" data-hub-id="${esc(m.id)}">
-      <div class="acard-h"><b>${name}</b><span class="chip">${transport}</span><span class="chip ${hubHealthClass(healthStatus)}">${esc(hubHealthText(healthStatus))}</span>${hubAuthChip(a.auth)}</div>
+      <div class="acard-h"><b>${name}</b><span class="chip">${transport}</span><span class="chip ${hubHealthClass(healthStatus)}">运行：${esc(hubHealthText(healthStatus))}</span>${hubAuthChip(a.auth)}${verChip}</div>
       <div class="acard-meta">${caps.map(c => `<span class="chip">${esc(hubCapLabel(c))}</span>`).join('') || '<span class="muted small">无能力声明</span>'}</div>
+      ${verRows}
       ${a.version || a.auth || (sessionsByAgent.get(m.id) || []).length ? `
       <div class="small" style="margin-top:8px;line-height:1.55">
         ${a.version ? `<div><b>Version:</b> ${esc(a.version)}</div>` : ''}

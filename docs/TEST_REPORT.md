@@ -1,6 +1,122 @@
-# Test Report — Agent Dev Platform v2.7.3
+# Test Report — Agent Dev Platform v2.8.1
 
-## v2.7.3 — ClineCore Sidecar Runtime（2026-08-10）
+## v2.8.1 — Runtime Truthfulness & Permission Hardening（2026-08-10）
+
+> **基线：** `v2.8.0 / 60e3fc4`（Universal External Agent Runtime）。
+> **本文件不含任何编造结果**，所有断言均来源于真实执行。
+
+### 本轮单元 / 集成测试
+
+```text
+# tests 1402
+# pass 1401
+# fail 0
+# cancelled 0
+# skipped 1
+# duration_ms 86192
+```
+
+**结论：1402 / 1401 PASS，0 失败，1 跳过**（`npm test`，2026-08-10 真实执行）。
+
+- 相对 v2.8.0（1345）增量：**+57**。其中 +8 来自新验证模块
+  （`test/agentVerification.test.js`，§40/§44/§45/§82 单一真相源）、+5 来自 §37
+  Cline scope 统一 Permission Broker、其余为 permission/risk/audit/verification
+  相关测试的既有增量。
+- 完整 E2E：**65 / 65 PASS**（2.3m，GUI 权限弹窗与 Agent Center 改动无回归）。
+
+### E2E（spec §51/§100 口径）
+
+```text
+65 passed (2.3m)
+```
+
+本轮 GUI 改动（权限弹窗 / Agent Center 三维度分离）经完整 E2E 回归：65 / 65 PASS。
+（`npm run e2e` 真实输出，2026-08-10。）
+
+### 依赖审计（spec §100：三项分开报告）
+
+| 范围 | 命令 | 结果 |
+| --- | --- | --- |
+| Root production | `npm audit --omit=dev` | **0** |
+| Root dev/build | `npm audit` | **13**（12 high + 1 critical，全部 build-only，除 `electron` 需逐条评估） |
+| Bundled Cline sidecar production | `cd sidecars/cline-runtime && npm audit --omit=dev` | **19**（1 high + 15 moderate + 3 low） |
+
+**`Remaining Advisories` 不是 0**（spec §54：Root prod=0 但 Sidecar prod=19）。
+明细与逐项 mitigation 见 `docs/SECURITY_DEPENDENCY_AUDIT.md`。
+
+### CI（spec §67/§68）
+
+本轮改动尚未提交/推送，GitHub Actions 无对应 run 可核对。
+
+```text
+CI TRIGGERED — NO（改动未推送）
+INDEPENDENT VERIFICATION UNAVAILABLE
+```
+
+不写 "CI PASS"。提交推送后需在 Actions 页面核对 `ci.yml` + `windows-test.yml`
+的真实 conclusion（success / failure），方可补记。
+
+### 本轮 Release Blocker 自查（spec §101）
+
+| Blocker | 状态 |
+| --- | --- |
+| 危险 Permission 无 GUI 自动 allow | ✅ 消除 —— 外部 Agent HIGH/CRITICAL 走 GUI 弹窗（§27-§30） |
+| parent readOnly 被绕过 | ✅ 消除 —— Cline scope 下发纳入统一 Permission Broker（§37） |
+| Codex/Claude/Cline 不同危险权限规则 | ✅ 消除 —— 统一 classifier + broker（§35-§37） |
+| Verification Level 靠自由文本 | ✅ 消除 —— `agentVerification.js` 单一真相源（§39/§40/§44/§45/§82） |
+| Codex 未安装却标 Real Protocol Verified | ✅ 不成立 —— 本机未装 codex，最高只到 FIXTURE |
+| Claude 只 --version 却标 Real Agent Task Verified | ✅ 不成立 —— 无真实任务证据不升级 |
+| TEST_REPORT 仍是 v2.7.3 | ✅ 已修复（本文件头部为 v2.8.1） |
+| v2.8.0 baseline 数字写错 | ✅ 见下方 v2.8.0 节（复算一致） |
+| Root audit 0 就声称所有 production 0 | ✅ 已纠正 —— sidecar prod = 19 |
+| Sidecar audit 未执行 | ✅ 已执行 |
+| Unit FAIL / E2E FAIL | ✅ 全绿 |
+
+---
+
+## v2.8.0 — Universal External Agent Runtime（历史，spec §98/§99）
+
+**基线：** `v2.7.3 / 8450f0a`。
+**官方记录（CHANGELOG v2.8.0，2026-08-10）：**
+
+```text
+unit 1345 tests（1344 PASS / 0 FAIL / 1 SKIP）
+E2E 65 PASS / 0 FAIL
+```
+
+**2026-08-10 复算（git worktree + Junction 共享 node_modules，`npm test`）：**
+
+```text
+# tests 1345
+# pass 1344
+# fail 0
+# skipped 1
+```
+
+复算与官方记录**完全一致**（1345/1344/0/1）。
+
+### Release-to-release delta
+
+| 指标 | v2.7.3 | v2.8.0 | Delta |
+| --- | ---: | ---: | ---: |
+| Unit / integration | 943（官方记录，见下方复算说明） | 1345 | **+402** |
+| E2E | 53 | 65 | **+12** |
+
+> 说明（spec §49/§50）：release-to-release 的单元测试增量为 **+402**，不是 +46。
+> +46 是 v2.8.0 最后开发阶段（1299 → 1345）的批次增量，本仓库 CHANGELOG 未记录
+> 1299 这个中间数字，git 历史中也没有对应门禁记录，因此本报告只呈现可复算的
+> 发布级增量 +402，不虚构中间批次数字。
+
+---
+
+## v2.7.3 — ClineCore Sidecar Runtime（历史，spec §99）
+
+> **Documentation correction in v2.8.1：** v2.7.3 官方报告记录 unit 总数为
+> **943 / 942 pass / 0 fail / 1 skip**。2026-08-10 以 git worktree + Junction
+> 对精确基线 `8450f0a` 复算 `npm test`，得到 **942 / 941 pass / 0 fail / 1 skip**，
+> 少 1 个。复算环境为同一 node_modules（v2.7.3→v2.8.0 依赖零变更），未找到该
+> 差异的确定性来源（测试文件无动态注册、无 subtest）。因此保留官方 943 作为
+> v2.7.3 的 release 数字，同时如实记录复算偏差，不把任何一侧改写为"当时完全正确"。
 
 本节记录从精确基线 `v2.7.2 / cf573aba9479f8bb01f65018e27a7d15b3224357`
 升级到 v2.7.3 后的最终本地门禁。Cline 集成使用固定的 `@cline/sdk 0.0.72`、
@@ -62,6 +178,12 @@ CLINE_SIDECAR_PROCESS_COUNT_AFTER=0
   SDK provider dependency tree 中的 `undici 5.29.0`；其余主要来自 OpenTelemetry。
   `npm audit fix --package-lock-only --dry-run` 无可应用的非破坏性变更；强行跨 major
   override 会偏离已验证的 Cline SDK 依赖闭包，因此本版如实保留并列为跟踪项。
+
+> **v2.8.1 更正：** 上述 sidecar 数字为 16（15 moderate / 1 high）。2026-08-10
+> 重新审计（lockfile 未变更）为 **19**（1 high / 15 moderate / 3 low）——新增 3 项
+> low 来自 `dify-ai-provider` → `@cline/llms` → `@cline/agents` 传递链上新披露的
+> advisory。详见 `docs/SECURITY_DEPENDENCY_AUDIT.md`。
+
 - Sidecar lockfile license metadata: Apache-2.0 104、MIT 186、BSD/ISC/0BSD 等 27；
   三个 `@cline/*` 子包缺少 npm license metadata，但上游 Cline 仓库及 SDK 为
   Apache-2.0。`@jerome-benoit/sap-ai-provider` 的 package metadata 名称不准确，随包
@@ -69,7 +191,7 @@ CLINE_SIDECAR_PROCESS_COUNT_AFTER=0
 
 ---
 
-## Historical report — v2.6.0
+## v2.6.0 — Main Agent 自主编码闭环（历史）
 
 > **基线**：`v2.6.0`（基于 `v2.5.1 / commit 08fc7a5`）。
 > **本轮目标**：Main Agent 自主编码闭环 —— 实现状态机驱动的 Main Agent Runtime，让主智能体独立完成编码任务（理解需求 → 读项目 → 分析代码 → 制定计划 → 修改文件 → 运行命令 → 测试 → 错误检测 → 修复 → 输出结果），不依赖外部智能体（Codex/WorkBuddy）。
@@ -77,7 +199,7 @@ CLINE_SIDECAR_PROCESS_COUNT_AFTER=0
 
 ---
 
-## 1. 版本
+### 1. 版本
 
 | 字段 | 值 |
 | --- | --- |
@@ -87,7 +209,7 @@ CLINE_SIDECAR_PROCESS_COUNT_AFTER=0
 
 ---
 
-## 2. npm test（单元 + 集成）
+### 2. npm test（单元 + 集成）
 
 ```bash
 cd agent-dev-platform
@@ -138,7 +260,7 @@ npm test
 
 ---
 
-## 3. GUI E2E（playwright）
+### 3. GUI E2E（playwright）
 
 ```bash
 cd agent-dev-platform
@@ -177,7 +299,7 @@ Running 30 tests using 1 worker
 
 ---
 
-## 4. Smoke 测试
+### 4. Smoke 测试
 
 ```bash
 npm run smoke
@@ -189,7 +311,7 @@ SMOKE_OK
 
 ---
 
-## 5. 构建
+### 5. 构建
 
 ```bash
 npm run dist
@@ -205,7 +327,7 @@ npm run dist
 
 ---
 
-## 6. CI（GitHub Actions）
+### 6. CI（GitHub Actions）
 
 | Job | 状态 | 说明 |
 | --- | --- | --- |
@@ -217,7 +339,7 @@ npm run dist
 
 ---
 
-## 7. 已知遗留
+### 7. 已知遗留
 
 | 项 | 说明 | 风险 |
 | --- | --- | --- |

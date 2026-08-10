@@ -81,6 +81,18 @@ v2.8.0 把外部 Agent 接入升级为统一运行时：Main Agent → Agent Rou
 
 详见 [`docs/ACP_RUNTIME.md`](docs/ACP_RUNTIME.md)、[`docs/CODEX_DEEP_INTEGRATION.md`](docs/CODEX_DEEP_INTEGRATION.md)、[`docs/CLAUDE_CODE_INTEGRATION.md`](docs/CLAUDE_CODE_INTEGRATION.md)。
 
+## Runtime Truthfulness & Permission Hardening（v2.8.1）
+
+v2.8.1 把 v2.8.0 的运行时语义、安全权限、测试报告和 Release Truthfulness 修到可信。
+
+* **外部 Agent GUI 审批**：Codex / Claude Code 的 HIGH / CRITICAL 权限请求弹出 GUI（风险 / 命令原文 / 原因 / cwd），平台侧强制"仅本次允许"，永不代选 allow_always。
+* **统一 Permission Broker**：Cline 的 scope 下发同样纳入交集评估——只读父 Run 的写 / 终端 / 网络 scope 全部剥离，未知 scope fail-closed（命令级风险分级对 Cline 不可用，如实记录）。
+* **Verification Level 单一真相源**：7 级偏序 + 声明约束（未安装不可标真实协议、仅 --version 不可标真实任务、付费 provider 不消耗不升级）；Health ≠ Verification。
+* **依赖审计诚实化**：三路审计分开报告（Root prod = 0 / Root full = 13 / Sidecar prod = 19），`Remaining Advisories` 不是 0；`@cline/sdk` 闭包无上游修复，记 accepted upstream advisory。
+* **测试历史可复算**：基于精确基线 git worktree 复算 v2.8.0 = 1345/1344/0/1；v2.7.3 官方 943 与复算 942 的偏差如实记录。
+
+详见 [`docs/RUNTIME_VERIFICATION_LEVELS.md`](docs/RUNTIME_VERIFICATION_LEVELS.md)、[`docs/SECURITY_DEPENDENCY_AUDIT.md`](docs/SECURITY_DEPENDENCY_AUDIT.md)、[`docs/TEST_REPORT.md`](docs/TEST_REPORT.md)。
+
 ## ClineCore Sidecar Runtime
 
 v2.7.3 makes Cline a real coding provider. Production runs the official `@cline/sdk 0.0.72` and `ClineCore` in a separately bundled Node.js 22.23.2 sidecar. Cline receives the current canonical project root, parent-authorized tool scopes, an in-memory API credential, and a project mutation lock before it can edit or run commands.

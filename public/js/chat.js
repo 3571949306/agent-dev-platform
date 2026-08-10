@@ -906,19 +906,62 @@ const SCOPE_LABEL = {
   'mcp': '调用 MCP 工具', 'subagent': '调用子智能体'
 };
 
+/** v2.8.1 §29 — 风险等级的中文标签与后果说明（deterministic，不由模型生成）。 */
+const RISK_LABEL = { low: '低', medium: '中', high: '高', critical: '极高' };
+const RISK_IMPACT = {
+  low: '影响可控，通常只读或限于当前项目',
+  medium: '会修改项目内文件或运行本地工具',
+  high: '可能改动项目外内容、安装依赖或丢弃工作区改动',
+  critical: '可能永久丢失数据或改变系统状态，无法自动回滚'
+};
+
+/** §28 — 外部智能体只允许「仅本次」；平台不会替用户建立持久授权。 */
+const RANGE_BUTTONS = [
+  { r: 'once', text: '仅本次允许' },
+  { r: 'task', text: '本任务内允许' },
+  { r: 'project', text: '本项目内允许' },
+  { r: 'always', text: '始终允许' }
+];
+
 function askPermission(ev) {
   const label = SCOPE_LABEL[ev.scope] || ev.scope;
   const argsText = prettyJson(ev.args || {});
+  const risk = String(ev.risk || '').toLowerCase();
+  const allowed = Array.isArray(ev.ranges) && ev.ranges.length ? ev.ranges : null;
+  const buttons = RANGE_BUTTONS.filter(b => !allowed || allowed.includes(b.r));
+
+  // §29：风险等级 + 影响 + 判定原因；全部走 esc()，绝不把命令当 HTML 执行（§30）。
+  const riskBlock = risk ? `
+      <div class="perm-risk risk-${esc(risk)}">
+        <span class="perm-risk-badge">风险：${esc(RISK_LABEL[risk] || risk.toUpperCase())}</span>
+        <span class="perm-risk-impact">${esc(RISK_IMPACT[risk] || '')}</span>
+      </div>` : '';
+  const reasons = Array.isArray(ev.riskReasons) ? ev.riskReasons.filter(Boolean) : [];
+  const reasonBlock = reasons.length
+    ? `<ul class="perm-reasons">${reasons.map(r => `<li>${esc(String(r))}</li>`).join('')}</ul>`
+    : '';
+  // §30：命令原文独立展示、完整可读（长命令允许滚动，而不是截到看不懂）。
+  const cmdBlock = ev.command
+    ? `<div class="perm-sec-label">将要执行</div><pre class="perm-cmd">${esc(String(ev.command))}</pre>`
+    : '';
+  const cwdBlock = ev.cwd
+    ? `<div class="perm-tool">工作目录 <code>${esc(String(ev.cwd))}</code></div>`
+    : '';
+  const argsBlock = argsText && argsText !== '{}'
+    ? `<div class="perm-sec-label">完整参数</div><pre class="perm-args">${esc(truncate(argsText, 4000))}</pre>`
+    : '';
+
   const body = `
     <div class="perm">
       <div class="perm-title">智能体「${esc(ev.agent || '')}」请求权限：<b>${esc(label)}</b></div>
+      ${riskBlock}
+      ${cmdBlock}
+      ${reasonBlock}
       <div class="perm-tool">详细信息：工具 <code>${esc(ev.tool)}</code>　权限域 <code>${esc(ev.scope)}</code></div>
-      <pre class="perm-args">${esc(truncate(argsText, 1500))}</pre>
+      ${cwdBlock}
+      ${argsBlock}
       <div class="perm-opts">
-        <button class="btn" data-d="allow" data-r="once">仅本次允许</button>
-        <button class="btn" data-d="allow" data-r="task">本任务内允许</button>
-        <button class="btn" data-d="allow" data-r="project">本项目内允许</button>
-        <button class="btn" data-d="allow" data-r="always">始终允许</button>
+        ${buttons.map(b => `<button class="btn" data-d="allow" data-r="${b.r}">${b.text}</button>`).join('')}
         <button class="btn danger" data-d="deny">拒绝</button>
       </div>
     </div>`;

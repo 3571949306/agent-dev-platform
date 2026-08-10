@@ -270,6 +270,54 @@ function buildResponse({ granted, options } = {}) {
   return { response: buildSelectedResponse(selected.optionId), selected };
 }
 
+/**
+ * 把"策略评估结果"与"风险分类"合并成最终准许决策（spec §15/§16/§26）。
+ *
+ * 这是 Risk-Aware Permission Decision 的统一入口：运行时在拿到
+ * `broker.evaluate()` 的策略结论（交集，纯策略、不做命令启发式 —— §36）与
+ * `classifyRisk()` 的风险结论后调用本函数，得到最终 allow/deny 与决策来源。
+ *
+ * 决策表（spec §26，无 GUI resolver 时 fail-closed）：
+ *   LOW       + 策略允许 + 无 resolver → ALLOW_ONCE（POLICY_AUTO_ALLOW）
+ *   MEDIUM    + 策略允许 + 项目显式 auto-allow + 无 resolver → ALLOW_ONCE（PROJECT_POLICY）
+ *   MEDIUM    + 策略允许 + 无显式 auto 策略 + 无 resolver → DENY（RISK_FAIL_CLOSED）
+ *   HIGH      + 无 resolver → DENY（RISK_FAIL_CLOSED）
+ *   CRITICAL  + 无 resolver → DENY（RISK_FAIL_CLOSED）
+ *   任意      + 有 GUI resolver → 交给用户决定（decisionSource=USER）
+ *
+ * @param {{granted:boolean, reason:string, effectivePermission:string}} evaluation 来自 evaluate()
+ * @param {{risk:'low'|'medium'|'high'|'critical', reasons:string[]}} [riskInfo] 来自 classifyRisk()
+ * @param {object} [opts]
+ * @param {boolean} [opts.hasResolver] 是否存在 GUI resolver（有 GUI 时交给用户决定）
+ * @param {boolean} [opts.autoAllowMedium] MEDIUM 风险是否被项目/用户策略显式设为自动放行
+ * @returns {{granted:boolean, decisionSource:string}}
+ */
+function decidePermission(evaluation, riskInfo, opts = {}) {
+  const hasResolver = opts.hasResolver === true;
+  const autoAllowMedium = opts.autoAllowMedium === true;
+  const risk = (riskInfo && riskInfo.risk) || 'low';
+
+  // 策略层已拒绝（父 Run 只读 / 平台策略 / 外部 Agent 策略）→ 维持拒绝。
+  if (!evaluation || !evaluation.granted) {
+    return { granted: false, decisionSource: (evaluation && evaluation.reason) || 'POLICY_DENY' };
+  }
+
+  // 有 GUI resolver：平台不替用户做 allow/deny 选择（§28 禁止自动 allow_always）。
+  if (hasResolver) {
+    return { granted: true, decisionSource: 'USER' };
+  }
+
+  // 无 GUI resolver：fail-closed 按风险分级（§20/§21/§26）。
+  if (risk === 'critical' || risk === 'high') {
+    return { granted: false, decisionSource: 'RISK_FAIL_CLOSED' };
+  }
+  if (risk === 'medium' && !autoAllowMedium) {
+    return { granted: false, decisionSource: 'RISK_FAIL_CLOSED' };
+  }
+  // LOW，或 MEDIUM 且项目显式 auto-allow
+  return { granted: true, decisionSource: risk === 'low' ? 'POLICY_AUTO_ALLOW' : 'PROJECT_POLICY' };
+}
+
 module.exports = {
   OPERATION,
   WRITE_OPERATIONS,
@@ -278,6 +326,7 @@ module.exports = {
   isInsideRoot,
   requiresWrite,
   evaluate,
+  decidePermission,
   selectPermissionOption,
   buildCancelledResponse,
   buildSelectedResponse,

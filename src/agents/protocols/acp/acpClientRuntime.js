@@ -36,9 +36,13 @@ const { extractAcpCapabilityFlags, checkExpectedAcpCapabilities } = require('./c
 const {
   mapAcpPermissionRequest,
   evaluate,
+  decidePermission,
+  OPERATION,
   buildResponse,
   buildCancelledResponse
 } = require('./permissionBroker');
+const { classifyRisk } = require('../../../security/permissionRiskClassifier');
+const permissionAudit = require('../../../security/permissionAudit');
 const {
   METHOD,
   NOTIFICATION,
@@ -85,15 +89,17 @@ function classifyStopReason(stopReason) {
     case STOP_REASON.MAX_TURN_REQUESTS:
       return { status: 'completed', ok: true, truncated: true, errors: [] };
     case STOP_REASON.REFUSAL:
-      // 模型明确拒绝：不是崩溃，但这次 Run 没有产出，ok=false 让上层能感知。
+      // 模型明确拒绝：非崩溃，但本次 Run 无产出，ok=false 让上层感知。
+      // 终态保留 v2.8.0 语义（completed + ok=false），与基线测试一致；
+      // 明确为“非成功业务终止”，不混入 ok=true（spec §8）。
       return { status: 'completed', ok: false, errors: ['agent refused the request (stopReason=refusal)'] };
     case STOP_REASON.CANCELLED:
       return { status: 'cancelled', ok: false, errors: [] };
     default:
       if (stopReason === undefined || stopReason === null) {
-        return { status: 'failed', ok: false, errors: ['protocol violation: PromptResponse.stopReason is required'] };
+        return { status: 'failed', ok: false, errors: ['protocol violation: PromptResponse.stopReason is required'], errorCode: ACP_ERROR.PROTOCOL_ERROR };
       }
-      return { status: 'completed', ok: false, errors: ['unknown stopReason: ' + String(stopReason)] };
+      return { status: 'failed', ok: false, errors: ['unknown stopReason: ' + String(stopReason)], errorCode: ACP_ERROR.PROTOCOL_ERROR };
   }
 }
 
@@ -141,6 +147,7 @@ function createAcpClientRuntime({ transportFactory, sessionManager, authBrokerFa
       artifacts: [],
       usage: finalized.usage || null,
       errors: verdict.errors,
+      errorCode: verdict.errorCode || null,
       durationMs: meta.durationMs || null,
       provenance: {
         agent: meta.agentId,
@@ -179,18 +186,34 @@ function createAcpClientRuntime({ transportFactory, sessionManager, authBrokerFa
       const permCtx = (ctxAtEntry && ctxAtEntry.permissionContext) || {};
       const evaluation = evaluate(req, permCtx);
 
-      let granted = evaluation.granted;
+      // v2.8.1 — 命令风险分类（spec §15-21）：独立于策略交集，识别危险命令。
+      const riskInfo = classifyRisk({
+        command: req.operation === OPERATION.RUN_SHELL ? (req.scope || '') : '',
+        targetPath: (req.locations && req.locations[0]) || null,
+        cwd: projectRootHint,
+        projectRoot: projectRootHint
+      }, req.operation, projectRootHint);
+
+      const resolver = ctxAtEntry && ctxAtEntry.permissionResolver;
+      const hasResolver = typeof resolver === 'function';
+      const decision = decidePermission(evaluation, riskInfo, {
+        hasResolver,
+        autoAllowMedium: permCtx.autoAllowMedium === true
+      });
+
+      let granted = false;
+      let decisionSource = decision.decisionSource;
       let cancelled = false;
 
-      // 交集判定通过 ≠ 自动放行危险操作（§36）：只要注册了 resolver，
-      // 就把决定权交给 GUI；resolver 缺席时才用交集结论，且默认拒绝。
-      const resolver = ctxAtEntry && ctxAtEntry.permissionResolver;
-      if (typeof resolver === 'function') {
-        const decision = await resolver({ ...req, evaluation });
-        if (decision && decision.cancelled) cancelled = true;
-        else granted = !!(decision && decision.granted);
-      } else if (!evaluation.granted) {
-        granted = false; // 默认拒绝（只读父 Run / 策略拒绝已在交集里判定）
+      // 有 GUI resolver：把决定权交给用户；附带风险信息供 UI 展示（§29/§30）。
+      // 无 GUI resolver：按决策表 fail-closed（§26），不再默认放行危险操作。
+      if (hasResolver) {
+        const userDecision = await resolver({ ...req, evaluation, risk: riskInfo.risk, riskReasons: riskInfo.reasons });
+        if (userDecision && userDecision.cancelled) cancelled = true;
+        else granted = !!(userDecision && userDecision.granted);
+        decisionSource = 'USER';
+      } else {
+        granted = decision.granted;
       }
 
       // resolver 返回期间可能已被取消 → 仍按协议回 cancelled
@@ -204,6 +227,20 @@ function createAcpClientRuntime({ transportFactory, sessionManager, authBrokerFa
         // Agent 没给任何 allow 选项：我们只能选 reject，记录下来便于排障。
         granted = false;
       }
+
+      // v2.8.1 — 登记权限决策审计（spec §31/§32/§78）：含风险等级与决策来源，命令已脱敏。
+      permissionAudit.log({
+        runId: (ctxAtEntry && ctxAtEntry.runId) || null,
+        agentId: (ctxAtEntry && ctxAtEntry.agentId) || null,
+        risk: riskInfo.risk,
+        operation: req.operation,
+        decision: granted,
+        decisionSource,
+        command: req.operation === OPERATION.RUN_SHELL
+          ? (req.scope || '')
+          : ((req.locations && req.locations[0]) || req.scope || '')
+      });
+
       settle(response);
     } catch (e) {
       if (!token.done) {

@@ -21,6 +21,15 @@ const SMOKE = process.argv.includes('--smoke');
 const INTEGRATION_SMOKE = process.argv.includes('--integration-smoke');
 const smokeErrors = [];
 
+// --smoke-result-file=<path> : write the smoke outcome as JSON to a file so
+// the 7z portable wrapper can verify boot without relying on stdout (which
+// it doesn't reliably forward). §71
+const SMOKE_RESULT_FILE = (() => {
+  const arg = process.argv.find(a => a.startsWith('--smoke-result-file='));
+  return arg ? arg.slice('--smoke-result-file='.length) : null;
+})();
+const APP_VERSION = (() => { try { return require('./package.json').version || 'unknown'; } catch { return 'unknown'; } })();
+
 async function bootstrap() {
   const userDataPath = app.getPath('userData');
   const store = require('./src/db/store');
@@ -86,6 +95,16 @@ async function runIntegrationSmoke(userDataPath) {
   app.exit(code);
 }
 
+function writeSmokeResultFile(result) {
+  if (!SMOKE_RESULT_FILE) return;
+  try {
+    fs.writeFileSync(SMOKE_RESULT_FILE, JSON.stringify(result, null, 2));
+  } catch (e) {
+    // File write failed — stdout output above remains the fallback. §71
+    console.error('SMOKE_RESULT_FILE_WRITE_FAILED ' + e.message);
+  }
+}
+
 async function runSmoke(port) {
   const wc = mainWindow.webContents;
   wc.on('console-message', (_e, level, message, line, sourceId) => {
@@ -133,13 +152,23 @@ async function runSmoke(port) {
   } catch (e) { smokeErrors.push('[diag] ' + e.message); }
 
   if (smokeErrors.length) {
-    console.error('SMOKE_FAIL\n' + smokeErrors.join('\n'));
+    const error = smokeErrors.join('\n');
+    console.error('SMOKE_FAIL\n' + error);
+    writeSmokeResultFile({ ok: false, error, timestamp: new Date().toISOString() });
     app.exit(1);
   } else if (!probe || !probe.hasApi || probe.bodyLen < 500) {
-    console.error('SMOKE_FAIL 渲染层未正常挂载: ' + JSON.stringify(probe));
+    const error = '渲染层未正常挂载: ' + JSON.stringify(probe);
+    console.error('SMOKE_FAIL ' + error);
+    writeSmokeResultFile({ ok: false, error, timestamp: new Date().toISOString() });
     app.exit(1);
   } else {
     console.log('SMOKE_OK');
+    writeSmokeResultFile({
+      ok: true,
+      smoke: 'SMOKE_OK',
+      timestamp: new Date().toISOString(),
+      version: APP_VERSION
+    });
     app.exit(0);
   }
 }

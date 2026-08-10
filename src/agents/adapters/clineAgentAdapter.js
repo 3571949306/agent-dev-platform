@@ -34,9 +34,28 @@ const { ClineSidecarManager, canonicalDirectory } = require('../integrations/cli
 const { mapConnection } = require('../integrations/cline/configMapper');
 const { createExternalAgentTerminalGate } = require('../runtime/externalTerminalGate');
 const { buildExternalResult, sanitizeErrors, sanitizeRaw } = require('../runtime/resultSanitizer');
+const permissionBroker = require('../protocols/acp/permissionBroker');
 
 const DEFAULT_MAX_ITERATIONS = 50;
 const DEFAULT_RUN_TIMEOUT_MS = 600000;
+
+/**
+ * v2.8.1 §37 — Cline scope → Permission Broker operation 映射。
+ * 键集合与 sidecar `buildToolPolicies` 认识的 scope 严格一致
+ * （sidecars/cline-runtime/src/runtime.mjs:48-57），不多不少。
+ *
+ * 注意 `terminal.read` 同样映射为 RUN_SHELL（属写操作）：sidecar 对
+ * `terminal.read` 与 `terminal.write` 启用的是**同一套** TOOL_NAMES.terminal
+ * 工具，不存在"只读终端"。按 RUN_SHELL 处理才与 sidecar 实际能力一致，
+ * 否则只读父 Run 会拿到可执行命令的终端工具。
+ */
+const CLINE_SCOPE_OPERATION = {
+  'filesystem.read': permissionBroker.OPERATION.READ_FILE,
+  'filesystem.write': permissionBroker.OPERATION.WRITE_FILE,
+  'terminal.read': permissionBroker.OPERATION.RUN_SHELL,
+  'terminal.write': permissionBroker.OPERATION.RUN_SHELL,
+  network: permissionBroker.OPERATION.NETWORK
+};
 
 /** 健康检查探针配置（无凭据、无网络调用）。 */
 const PROBE_AGENT_CONFIG = Object.freeze({
@@ -261,7 +280,9 @@ class ClineAgentAdapter extends BaseAgentAdapter {
           version: probe.clineSdkVersion || detection.version,
           latencyMs: Date.now() - start,
           detail: healthy
-            ? `ClineCore Sidecar ready (Node ${probe.nodeVersion}, @cline/sdk ${probe.clineSdkVersion}; API configured; workspace verified; no LLM network call)`
+            // v2.8.1 §40/§45 — health detail 只描述"当前运行时状态"，不得出现
+            // verified / working / real 这类验证结论（验证级别由 agentVerification 统一裁决）。
+            ? `ClineCore Sidecar ready (Node ${probe.nodeVersion}, @cline/sdk ${probe.clineSdkVersion}; API configured; workspace ready; no LLM network call)`
             : `ClineCore runtime is ready, but ${missing.join(', ') || 'configuration'} is not ready`,
           detection,
           integration: 'ClineCore Sidecar',
@@ -462,11 +483,47 @@ class ClineAgentAdapter extends BaseAgentAdapter {
     return { runId };
   }
 
+  /**
+   * v2.8.1 §37 — Cline Tool Approval 统一入口。
+   *
+   * ClineCore sidecar 是独立 Node 22 进程，协议只有 host→sidecar 的命令与
+   * sidecar→host 的事件，没有同步回问通道，因此**无法**做 per-invocation 的
+   * GUI 审批（不重写 Cline Runtime 是 §37 的显式约束）。
+   *
+   * 本轮建立的统一入口是「scope 下发前必须经 Permission Broker 交集」：
+   * 此前该方法直接透传 task/context 的 allowedScopes，`task.readOnly` 被完全
+   * 忽略——只读父 Run 依然可能把 `filesystem.write` / `terminal.write` 下发给
+   * sidecar。现在每个候选 scope 都映射为 broker 的 operation 后逐个 evaluate，
+   * 未通过或无法识别的 scope 一律剥离（fail-closed）。
+   *
+   * 局限（不伪造，见 §38）：Cline 的权限中介粒度是 scope-level，不是
+   * per-command risk-level。命令级风险分级对 Cline 不可用。
+   */
   _resolveAllowedScopes(task, context) {
-    const explicit = task.allowedScopes || context.allowedScopes;
-    if (Array.isArray(explicit)) return [...new Set(explicit.filter(scope => typeof scope === 'string'))];
-    // Without a permission-engine grant, the production runtime remains read-only.
-    return ['filesystem.read'];
+    const explicit = task.allowedScopes || (context && context.allowedScopes);
+    const requested = Array.isArray(explicit)
+      ? [...new Set(explicit.filter(scope => typeof scope === 'string'))]
+      // Without a permission-engine grant, the production runtime remains read-only.
+      : ['filesystem.read'];
+
+    const parentRunPermission = task.readOnly ? 'read' : 'write';
+    const manifestScopes = (this.manifest && this.manifest.allowedScopes) || null;
+    const externalAgentPolicy = Array.isArray(manifestScopes)
+      ? manifestScopes.map(scope => CLINE_SCOPE_OPERATION[scope]).filter(Boolean)
+      : undefined;
+
+    const granted = [];
+    for (const scope of requested) {
+      const operation = CLINE_SCOPE_OPERATION[scope];
+      // 未知 scope：sidecar 的 buildToolPolicies 也不认识，直接剥离而不是透传。
+      if (!operation) continue;
+      const evaluation = permissionBroker.evaluate({ operation }, {
+        parentRunPermission,
+        externalAgentPolicy
+      });
+      if (evaluation.granted) granted.push(scope);
+    }
+    return granted;
   }
 
   _consumeMappedEvent(run, mapped, context) {

@@ -38,6 +38,8 @@ const { createCodexAppServerEventMapper } = require('../protocols/codex/codexEve
 const { createExternalAgentSessionManager } = require('../session/externalAgentSessionManager');
 const { buildEnvAllowlist } = require('../runtime/cliProcessSupervisor');
 const permissionBroker = require('../protocols/acp/permissionBroker');
+const { classifyRisk } = require('../../security/permissionRiskClassifier');
+const permissionAudit = require('../../security/permissionAudit');
 const { AUTH_STATE, AUTH_MODE } = require('../protocols/acp/authBroker');
 const { TURN_STATUS } = require('../protocols/codex/appServerConstants');
 
@@ -509,23 +511,39 @@ class CodexAgentAdapter extends BaseAgentAdapter {
       externalAgentPolicy: (this.manifest && this.manifest.allowedScopes) || undefined
     });
 
+    const projectRoot = task.cwd || (context && context.cwd) || null;
+    const commandText = kind === 'command'
+      ? (typeof params === 'string' ? params : (params && (params.command || params.cmd || params.input || params.shell || '')) || '')
+      : '';
+    const riskInfo = classifyRisk({ command: commandText, cwd: projectRoot, projectRoot }, operation, projectRoot);
+    const resolver = this.permissionResolver || (context && context.onPermission);
+    const hasResolver = typeof resolver === 'function';
+    const decision = permissionBroker.decidePermission(evaluation, riskInfo, { hasResolver });
+
     this._emit(context, AGENT_EVENT.PERMISSION_REQUIRED, {
       runId, agentId: this.id, kind, operation,
-      granted: evaluation.granted, reason: evaluation.reason
+      granted: evaluation.granted, reason: evaluation.reason,
+      risk: riskInfo.risk, riskReasons: riskInfo.reasons, decisionSource: decision.decisionSource
     });
 
-    if (!evaluation.granted) return 'decline';
+    // v2.8.1 — 登记权限决策审计（spec §31/§32/§78）：含风险与决策来源，命令已脱敏。
+    const finalize = (granted, source) => permissionAudit.log({
+      runId, agentId: this.id, risk: riskInfo.risk, operation, decision: granted, decisionSource: source, command: commandText
+    });
 
-    const resolver = this.permissionResolver || (context && context.onPermission);
-    if (typeof resolver !== 'function') return 'decline'; // 没有用户在场 → 不放行
-    try {
-      const decision = await resolver({ kind, operation, params, runId, agentId: this.id });
-      if (decision === true || decision === 'accept' || decision === 'approved') return 'accept';
-      if (decision === 'cancel' || decision === 'cancelled') return 'cancel';
-      return 'decline';
-    } catch {
-      return 'decline';
+    if (!evaluation.granted) { finalize(false, evaluation.reason); return 'decline'; }
+
+    if (!hasResolver) {
+      // 无 GUI resolver：按风险 fail-closed（§26），不默认放行危险命令。
+      finalize(decision.granted, decision.decisionSource);
+      return decision.granted ? 'accept' : 'decline';
     }
+    try {
+      const userDecision = await resolver({ kind, operation, params, runId, agentId: this.id, risk: riskInfo.risk, riskReasons: riskInfo.reasons });
+      if (userDecision === true || userDecision === 'accept' || userDecision === 'approved') { finalize(true, 'USER'); return 'accept'; }
+      if (userDecision === 'cancel' || userDecision === 'cancelled') { finalize(false, 'USER'); return 'cancel'; }
+      finalize(false, 'USER'); return 'decline';
+    } catch { finalize(false, 'USER'); return 'decline'; }
   }
 
   // ────────────────────────────── codex exec --json（fallback） ──────────────────────────────

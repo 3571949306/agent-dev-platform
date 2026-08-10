@@ -35,6 +35,8 @@ const { createEventNormalizer } = require('../agents/hub/eventNormalizer');
 const { createRunBridge } = require('../agents/hub/runBridge');
 const { createCapabilityRegistry } = require('../agents/hub/capabilityRegistry');
 const { BUILTIN_AGENT_MANIFESTS } = require('../agents/manifests/builtinAgents');
+// v2.8.1 — Verification Level 单一真相源（spec §39/§44/§45/§82）
+const { describeAll } = require('../agents/verification/agentVerification');
 const { NativeAgentAdapter } = require('../agents/adapters/nativeAgentAdapter');
 const { CodexAgentAdapter } = require('../agents/adapters/codexAgentAdapter');
 const { WorkBuddyAgentAdapter } = require('../agents/adapters/workBuddyAgentAdapter');
@@ -87,7 +89,11 @@ setAgentHub(agentHub);
 const sessionPersistence = (() => { try { return createDbSessionPersistence(store.externalAgentSessions); } catch { return null; } })();
 const nativeAdapter = new NativeAgentAdapter({ manifest: BUILTIN_AGENT_MANIFESTS[0], runMainAgentFn: require('../agent/runtime/mainAgentRuntime').runMainAgent, emit });
 agentHub.register(nativeAdapter);
-const codexAdapter = new CodexAgentAdapter({ manifest: BUILTIN_AGENT_MANIFESTS[1], store, sessionPersistence });
+// v2.8.1 §27 — 外部 Agent 接 GUI 审批通道；没有它时 HIGH/CRITICAL 只能 fail-closed。
+const codexAdapter = new CodexAgentAdapter({
+  manifest: BUILTIN_AGENT_MANIFESTS[1], store, sessionPersistence,
+  config: { onPermission: requestExternalAgentPermission }
+});
 agentHub.register(codexAdapter);
 const workBuddyAdapter = new WorkBuddyAgentAdapter({ manifest: BUILTIN_AGENT_MANIFESTS[2], computerManager: computer.manager });
 agentHub.register(workBuddyAdapter);
@@ -113,7 +119,12 @@ agentHub.register(openHandsAdapter);
 const claudeCodeAdapter = new ClaudeCodeAgentAdapter({
   manifest: BUILTIN_AGENT_MANIFESTS.find(m => m.id === 'claude-code'),
   // 与 Cline 同理：隔离单测可能在 DB fixture 就绪前加载 handlers，缺配置时退化为空配置
-  config: (() => { try { return store.extAgentConfigs.getClaudeCode(); } catch { return {}; } })(),
+  config: (() => {
+    let cfg = {};
+    try { cfg = store.extAgentConfigs.getClaudeCode() || {}; } catch { cfg = {}; }
+    // v2.8.1 §27 — 附加 GUI 审批通道（用户配置里不会、也不该出现 onPermission）
+    return { ...cfg, onPermission: requestExternalAgentPermission };
+  })(),
   sessionPersistence
 });
 agentHub.register(claudeCodeAdapter);
@@ -261,6 +272,72 @@ function requestPermission(req) {
     pendingPermissions.set(reqId, resolve);
     emit('permission_request', { reqId, ...req });
   });
+}
+
+/* ------------------------------------------------------------------ */
+/* v2.8.1 — External Agent GUI approval channel (spec §27/§28/§29/§30) */
+/* ------------------------------------------------------------------ */
+
+/** operation → 平台既有 permission scope（GUI 的 SCOPE_LABEL 用它出中文标签）。 */
+const EXTERNAL_OPERATION_SCOPE = {
+  run_shell: 'terminal.write',
+  write_file: 'filesystem.write',
+  read_file: 'filesystem.read',
+  read_outside_root: 'filesystem.outside_workspace',
+  additional_directory: 'filesystem.outside_workspace',
+  network: 'network',
+  mcp: 'mcp',
+  other: 'terminal.write'
+};
+
+/** 从 adapter 递来的 params 里提取「用户真正要看的那条命令」（§30）。 */
+function externalCommandText(params) {
+  if (typeof params === 'string') return params;
+  if (!params || typeof params !== 'object') return '';
+  for (const k of ['command', 'cmd', 'commandLine', 'shellCommand', 'script', 'input']) {
+    const v = params[k];
+    if (typeof v === 'string' && v.trim()) return v;
+    if (Array.isArray(v) && v.length && v.every(x => typeof x === 'string')) return v.join(' ');
+  }
+  for (const k of ['path', 'file_path', 'filePath', 'target']) {
+    if (typeof params[k] === 'string' && params[k].trim()) return params[k];
+  }
+  return '';
+}
+
+/**
+ * 外部 Agent 的权限 resolver。挂到各 adapter 的 `config.onPermission` 后：
+ *   HIGH / CRITICAL 不再无脑 fail-closed，而是走 §27 的「弹 GUI → 用户确认」。
+ * 约束：
+ *   - §28 平台侧只可能给 allow_once，永不替用户选 allow_always（range 被强制丢弃）。
+ *   - §29/§30 把 risk / reasons / 命令原文 / cwd 一并交给 GUI 显示。
+ * @returns {Promise<boolean>} true=allow_once
+ */
+async function requestExternalAgentPermission(req = {}) {
+  const operation = req.operation || 'other';
+  const risk = req.risk || 'low';
+  const baseScope = EXTERNAL_OPERATION_SCOPE[operation] || 'terminal.write';
+  const scope = (operation === 'run_shell' && (risk === 'high' || risk === 'critical'))
+    ? 'terminal.dangerous'
+    : baseScope;
+  const project = currentProjectId ? store.projects.get(currentProjectId) : null;
+  const decision = await requestPermission({
+    scope,
+    tool: req.tool || req.kind || operation,
+    args: req.params,
+    agent: req.agentName || req.agentId || '外部智能体',
+    // v2.8.1 新增字段（GUI 侧 §29/§30 渲染用）
+    external: true,
+    operation,
+    risk,
+    riskReasons: Array.isArray(req.riskReasons) ? req.riskReasons : [],
+    command: externalCommandText(req.params),
+    cwd: req.cwd || (project ? project.root_path : '') || '',
+    runId: req.runId || null,
+    // §28：外部 Agent 只提供「仅本次」，不提供任何持久授权选项
+    ranges: ['once']
+  });
+  return !!decision && decision.decision === 'allow';
 }
 
 /** Hard ceiling on chat→chat delegation so A→B→A can never loop forever. */
@@ -950,6 +1027,16 @@ function register(window) {
     return available;
   });
   ipcMain.handle('hub:detect', async () => { return agentHub.detect(); });
+  // v2.8.1 spec §39/§44/§45/§82 — Verification ≠ Health：验证等级单独一条通道，
+  // 由 agentVerification 统一裁决（GUI 不得自己拼 "verified" 文案）。
+  ipcMain.handle('hub:verification', async () => {
+    try {
+      const project = currentProjectId ? store.projects.get(currentProjectId) : null;
+      await agentHub.detect();
+      await agentHub.health({ force: false, projectRoot: project?.root_path || null });
+      return describeAll(agentHub.getManifests(), agentHub.getAvailable());
+    } catch { return {}; }
+  });
   // v2.8.0 spec §81 — Session UI：外部 Agent 会话列表 + 认证状态（均不含凭据）
   ipcMain.handle('hub:sessions', () => {
     try {

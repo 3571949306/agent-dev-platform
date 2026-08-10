@@ -241,9 +241,13 @@ test('_decideApproval：交集评估 + 无 GUI 一律 decline（spec §35/§36�
   const d1 = await adapter._decideApproval('fileChange', {}, { readOnly: true }, {}, 'run-1');
   assert.strictEqual(d1, 'decline');
 
-  // 2) 交集通过但没有用户在场（无 resolver）→ 绝不放行
-  const d2 = await adapter._decideApproval('command', {}, { readOnly: false }, {}, 'run-2');
+  // 2) 交集通过 + 危险命令 + 无用户在场 → fail-closed decline（spec §26/§75）
+  const d2 = await adapter._decideApproval('command', { command: 'git reset --hard HEAD~1' }, { readOnly: false }, {}, 'run-2');
   assert.strictEqual(d2, 'decline');
+
+  // 2b) 交集通过 + LOW 风险命令 + 无用户在场 → 按 §26 自动放行（allow_once）
+  const d2b = await adapter._decideApproval('command', { command: 'git status' }, { readOnly: false }, {}, 'run-2b');
+  assert.strictEqual(d2b, 'accept');
 
   // 3) 交集通过 + GUI resolver accept → accept
   const ctx = makeContext({ onPermission: async () => 'accept' }).context;

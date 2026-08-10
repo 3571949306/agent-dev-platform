@@ -89,6 +89,84 @@ test('production Cline adapter delegates to ClineCore sidecar with exact scopes 
   await adapter.dispose();
 });
 
+/* ------------------------------------------------------------------------ */
+/* v2.8.1 §37 — Cline scope 下发必须经统一 Permission Broker                  */
+/* ------------------------------------------------------------------------ */
+
+function recordingSidecar() {
+  const seen = { payload: null };
+  return {
+    seen,
+    detect: () => ({ available: true, installed: true, configured: true, version: '0.0.72', nodeVersion: '22.23.2', runtime: { manifest: { protocolVersion: 1 } } }),
+    probe: async () => ({ ok: true, runtime: 'ClineCore', coreConstructible: true, networkCall: false, nodeVersion: '22.23.2', clineSdkVersion: '0.0.72' }),
+    run: async options => {
+      seen.payload = options.payload;
+      options.onStarted({ sessionId: 'scope-session', workspace: options.projectRoot });
+      return {
+        type: 'run.result',
+        payload: {
+          result: { finishReason: 'completed', text: 'ok', iterations: 1, changedFiles: [] },
+          provenance: { runtime: 'ClineCore Sidecar', nodeVersion: '22.23.2', sdkVersion: '0.0.72', sessionId: 'scope-session' }
+        }
+      };
+    },
+    cancel: () => true,
+    dispose: async () => {}
+  };
+}
+
+async function scopesDispatchedFor(task) {
+  const sidecar = recordingSidecar();
+  const adapter = new ClineAgentAdapter({ store: storeWithConnection(), sidecarManager: sidecar });
+  let finish = null;
+  await adapter.startTask(
+    Object.assign({ goal: 'scope check', connectionId: 'conn', projectRoot: PROJECT_ROOT }, task),
+    { emit: () => {}, finishRun: (status, result) => { finish = { status, result }; } }
+  );
+  for (let i = 0; !finish && i < 50; i++) await new Promise(resolve => setTimeout(resolve, 5));
+  await adapter.dispose();
+  return sidecar.seen.payload ? sidecar.seen.payload.allowedScopes : null;
+}
+
+test('§37 只读父 Run 下发给 sidecar 的 scope 必须剥离全部写权限', async () => {
+  const scopes = await scopesDispatchedFor({
+    readOnly: true,
+    allowedScopes: ['filesystem.read', 'filesystem.write', 'terminal.write', 'network']
+  });
+  assert.deepStrictEqual(scopes, ['filesystem.read'],
+    '只读父 Run 不得把 write/terminal/network scope 下发给 ClineCore sidecar');
+});
+
+test('§37 terminal.read 在只读父 Run 下同样被剥离（sidecar 无只读终端）', async () => {
+  const scopes = await scopesDispatchedFor({
+    readOnly: true,
+    allowedScopes: ['filesystem.read', 'terminal.read']
+  });
+  assert.ok(!scopes.includes('terminal.read'),
+    'sidecar 对 terminal.read 启用的是同一套可执行终端工具，只读父 Run 必须剥离');
+  assert.deepStrictEqual(scopes, ['filesystem.read']);
+});
+
+test('§37 无法识别的 scope 一律 fail-closed，不透传给 sidecar', async () => {
+  const scopes = await scopesDispatchedFor({
+    allowedScopes: ['filesystem.read', 'computer.control', 'mcp.invoke', '']
+  });
+  assert.deepStrictEqual(scopes, ['filesystem.read'],
+    'sidecar buildToolPolicies 不认识的 scope 必须剥离，而不是原样下发');
+});
+
+test('§37 可写父 Run 保留经交集通过的 scope（不过度收紧）', async () => {
+  const scopes = await scopesDispatchedFor({
+    allowedScopes: ['filesystem.read', 'filesystem.write', 'terminal.write', 'network']
+  });
+  assert.deepStrictEqual(scopes, ['filesystem.read', 'filesystem.write', 'terminal.write', 'network']);
+});
+
+test('§37 未显式授权时保持只读默认，且默认值本身也经过 broker', async () => {
+  const scopes = await scopesDispatchedFor({});
+  assert.deepStrictEqual(scopes, ['filesystem.read']);
+});
+
 test('production Cline adapter cancel propagates to sidecar and finishes once', async () => {
   let cancelCalls = 0;
   let resolveRun;

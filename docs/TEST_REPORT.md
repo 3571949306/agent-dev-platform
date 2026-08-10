@@ -37,7 +37,8 @@
 
 - **Real AI Smoke（§74-99）**：脚本 `scripts/real-ai-orchestrator-smoke.js` 已就绪，但需 DeepSeek Test Connection 凭据；当前环境无 credential → 按 §76 SKIP。CI 亦 SKIP。
 - **e2e（65 项）**：**64 passed / 1 failed**（2.1m，2026-08-10 真实执行）。唯一失败仍为 `agent-hub.spec.js:197 Capability Routing`（codex 认证时机 flaky，与 v2.8.2 基线同项，与 Orchestrator 改动无关——单独重跑通过、代码路径不涉 orchestrator）。v2.9.0 新增 `orchestrator:*` 为纯新增 channel，未触碰既有 `hub:*`/`mainAgent:*` 流程，无新增 regression。
-- **dist build / win-unpacked smoke**：`npm run dist` 在 v2.8.2 已验证成功；v2.9.0 仅改 JS 逻辑 + 前端静态资源，预期通过，重跑见下方。
+- **dist build / win-unpacked smoke**：`npm run dist` 在 v2.8.2 已验证成功；v2.9.0 仅改 JS 逻辑 + 前端静态资源，重跑成功（Agent Dev Platform Setup 2.9.0.exe + portable）。
+- **CI（GitHub Actions `ci.yml`/`windows-test.yml`，spec §123）**：TRIGGERED — YES（push `9a023a1`）。INDEPENDENT VERIFICATION UNAVAILABLE（gh 未认证）。不写「CI PASS」，需在 Actions 页面核对真实 conclusion。GitHub Dependabot 60 漏洞提示与 v2.8.2 同（dev/build 依赖，v2.9.0 无新依赖）。
 
 ---
 

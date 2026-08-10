@@ -351,10 +351,11 @@ class ClineSidecarManager {
     this.expectedExit = false;
   }
 
-  _killChild() {
-    const child = this.child;
+  _killChild(child = this.child) {
     if (!child) return;
-    this.expectedExit = true;
+    // A graceful-shutdown timer belongs to the process captured when that
+    // shutdown began. Never let a stale timer kill a replacement sidecar.
+    if (child === this.child) this.expectedExit = true;
     try { this.killTree(child); } catch { try { child.kill(); } catch {} }
   }
 
@@ -369,6 +370,7 @@ class ClineSidecarManager {
     if (!child) return { ok: true, alreadyStopped: true };
     this.expectedExit = true;
     let timer;
+    let exitTimer;
     try {
       const exitPromise = new Promise(resolve => child.once('exit', () => resolve(true)));
       const response = await Promise.race([
@@ -380,7 +382,7 @@ class ClineSidecarManager {
       await Promise.race([
         exitPromise,
         new Promise(resolve => {
-          const exitTimer = setTimeout(() => { this._killChild(); resolve(false); }, this.shutdownTimeoutMs);
+          exitTimer = setTimeout(() => { this._killChild(child); resolve(false); }, this.shutdownTimeoutMs);
         })
       ]);
       return { ok: true, response: response.payload || null };
@@ -389,6 +391,7 @@ class ClineSidecarManager {
       return { ok: false, killed: true, error: error.message };
     } finally {
       if (timer) clearTimeout(timer);
+      if (exitTimer) clearTimeout(exitTimer);
     }
   }
 

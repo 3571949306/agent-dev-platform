@@ -189,3 +189,25 @@ test('Cline sidecar manager uses kill-tree fallback and rejects runs after dispo
     error => error.code === 'CLINE_SIDECAR_STOPPED'
   );
 });
+
+test('Cline sidecar manager clears graceful-exit timers before a replacement starts', async () => {
+  let killCalls = 0;
+  const manager = managerFor('result', [], {
+    shutdownTimeoutMs: 20,
+    killTree: child => { killCalls += 1; return child.kill(); }
+  });
+  await manager.start(PROJECT_ROOT);
+  const firstChild = manager.child;
+  assert.strictEqual((await manager.shutdown()).ok, true);
+  await manager.start(PROJECT_ROOT);
+  const replacement = manager.child;
+  assert.notStrictEqual(replacement, firstChild);
+
+  // The old implementation left its 20 ms exit timer armed. Once it fired,
+  // _killChild() dereferenced manager.child and terminated this replacement.
+  await new Promise(resolve => setTimeout(resolve, 50));
+  assert.strictEqual(killCalls, 0);
+  assert.strictEqual(manager.child, replacement);
+  assert.strictEqual(replacement.killed, false);
+  await manager.shutdown();
+});

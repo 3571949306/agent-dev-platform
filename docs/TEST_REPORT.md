@@ -8,7 +8,7 @@
 
 | Gate | Previous | New | Final result |
 | --- | ---: | ---: | --- |
-| Unit / integration tests | 922（919 pass / 2 fail / 1 skip） | +20 | 942 total / 941 pass / 0 fail / 1 skip |
+| Unit / integration tests | 922（919 pass / 2 fail / 1 skip） | +21 | 943 total / 942 pass / 0 fail / 1 skip |
 | Electron E2E | 43 | +10（Cases 44–53） | 53 pass / 0 fail / 0 skip |
 | Source smoke | — | — | `SMOKE_OK` |
 | Cline integration smoke | — | — | Real SDK + ClineCore + local model fixture + coding tools PASS |

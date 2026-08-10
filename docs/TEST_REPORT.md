@@ -82,6 +82,19 @@ smoke 在当前环境（Git Bash / electron 31 打包）无法可靠通过：
 - electron-builder 24.13.3, electron 31.7.7
 - 产物：`dist-electron/Agent Dev Platform Setup 2.8.2.exe`（nsis）+ `Agent Dev Platform 2.8.2 portable.exe`（portable）+ `win-unpacked/Agent Dev Platform.exe`
 
+### CI（spec §123）
+
+改动已 push（`e1f0976..a8b156a main`）。GitHub Actions `ci.yml` / `windows-test.yml` 已触发，
+但本地 `gh` 未认证（`gh auth login` required），无法读取真实 conclusion。
+
+```text
+CI TRIGGERED — YES（push a8b156a）
+INDEPENDENT VERIFICATION UNAVAILABLE（gh 未认证）
+```
+
+不写 "CI PASS"。需在 GitHub Actions 页面核对 `ci.yml` + `windows-test.yml` 的真实 conclusion
+（success / failure），特别关注 Windows Junction Integration Test，方可补记。
+
 ### 依赖审计（spec §100/§115）
 
 本轮无 dependency change（package-lock 无 diff）。重新运行确认：

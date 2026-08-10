@@ -73,8 +73,18 @@ process.stdin.on('end', () => { decoder.end(); void runtime.shutdown().finally((
 process.stdin.on('error', error => { process.stderr.write(`${safeError(error).message}\n`); void runtime.shutdown().finally(() => process.exit(1)) })
 process.once('SIGTERM', () => { void runtime.shutdown().finally(() => process.exit(0)) })
 process.once('SIGINT', () => { void runtime.shutdown().finally(() => process.exit(130)) })
-process.on('uncaughtException', error => { send('runtime.error', { payload: { error: safeError(error) } }); void runtime.shutdown().finally(() => process.exit(1)) })
-process.on('unhandledRejection', error => { send('runtime.error', { payload: { error: safeError(error) } }); void runtime.shutdown().finally(() => process.exit(1)) })
+
+function terminateAfterFatal(kind, error) {
+  const safe = safeError(error)
+  // stderr is diagnostic-only, bounded by the parent manager, and safeError
+  // removes credential-shaped values before they can reach CI or crash logs.
+  process.stderr.write(`[${kind}] ${safe.code}: ${safe.message}\n`)
+  send('runtime.error', { payload: { error: safe } })
+  void runtime.shutdown().finally(() => process.exit(1))
+}
+
+process.on('uncaughtException', error => terminateAfterFatal('uncaughtException', error))
+process.on('unhandledRejection', error => terminateAfterFatal('unhandledRejection', error))
 
 send('hello.ok', {
   payload: { protocol: PROTOCOL_VERSION, nodeVersion: process.versions.node, clineSdkVersion: '0.0.72', runtime: 'ClineCore' }

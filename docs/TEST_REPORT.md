@@ -45,8 +45,8 @@ CLINE_SIDECAR_PROCESS_COUNT_AFTER=0
 
 | Artifact | v2.7.2 | v2.7.3 | Delta |
 | --- | ---: | ---: | ---: |
-| NSIS setup | 84,969,786 B | 142,404,068 B | +57,434,282 B |
-| Portable | 84,762,073 B | 142,196,335 B | +57,434,262 B |
+| NSIS setup | 84,969,786 B | 142,404,203 B | +57,434,417 B |
+| Portable | 84,762,073 B | 142,196,500 B | +57,434,427 B |
 
 官方 Node ZIP 为 35,683,585 B（解压后 `node.exe` 86,997,320 B）；Cline sidecar
 及生产依赖解压后为 164,898,682 B。按安装包压缩增量粗略拆分，Node 贡献约

@@ -94,7 +94,7 @@ test('ClineAgentAdapter: manifest has correct id, capabilities, transport', () =
   const adapter = new ClineAgentAdapter();
   const m = adapter.getManifest();
   assert.strictEqual(m.id, 'cline');
-  assert.strictEqual(m.transport, 'sdk');
+  assert.strictEqual(m.transport, 'protocol');
   assert.strictEqual(m.source, 'external');
   assert.ok(m.capabilities);
   assert.strictEqual(m.capabilities.coding, true);
@@ -102,7 +102,7 @@ test('ClineAgentAdapter: manifest has correct id, capabilities, transport', () =
   assert.strictEqual(m.capabilities.filesystem, true);
   assert.strictEqual(m.capabilities.streaming, true);
   assert.strictEqual(m.capabilities.sandbox, false);
-  assert.strictEqual(m.maxConcurrency, 2);
+  assert.strictEqual(m.maxConcurrency, 1);
 });
 
 // ── Tests: detect / healthCheck (SDK unavailable) ────────────────────────
@@ -203,6 +203,21 @@ test('mapConnection: uses connection.model when model arg is null', () => {
   assert.strictEqual(r.modelId, 'gpt-4');
 });
 
+test('mapConnection: maps encrypted-store snake_case fields and local compatible providers', () => {
+  assert.deepStrictEqual(mapConnection({
+    provider: 'local',
+    api_key: 'sk-test-store-shape',
+    base_url: 'http://127.0.0.1:1234/v1',
+    models: [{ id: 'local-model' }]
+  }), {
+    providerId: 'openai',
+    modelId: 'local-model',
+    apiKey: 'sk-test-store-shape',
+    baseUrl: 'http://127.0.0.1:1234/v1',
+    headers: undefined
+  });
+});
+
 // ── Tests: eventMapper ────────────────────────────────────────────────────
 test('mapClineEvent: content_start with text returns null', () => {
   const r = mapClineEvent({ type: 'content_start', contentType: 'text' }, 'r1', 'cline');
@@ -264,11 +279,12 @@ test('mapClineEvent: error (ACP) maps to RUN_FAILED', () => {
   assert.strictEqual(r.data.error, 'something broke');
 });
 
-test('mapClineEvent: unknown event type maps to MESSAGE with raw', () => {
+test('mapClineEvent: unknown event type maps to a bounded notice without raw payload', () => {
   const r = mapClineEvent({ type: 'custom_event', foo: 'bar' }, 'r1', 'cline');
   assert.strictEqual(r.type, AGENT_EVENT.MESSAGE);
   assert.strictEqual(r.rawType, 'custom_event');
-  assert.ok(r.data.raw);
+  assert.strictEqual(r.data.rawType, 'custom_event');
+  assert.strictEqual(r.data.raw, undefined);
 });
 
 test('mapClineEvent: null event returns null', () => {

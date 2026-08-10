@@ -1,5 +1,7 @@
 # External Agent Pack Research — 外部 Agent 接入调研（Cline / OpenCode / OpenHands）
 
+> v2.7.3 supersession note: the earlier Cline in-process bridge described below is retained only for injected tests. Production now uses the bundled Node 22 `ClineCore` sidecar documented in `CLINE_RUNTIME_DECISION.md` and `CLINE_SIDECAR_RUNTIME.md`, pinned to upstream commit `b3cee3f973ffe9d023a10c5c414deba68cd6e09d` and SDK 0.0.72.
+
 > **调研日期**：2026-08-09
 > **数据来源**：全部来自官方源（GitHub 官方仓库、官方 npm 包、官方文档）
 > **目的**：为 Agent Dev Platform 的 External Agent Pack 选型提供事实依据，明确每个候选 Agent 的集成方式、API 表面、取消机制与鉴权模型。

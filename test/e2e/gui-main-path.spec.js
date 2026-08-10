@@ -221,7 +221,7 @@ test('1) API 连接 → GUI 新建 → 拉取模型 → model-A/B/C 真实可见
   await page.locator('#f-name').fill('E2E Test Conn');
   await page.locator('#f-provider').selectOption('openai');
   await page.locator('#f-url').fill(fake.baseUrl);
-  await page.locator('#f-key').fill('sk-e2e-fake');
+  await page.locator('#f-key').fill('sk-test-e2e-fake');
   await page.getByRole('button', { name: '保存' }).click();
   const testRow = page.locator('tbody tr', { hasText: 'E2E Test Conn' });
   await expect(testRow).toBeVisible({ timeout: 10000 });

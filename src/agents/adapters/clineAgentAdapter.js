@@ -29,7 +29,8 @@ const { BaseAgentAdapter } = require('./baseAgentAdapter');
 const { HEALTH_STATE, LIFECYCLE, AGENT_EVENT } = require('../hub/types');
 const { CLINE } = require('../manifests/builtinAgents');
 const sdkBridge = require('../integrations/cline/sdkBridge');
-const { mapClineEvent } = require('../integrations/cline/eventMapper');
+const { mapClineEvent, mapClineEvents } = require('../integrations/cline/eventMapper');
+const { ClineSidecarManager, canonicalDirectory } = require('../integrations/cline/sidecarManager');
 const { mapConnection } = require('../integrations/cline/configMapper');
 const { createExternalAgentTerminalGate } = require('../runtime/externalTerminalGate');
 const { buildExternalResult, sanitizeErrors, sanitizeRaw } = require('../runtime/resultSanitizer');
@@ -122,15 +123,21 @@ class ClineAgentAdapter extends BaseAgentAdapter {
    * @param {object} [opts.config]   适配器配置（connectionId / model / timeoutMs / maxIterations）
    * @param {object} [opts.bridge]   可注入的 sdkBridge（测试用）
    */
-  constructor({ manifest, store, config, bridge } = {}) {
+  constructor({ manifest, store, config, bridge, sidecarManager, dataDir } = {}) {
     super({ manifest: manifest || CLINE, config });
     this.store = store || null;
     this._bridge = bridge || sdkBridge;
+    this._legacyBridge = !!bridge || !!this._bridge.__clineFake;
+    this._sidecar = sidecarManager || new ClineSidecarManager({ dataDir });
     // runId -> { ac, status, result, startedAt, agent, projectRoot, taskText, abortReason, ... }
     this._runs = new Map();
     this._gate = createExternalAgentTerminalGate();
     // detect 缓存
     this._detected = null;
+  }
+
+  _useLegacyBridge() {
+    return this._legacyBridge || this._sdkInjected === true || this.config?.runtimeMode === 'in-process-test';
   }
 
   getManifest() { return { ...this.manifest }; }
@@ -142,6 +149,20 @@ class ClineAgentAdapter extends BaseAgentAdapter {
    */
   async detect() {
     if (this._detected) return this._detected;
+    if (!this._useLegacyBridge()) {
+      const detection = this._sidecar.detect();
+      this._detected = {
+        ...detection,
+        versionSource: detection.version ? 'bundled-runtime-manifest' : 'unknown',
+        missing: detection.runtime?.missing || [],
+        detail: detection.available
+          ? `Bundled ClineCore sidecar detected (Node ${detection.nodeVersion}, @cline/sdk ${detection.version})`
+          : `Bundled ClineCore sidecar unavailable: ${detection.error || 'runtime files are missing'}`,
+        integration: 'ClineCore Sidecar',
+        protocolVersion: detection.runtime?.manifest?.protocolVersion || null
+      };
+      return this._detected;
+    }
     let probe;
     try {
       probe = await this._bridge.probeSdk();
@@ -175,9 +196,92 @@ class ClineAgentAdapter extends BaseAgentAdapter {
    * 不消耗真实 API 额度。
    * @returns {Promise<{ status, version, latencyMs, detail, detection }>}
    */
-  async healthCheck() {
+  async healthCheck({ projectRoot } = {}) {
     const start = Date.now();
     const detection = await this.detect();
+    if (!this._useLegacyBridge()) {
+      if (!detection.available) {
+        return {
+          status: HEALTH_STATE.UNAVAILABLE,
+          version: detection.version,
+          latencyMs: Date.now() - start,
+          detail: detection.detail,
+          detection,
+          integration: 'ClineCore Sidecar',
+          runtime: { nodeVersion: detection.nodeVersion, sdkVersion: detection.version, probe: false }
+        };
+      }
+      try {
+        let workspace = { ready: false, path: null, error: 'No project is currently selected' };
+        if (projectRoot) {
+          try {
+            const canonicalRoot = canonicalDirectory(projectRoot);
+            workspace = { ready: true, path: canonicalRoot, error: null };
+          } catch (error) {
+            workspace = { ready: false, path: null, error: error.message };
+          }
+        }
+
+        const connectionId = this.config?.connectionId || null;
+        let connection = null;
+        if (connectionId && this.store?.connections?.getDecrypted) {
+          try { connection = this.store.connections.getDecrypted(connectionId); } catch { /* reported below */ }
+        }
+        const mapped = mapConnection(connection, this.config?.model);
+        const sourceProvider = connection?.protocol || connection?.provider || '';
+        const keyOptional = ['ollama', 'local', 'mock'].includes(sourceProvider);
+        const apiConfigured = !!(
+          connectionId && connection && mapped?.providerId && mapped?.modelId &&
+          (mapped.apiKey || keyOptional)
+        );
+        const api = {
+          configured: apiConfigured,
+          connectionId,
+          providerId: mapped?.providerId || null,
+          modelId: mapped?.modelId || null,
+          error: apiConfigured
+            ? null
+            : (!connectionId
+              ? 'No API connection selected'
+              : (!connection
+                ? 'Selected API connection was not found'
+                : (!mapped?.modelId ? 'No Cline model selected' : 'Selected API connection has no credential')))
+        };
+
+        const probe = await this._sidecar.probe(workspace.ready ? workspace.path : undefined);
+        const sidecarReady = !!(probe.ok && probe.coreConstructible);
+        const healthy = sidecarReady && api.configured && workspace.ready;
+        const missing = [
+          !sidecarReady && 'sidecar probe',
+          !api.configured && 'API configuration',
+          !workspace.ready && 'workspace'
+        ].filter(Boolean);
+        return {
+          status: healthy ? HEALTH_STATE.HEALTHY : HEALTH_STATE.DEGRADED,
+          version: probe.clineSdkVersion || detection.version,
+          latencyMs: Date.now() - start,
+          detail: healthy
+            ? `ClineCore Sidecar ready (Node ${probe.nodeVersion}, @cline/sdk ${probe.clineSdkVersion}; API configured; workspace verified; no LLM network call)`
+            : `ClineCore runtime is ready, but ${missing.join(', ') || 'configuration'} is not ready`,
+          detection,
+          integration: 'ClineCore Sidecar',
+          sidecar: { ready: sidecarReady, protocolVersion: detection.protocolVersion || null },
+          api,
+          workspace,
+          runtime: { ...probe, probe: true }
+        };
+      } catch (error) {
+        return {
+          status: HEALTH_STATE.DEGRADED,
+          version: detection.version,
+          latencyMs: Date.now() - start,
+          detail: `ClineCore Sidecar detected but probe failed: ${error.message}`,
+          detection,
+          integration: 'ClineCore Sidecar',
+          runtime: { nodeVersion: detection.nodeVersion, sdkVersion: detection.version, probe: false, error: error.message }
+        };
+      }
+    }
     if (!detection.installed) {
       return {
         status: HEALTH_STATE.UNAVAILABLE,
@@ -307,6 +411,7 @@ class ClineAgentAdapter extends BaseAgentAdapter {
           context.signal.addEventListener('abort', () => {
             const r = this._runs.get(runId);
             if (r && !r.abortReason) r.abortReason = 'parent_cancel';
+            if (r?.runtimeMode === 'sidecar') this._sidecar.cancel(runId, 'parent_cancel');
             ac.abort();
           }, { once: true });
         } catch { /* noop */ }
@@ -333,13 +438,18 @@ class ClineAgentAdapter extends BaseAgentAdapter {
       usage: null,
       iterations: 0,
       sanitizedRaw: null,
-      lateResultIgnored: false
+      lateResultIgnored: false,
+      runtimeMode: this._useLegacyBridge() ? 'legacy-test-bridge' : 'sidecar',
+      runtimeProvenance: null
     };
     this._runs.set(runId, runState);
     this._gate.init(runId, LIFECYCLE.STARTING);
 
     // 后台执行（不 await）：仅当尚未进入终态时才以 FAILED 兜底（终态一次）
-    this._executeCline(runId, clineConfig, taskText, task, context).catch(err => {
+    const execution = runState.runtimeMode === 'sidecar'
+      ? this._executeSidecar(runId, clineConfig, taskText, task, context)
+      : this._executeCline(runId, clineConfig, taskText, task, context);
+    execution.catch(err => {
       const run = this._runs.get(runId);
       const cls = this._classifyFailure(run, err);
       const tr = this._finish(runId, cls.status, cls.reason,
@@ -350,6 +460,110 @@ class ClineAgentAdapter extends BaseAgentAdapter {
     });
 
     return { runId };
+  }
+
+  _resolveAllowedScopes(task, context) {
+    const explicit = task.allowedScopes || context.allowedScopes;
+    if (Array.isArray(explicit)) return [...new Set(explicit.filter(scope => typeof scope === 'string'))];
+    // Without a permission-engine grant, the production runtime remains read-only.
+    return ['filesystem.read'];
+  }
+
+  _consumeMappedEvent(run, mapped, context) {
+    if (context && typeof context.emit === 'function') {
+      try { context.emit(mapped.type, mapped.data); } catch { /* listener isolation */ }
+    }
+    if (mapped.type === AGENT_EVENT.MESSAGE && typeof mapped.data?.text === 'string') run.summary += mapped.data.text;
+    if (mapped.type === AGENT_EVENT.RUN_FAILED || mapped.type === AGENT_EVENT.TOOL_FAILED) {
+      const message = mapped.data?.error || mapped.data?.message;
+      if (message) run.errors.push(String(message));
+    }
+    if (mapped.type === AGENT_EVENT.FILE_CHANGED && mapped.data?.path && !run.changedFiles.includes(mapped.data.path)) {
+      run.changedFiles.push(mapped.data.path);
+    }
+    if (mapped.type === AGENT_EVENT.RUN_STATUS && mapped.data?.usage) run.usage = mapped.data.usage;
+    if (mapped.type === AGENT_EVENT.RUN_STATUS && Number.isInteger(mapped.data?.iteration)) run.iterations = mapped.data.iteration;
+  }
+
+  async _executeSidecar(runId, clineConfig, taskText, task, context) {
+    const run = this._runs.get(runId);
+    if (!run) return;
+    if (!run.projectRoot) {
+      throw Object.assign(new Error('ClineCore Sidecar requires an explicit projectRoot'), { code: 'CLINE_WORKSPACE_INVALID' });
+    }
+    run.status = LIFECYCLE.RUNNING;
+    const timeoutMs = task.timeoutMs || this.config?.timeoutMs || DEFAULT_RUN_TIMEOUT_MS;
+    const runtimePayload = {
+      prompt: taskText,
+      providerId: clineConfig.providerId,
+      modelId: clineConfig.modelId,
+      apiKey: clineConfig.apiKey,
+      baseUrl: clineConfig.baseUrl,
+      headers: clineConfig.headers,
+      systemPrompt: task.systemPrompt || this.config?.systemPrompt || undefined,
+      maxIterations: task.maxIterations || this.config?.maxIterations || DEFAULT_MAX_ITERATIONS,
+      allowedScopes: this._resolveAllowedScopes(task, context),
+      parentRunId: task.parentRunId || context.parentRunId || null,
+      delegationPath: Array.isArray(task.delegationPath) ? task.delegationPath.slice(0, 32) : []
+    };
+    try {
+      const response = await this._sidecar.run({
+        runId,
+        projectRoot: run.projectRoot,
+        timeoutMs,
+        payload: runtimePayload,
+        onStarted: payload => {
+          if (this._gate.isTerminal(runId)) return;
+          run.projectRootApplied = payload.workspace === run.projectRoot;
+          run.projectRootField = 'manifest.cwd/workspace_root';
+          run.sessionId = payload.sessionId || null;
+        },
+        onEvent: rawEvent => {
+          if (this._gate.isTerminal(runId)) {
+            run.lateResultIgnored = true;
+            return;
+          }
+          for (const mapped of mapClineEvents(rawEvent, runId, this.manifest.id)) this._consumeMappedEvent(run, mapped, context);
+        }
+      });
+
+      if (this._gate.isTerminal(runId)) {
+        run.lateResultIgnored = true;
+        return;
+      }
+      const payload = response.payload || {};
+      run.runtimeProvenance = payload.provenance || null;
+      const raw = payload.result || {};
+      if (Array.isArray(raw.changedFiles)) {
+        const newlyChanged = raw.changedFiles.filter(file => !run.changedFiles.includes(file));
+        run.changedFiles = [...new Set([...run.changedFiles, ...raw.changedFiles])];
+        for (const file of newlyChanged) {
+          this._consumeMappedEvent(run, { type: AGENT_EVENT.FILE_CHANGED, data: { path: file } }, context);
+        }
+      }
+      if (raw.usage) run.usage = raw.usage;
+      if (Number.isInteger(raw.iterations)) run.iterations = raw.iterations;
+      const extraErrors = payload.error?.message ? [payload.error.message] : [];
+      if (response.type === 'run.result') {
+        this._finish(runId, LIFECYCLE.COMPLETED, 'AGENT_DONE', this._buildResult(run, LIFECYCLE.COMPLETED, { raw }));
+      } else if (response.type === 'run.cancelled') {
+        this._finish(runId, LIFECYCLE.CANCELLED, 'AGENT_CANCELLED', this._buildResult(run, LIFECYCLE.CANCELLED, { raw, extraErrors }));
+      } else if (response.type === 'run.timeout') {
+        this._finish(runId, LIFECYCLE.TIMEOUT, 'AGENT_TIMEOUT', this._buildResult(run, LIFECYCLE.TIMEOUT, { raw, extraErrors }));
+      } else {
+        this._finish(runId, LIFECYCLE.FAILED, 'AGENT_REMOTE_ERROR', this._buildResult(run, LIFECYCLE.FAILED, {
+          raw,
+          extraErrors: extraErrors.length ? extraErrors : ['ClineCore run failed']
+        }));
+      }
+    } finally {
+      // Credentials are deliberately kept out of run state and cleared as soon
+      // as the serialized request has reached a terminal outcome.
+      runtimePayload.apiKey = undefined;
+      runtimePayload.headers = undefined;
+      clineConfig.apiKey = undefined;
+      clineConfig.headers = undefined;
+    }
   }
 
   async _executeCline(runId, clineConfig, taskText, task, context) {
@@ -568,10 +782,12 @@ class ClineAgentAdapter extends BaseAgentAdapter {
       startedAt: run.startedAt,
       provenance: {
         agent: 'cline',
-        transport: 'sdk',
+        transport: run.runtimeMode === 'sidecar' ? 'sidecar-jsonl' : 'sdk-test-bridge',
+        integration: run.runtimeMode === 'sidecar' ? 'ClineCore Sidecar' : 'Injected fake SDK',
         projectRoot: run.projectRoot || null,
         projectRootApplied: !!run.projectRootApplied,
-        projectRootField: run.projectRootField || null
+        projectRootField: run.projectRootField || null,
+        ...(run.runtimeProvenance || {})
       }
     });
     result.iterations = parsed ? parsed.iterations : (run.iterations || 0);
@@ -603,6 +819,7 @@ class ClineAgentAdapter extends BaseAgentAdapter {
     const run = this._runs.get(runId);
     if (!run) return { ok: false, error: 'unknown runId' };
     if (!run.abortReason) run.abortReason = 'user_cancel';
+    if (run.runtimeMode === 'sidecar') this._sidecar.cancel(runId, 'user_cancel');
     this._cancelAgent(run.agent);
     const tr = this._finish(runId, LIFECYCLE.CANCELLED, 'AGENT_CANCELLED',
       this._buildResult(run, LIFECYCLE.CANCELLED, { extraErrors: ['用户已停止'] }));
@@ -642,6 +859,7 @@ class ClineAgentAdapter extends BaseAgentAdapter {
     this._runs.clear();
     this._gate.clear();
     this._detected = null;
+    await this._sidecar.dispose();
   }
 }
 

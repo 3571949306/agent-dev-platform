@@ -25,6 +25,7 @@ const fs = require('fs');
 const path = require('path');
 const { start } = require('./fake-api');
 const { copyFixture, cleanup } = require('../fixtures/coding-agent/reset');
+const { ClineSidecarManager } = require('../../src/agents/integrations/cline/sidecarManager');
 
 const ROOT = path.join(__dirname, '..', '..');
 const ELECTRON_BIN = require('electron');
@@ -101,6 +102,7 @@ async function openFixtureProject() {
 async function openAgentsPage() {
   await page.getByRole('button', { name: '智能体', exact: true }).click();
   await page.waitForSelector('#hub-cards', { timeout: 10000 });
+  await page.waitForSelector('#hub-cards .acard[data-hub-id="cline"]', { timeout: 15000 });
 }
 
 /** 获取 Fake API 连接 ID（Cline 需要 connectionId） */
@@ -542,4 +544,131 @@ test('43) External Failure → Native Fallback：外部 Agent 不可用 → 回�
 
   const fatals = pageErrors.filter(e => /Cannot read|TypeError|ReferenceError|is not defined/.test(e));
   expect(fatals).toEqual([]);
+});
+
+async function configureCline(config) {
+  return invoke('extcfg:set', 'cline', config);
+}
+
+async function setClineSidecarMode(mode) {
+  return invoke('test:setClineSidecarMode', mode);
+}
+
+test('44) Cline Card shows ClineCore Sidecar readiness fields', async () => {
+  await setClineSidecarMode('healthy');
+  await configureCline({ connectionId: await getFakeConnId(), model: 'model-B' });
+  await invoke('hub:health', { force: true });
+  await openAgentsPage();
+  const card = page.locator('#hub-cards .acard[data-hub-id="cline"]');
+  await expect(card).toContainText('ClineCore Sidecar');
+  await expect(card).toContainText('Node Runtime:');
+  await expect(card).toContainText('SDK: @cline/sdk 0.0.72');
+  await expect(card).toContainText('Sidecar: Ready');
+  await expect(card).toContainText('API: Configured');
+  await expect(card).toContainText('Workspace: Ready');
+});
+
+test('45) Cline Sidecar Healthy requires runtime, API, and workspace', async () => {
+  await setClineSidecarMode('healthy');
+  await configureCline({ connectionId: await getFakeConnId(), model: 'model-B' });
+  await invoke('hub:health', { force: true });
+  const available = await invoke('hub:available');
+  const cline = available.find(item => item.id === 'cline');
+  expect(cline.health.status).toBe('healthy');
+  expect(cline.health.sidecar.ready).toBe(true);
+  expect(cline.health.api.configured).toBe(true);
+  expect(cline.health.workspace.ready).toBe(true);
+});
+
+test('46) Cline Sidecar Missing is unavailable and the app remains usable', async () => {
+  await setClineSidecarMode('missing');
+  await invoke('hub:health', { force: true });
+  await openAgentsPage();
+  const card = page.locator('#hub-cards .acard[data-hub-id="cline"]');
+  await expect(card).toContainText('Sidecar: Not ready');
+  await expect(card).toContainText('不可用');
+  await expect(page.locator('#hub-route-btn')).toBeEnabled();
+});
+
+test('47) Cline API Missing is degraded, never healthy', async () => {
+  await setClineSidecarMode('healthy');
+  await configureCline({ connectionId: '', model: '' });
+  await invoke('hub:health', { force: true });
+  const available = await invoke('hub:available');
+  const cline = available.find(item => item.id === 'cline');
+  expect(cline.health.status).toBe('degraded');
+  expect(cline.health.api.configured).toBe(false);
+  await openAgentsPage();
+  await expect(page.locator('#hub-cards .acard[data-hub-id="cline"]')).toContainText('API: Not configured');
+});
+
+test('48) Cline Run Start streams an official event and completes', async () => {
+  await setClineSidecarMode('completed');
+  const connectionId = await getFakeConnId();
+  await configureCline({ connectionId, model: 'model-B' });
+  await page.evaluate(() => { window._hubEvents = []; });
+  const started = await invoke('hub:start', 'cline', { goal: 'fixture run', projectRoot: fixtureRoot, connectionId, model: 'model-B' });
+  expect(started.runId).toBeTruthy();
+  const terminal = await waitForTerminal(started.runId);
+  expect(terminal.status).toBe('completed');
+  const result = await invoke('hub:result', started.runId);
+  expect(result.result.provenance.integration).toBe('ClineCore Sidecar');
+  expect((await getHubEvents()).some(event => event.type === 'agent.message')).toBe(true);
+});
+
+test('49) Cline Cancel propagates and produces one cancelled terminal', async () => {
+  await setClineSidecarMode('hang');
+  const connectionId = await getFakeConnId();
+  const started = await invoke('hub:start', 'cline', { goal: 'wait', projectRoot: fixtureRoot, connectionId, model: 'model-B' });
+  await invoke('hub:cancel', started.runId);
+  const terminal = await waitForTerminal(started.runId);
+  expect(terminal.status).toBe('cancelled');
+  expect((await invoke('test:getClineSidecarState')).cancelCount).toBe(1);
+});
+
+test('50) Cline Timeout stays distinct from cancellation', async () => {
+  await setClineSidecarMode('timeout');
+  const connectionId = await getFakeConnId();
+  const started = await invoke('hub:start', 'cline', { goal: 'timeout', projectRoot: fixtureRoot, connectionId, model: 'model-B', timeoutMs: 20 });
+  const terminal = await waitForTerminal(started.runId);
+  expect(terminal.status).toBe('timeout');
+});
+
+test('51) Cline Crash fails the child run and releases the project lock', async () => {
+  await setClineSidecarMode('crash');
+  const connectionId = await getFakeConnId();
+  const started = await invoke('hub:start', 'cline', { goal: 'crash', projectRoot: fixtureRoot, connectionId, model: 'model-B' });
+  const terminal = await waitForTerminal(started.runId);
+  expect(terminal.status).toBe('failed');
+  expect(await invoke('lock:isBusy', fixtureRoot)).toBe(false);
+});
+
+test('52) Cline Late Result cannot overwrite TIMEOUT or emit late text', async () => {
+  await setClineSidecarMode('late');
+  const connectionId = await getFakeConnId();
+  await page.evaluate(() => { window._hubEvents = []; });
+  const started = await invoke('hub:start', 'cline', { goal: 'late', projectRoot: fixtureRoot, connectionId, model: 'model-B', timeoutMs: 20 });
+  expect((await waitForTerminal(started.runId)).status).toBe('timeout');
+  await page.waitForTimeout(100);
+  expect((await invoke('hub:status', started.runId)).status).toBe('timeout');
+  expect(JSON.stringify(await getHubEvents())).not.toContain('LATE_RESULT_MUST_BE_IGNORED');
+  expect((await invoke('test:getClineSidecarState')).lateEventSent).toBe(true);
+});
+
+test('53) Packaged-layout Runtime Smoke resolves resources/cline-runtime and shuts down', async () => {
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'adp-e2e-cline-runtime-'));
+  const manager = new ClineSidecarManager({ resourcesPath: path.join(ROOT, 'build-runtime'), dataDir });
+  try {
+    const probe = await manager.probe(fixtureRoot);
+    expect(Number(probe.nodeVersion.split('.')[0])).toBeGreaterThanOrEqual(22);
+    expect(probe.clineSdkVersion).toBe('0.0.72');
+    expect(probe.coreConstructible).toBe(true);
+    expect(probe.networkCall).toBe(false);
+    expect((await manager.shutdown()).ok).toBe(true);
+    expect(manager.child).toBeNull();
+  } finally {
+    await manager.dispose();
+    fs.rmSync(dataDir, { recursive: true, force: true });
+    await invoke('test:resetClineSidecar');
+  }
 });

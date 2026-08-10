@@ -1321,8 +1321,12 @@ async function loadHubCards(body) {
   if (!cardsEl) return;
   let available = [];
   let manifests = [];
+  let connections = [];
+  let clineConfig = {};
   try {
-    [available, manifests] = await Promise.all([api.hubAvailable(), api.hubManifests()]);
+    [available, manifests, connections, clineConfig] = await Promise.all([
+      api.hubAvailable(), api.hubManifests(), api.connections(), api.extcfgGet('cline')
+    ]);
   } catch (e) {
     cardsEl.innerHTML = `<div class="muted small">注册表不可用：${esc(e.message)}</div>`;
     return;
@@ -1344,12 +1348,30 @@ async function loadHubCards(body) {
     const healthStatus = availById.has(m.id)
       ? ((a.health && a.health.status) || a.healthStatus || 'unknown')
       : 'unavailable';
+    const clineHealth = m.id === 'cline' ? (a.health || {}) : null;
+    const clineSidecarReady = !!(clineHealth?.sidecar?.ready || (clineHealth?.runtime?.probe && clineHealth?.runtime?.coreConstructible));
+    const clineApiReady = !!clineHealth?.api?.configured;
+    const clineWorkspaceReady = !!clineHealth?.workspace?.ready;
+    const clineRuntime = clineHealth
+      ? `<div class="small" style="margin-top:8px;line-height:1.55">
+          <div><b>Integration:</b> ClineCore Sidecar</div>
+          <div><b>Node Runtime:</b> ${esc(clineHealth.runtime?.nodeVersion || 'not detected')}</div>
+          <div><b>SDK:</b> @cline/sdk ${esc(clineHealth.runtime?.clineSdkVersion || clineHealth.runtime?.sdkVersion || clineHealth.version || a.version || 'not detected')}</div>
+          <div><b>Sidecar:</b> ${clineSidecarReady ? 'Ready' : 'Not ready'}</div>
+          <div><b>API:</b> ${clineApiReady ? `Configured (${esc(clineHealth.api?.providerId || '')} / ${esc(clineHealth.api?.modelId || '')})` : `Not configured${clineHealth.api?.error ? ` — ${esc(clineHealth.api.error)}` : ''}`}</div>
+          <div><b>Workspace:</b> ${clineWorkspaceReady ? `Ready (${esc(clineHealth.workspace?.path || '')})` : `Not ready${clineHealth.workspace?.error ? ` — ${esc(clineHealth.workspace.error)}` : ''}`}</div>
+          <div><b>Health:</b> ${esc(hubHealthText(healthStatus))}${clineHealth.detail ? ` — ${esc(clineHealth.detail)}` : ''}</div>
+        </div>`
+      : '';
     return `<div class="acard" data-hub-id="${esc(m.id)}">
       <div class="acard-h"><b>${name}</b><span class="chip">${transport}</span><span class="chip ${hubHealthClass(healthStatus)}">${esc(hubHealthText(healthStatus))}</span></div>
       <div class="acard-meta">${caps.map(c => `<span class="chip">${esc(hubCapLabel(c))}</span>`).join('') || '<span class="muted small">无能力声明</span>'}</div>
-      <div class="acard-f"><button class="btn tiny" data-hub-test="${esc(m.id)}">测试</button></div>
+      ${clineRuntime}
+      <div class="acard-f">${m.id === 'cline' ? '<button class="btn tiny" data-cline-config>Configure Cline</button>' : ''}<button class="btn tiny" data-hub-test="${esc(m.id)}">测试</button></div>
     </div>`;
   }).join('');
+  const clineConfigButton = cardsEl.querySelector('[data-cline-config]');
+  if (clineConfigButton) clineConfigButton.onclick = () => openClineConfigModal(body, connections, clineConfig);
   cardsEl.querySelectorAll('[data-hub-test]').forEach(b => b.onclick = async () => {
     b.disabled = true;
     const orig = b.textContent;
@@ -1364,6 +1386,42 @@ async function loadHubCards(body) {
       b.disabled = false;
       b.textContent = orig;
     }
+  });
+}
+
+function openClineConfigModal(body, connections, config = {}) {
+  const modelIds = [...new Set((connections || []).flatMap(connection =>
+    (connection.models || []).map(model => typeof model === 'string' ? model : model?.id).filter(Boolean)
+  ))];
+  openModal('Configure ClineCore Sidecar', `
+    <div class="form2">
+      <label>API connection
+        <select id="cline-connection"><option value="">Not selected</option>${(connections || []).map(connection =>
+          `<option value="${esc(connection.id)}" ${connection.id === config.connectionId ? 'selected' : ''}>${esc(connection.name || connection.id)}</option>`
+        ).join('')}</select>
+      </label>
+      <label>Model
+        <input id="cline-model" list="cline-models" value="${esc(config.model || '')}" placeholder="Model ID">
+        <datalist id="cline-models">${modelIds.map(id => `<option value="${esc(id)}"></option>`).join('')}</datalist>
+      </label>
+    </div>
+    <p class="muted small">The API credential stays in the encrypted API connection store and is passed to the sidecar only in memory for an authorized run.</p>
+  `);
+  const connectionEl = $('#cline-connection');
+  const modelEl = $('#cline-model');
+  connectionEl.onchange = () => {
+    const selected = (connections || []).find(connection => connection.id === connectionEl.value);
+    const first = selected?.models?.[0];
+    if (!modelEl.value && first) modelEl.value = typeof first === 'string' ? first : (first.id || '');
+  };
+  onModalOk(async () => {
+    if (!connectionEl.value) throw new Error('Select an API connection for Cline');
+    if (!modelEl.value.trim()) throw new Error('Enter a model ID for Cline');
+    await api.extcfgSet('cline', { connectionId: connectionEl.value, model: modelEl.value.trim() });
+    await api.hubHealth({ force: true });
+    closeModal();
+    toast('Cline configuration saved', 'ok');
+    await loadHubCards(body);
   });
 }
 

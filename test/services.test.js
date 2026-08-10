@@ -197,8 +197,8 @@ test('ExternalAgent: 未知适配器类型返回结构化失败', async () => {
   assert.match(out.errors[0], /未知外部智能体类型/);
 });
 
-test('ExternalAgent: Codex 未配置时给出可操作的错误', async () => {
-  const out = JSON.parse(await extAgents.runExternalAgent({ adapter_type: 'codex', config: {} }, 'task', { store }));
+test('ExternalAgent: Codex API 模式未配置时给出可操作的错误', async () => {
+  const out = JSON.parse(await extAgents.runExternalAgent({ adapter_type: 'codex', config: { cliMode: 'api' } }, 'task', { store }));
   assert.strictEqual(out.status, 'failed');
   assert.match(out.errors[0], /CLI 路径或 API 连接/);
 });
@@ -208,7 +208,7 @@ test('ExternalAgent: Codex 走 API 连接时返回模型内容', async () => {
   store.init(userData);
   const conn = store.connections.create({ name: 'mockconn', provider: 'mock', base_url: '', api_key: '' });
   const out = JSON.parse(await extAgents.runExternalAgent(
-    { adapter_type: 'codex', config: { connectionId: conn.id } },
+    { adapter_type: 'codex', config: { cliMode: 'api', connectionId: conn.id } },
     '给 utils.js 加一个 slugify 函数',
     { store }
   ));

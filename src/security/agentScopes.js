@@ -42,6 +42,10 @@ function externalAgentScopes(adapter) {
     // Nothing configured yet — the adapter will fail anyway, but keep the
     // strictest of the two so a later config change cannot sneak through.
     if (!cfg.cliPath && !cfg.connectionId) scopes.push('terminal.write', 'network');
+  } else if (kind === 'cline') {
+    // The ClineCore sidecar receives this exact parent-authorized allowlist and
+    // turns it into per-tool Cline policies. It never inherits ambient env creds.
+    scopes.push('filesystem.read', 'filesystem.write', 'terminal.read', 'terminal.write', 'network', 'mcp');
   } else if (kind === 'http') {
     scopes.push('network');
   } else {

@@ -1,0 +1,7 @@
+{
+  "name": "cline-coding-fixture",
+  "private": true,
+  "scripts": {
+    "test": "node --test test/math.test.js"
+  }
+}

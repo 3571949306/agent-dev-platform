@@ -121,9 +121,23 @@ async function executeDelegate(ctx, action, args) {
     return { ok: true, tool: 'delegate', data: { handledByLoop: true } };
   }
   const { task: delegateTask, requiredCapabilities, agentId } = args || {};
+  const required = Array.isArray(requiredCapabilities) ? requiredCapabilities : [];
+  const requestedScopes = new Set(['filesystem.read']);
+  if (required.includes('coding') || required.includes('filesystem')) requestedScopes.add('filesystem.write');
+  if (required.includes('terminal') || required.includes('coding')) {
+    requestedScopes.add('terminal.read');
+    requestedScopes.add('terminal.write');
+  }
+  if (required.includes('research')) requestedScopes.add('network');
+  if (required.includes('mcp')) requestedScopes.add('mcp');
+  const permissionContext = { taskId: ctx.taskId, projectId: ctx.projectId };
+  const allowedScopes = [...requestedScopes].filter(scope =>
+    !ctx.permissionEngine || ctx.permissionEngine.evaluate(scope, permissionContext) === 'allow'
+  );
   const hubTask = {
     goal: typeof delegateTask === 'string' ? delegateTask : ((delegateTask && delegateTask.goal) || String(delegateTask || '')),
-    required: Array.isArray(requiredCapabilities) ? requiredCapabilities : [],
+    required,
+    allowedScopes,
     projectRoot: ctx.projectRoot,
     projectId: ctx.projectId,
     conversationId: ctx.conversationId,

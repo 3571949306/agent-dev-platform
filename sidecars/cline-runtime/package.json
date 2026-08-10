@@ -1,0 +1,12 @@
+{
+  "name": "@agent-dev-platform/cline-runtime",
+  "version": "2.7.3",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "@cline/sdk": "0.0.72"
+  }
+}

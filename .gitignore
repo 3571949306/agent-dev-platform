@@ -6,6 +6,9 @@ dist-electron/
 
 # Build artifacts / cache
 build.log
+.research/
+.cache/
+build-runtime/
 
 # Local data / secrets
 data.json

@@ -1,5 +1,7 @@
 # Agent Integration Hub — 多智能体集成中枢（v2.6.0）
 
+> v2.7.3 update: Cline's production transport is `sidecar-jsonl`, backed by the official `ClineCore` running under bundled Node 22. Health is context-aware: runtime + API configuration + current canonical workspace must all be ready before Cline is `healthy` or eligible for auto routing. AgentHub still owns the parent lifecycle, mutation lock, local verification, completion policy, and final parent terminal state.
+
 > **版本**：v2.6.0  
 > **状态**：Hub 核心已交付（Registry / Router / Health / Lifecycle / RunBridge），GUI + IPC 接线中  
 > **核心能力**：统一接入 Native / Codex / WorkBuddy / MCP / HTTP Agent，提供能力匹配、确定性路由、健康检查、生命周期管理、自动 Fallback 与 Main Agent 委派

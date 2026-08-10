@@ -55,16 +55,17 @@ SOFTWARE.
 - **项目**：cline — https://github.com/cline/cline
 - **包名**：`@cline/sdk`（npm）
 - **研究版本**：0.0.72（pre-1.0，仅 ESM）
+- **研究提交**：`b3cee3f973ffe9d023a10c5c414deba68cd6e09d`
 - **License**：Apache License 2.0
 - **Copyright**：Copyright (c) Cline contributors
 
 ### 引用方式
 
-- **以 npm 依赖形式引用**：Agent Dev Platform 通过 `@cline/sdk` 接入 Cline 运行时。
-- **ESM 加载**：宿主为 CJS，通过 `dynamic import()` 加载 Cline 的 ESM 模块。
+- **以独立 Sidecar 依赖形式引用**：`@cline/sdk` 及其生产依赖随 `resources/cline-runtime/sidecar/node_modules` 分发。
+- **ESM 加载**：独立 Node 22 Sidecar 加载 ESM；Electron 主进程不导入生产 SDK。
 - **Node 引擎要求**：>= 22。
-- **未修改 Cline 源码**：仅通过其公开 SDK API（`Agent` / `ClineCore` / `ClineAgent` / `createTool`）调用。
-- **未二次分发**：Cline 以运行时依赖形式存在，不随 Agent Dev Platform 源码重新发布。
+- **未修改 Cline 源码**：生产路径仅通过公开 `ClineCore` 生命周期与事件 API 调用。
+- **二进制分发**：安装包包含 npm 发布的 SDK 与生产依赖；各包自带的 license/notice 文件保留在 Sidecar 依赖树中。
 
 ### Apache License 2.0
 
@@ -259,6 +260,19 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 ```
+
+## Node.js Runtime
+
+- **项目**：Node.js — https://github.com/nodejs/node
+- **分发版本**：`22.23.2` Windows x64 official binary distribution
+- **来源**：`https://nodejs.org/dist/v22.23.2/node-v22.23.2-win-x64.zip`
+- **SHA-256**：`1177b4137ba5adaa56354ae40f1080c7450e8ae09cecb47da459d1c52ac99f97`
+- **用途**：仅用于执行 Cline Sidecar；不替换 Electron 自带的 Node 运行时。
+- **许可证与 notices**：官方分发包的 `LICENSE` 被原样保留为 `resources/cline-runtime/node/LICENSE`。该文件包含 Node.js 许可及官方二进制分发要求保留的第三方许可/notice。
+
+## Cline transitive dependencies
+
+Sidecar dependencies are exactly locked by `sidecars/cline-runtime/package-lock.json` and distributed as the npm production tree. Package `LICENSE`, `LICENSE-*`, `NOTICE`, and metadata files remain alongside the distributed modules. The authoritative inventory is the lockfile and packaged tree, not a manually copied aggregate license dump.
 
 ## OpenCode
 

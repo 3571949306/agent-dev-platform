@@ -64,7 +64,8 @@ function createHealthManager({ registry, timeoutMs = DEFAULT_TIMEOUT_MS, cacheTt
    * @param {object} [opts2] { force?: boolean } — force=true 跳过缓存
    * @returns {Promise<{status: string, version: string|null, latencyMs: number, detail: string|null, error: string|null}>}
    */
-  async function check(agentId, { force = false } = {}) {
+  async function check(agentId, opts2 = {}) {
+    const { force = false, ...context } = opts2;
     const adapter = registry.get(agentId);
     if (!adapter) {
       return { status: HEALTH_STATE.UNAVAILABLE, version: null, latencyMs: 0, detail: null, error: 'Agent 未注册' };
@@ -95,13 +96,14 @@ function createHealthManager({ registry, timeoutMs = DEFAULT_TIMEOUT_MS, cacheTt
       adapter.healthStatus = HEALTH_STATE.CHECKING;
       try {
         const raw = await raceTimeout(
-          adapter.healthCheck({ timeoutMs }),
+          adapter.healthCheck({ timeoutMs, ...context }),
           timeoutMs,
           adapter.id
         );
         const latencyMs = Date.now() - started;
         const status = (raw && raw.status) || HEALTH_STATE.UNKNOWN;
         const result = {
+          ...(raw && typeof raw === 'object' ? raw : {}),
           status,
           version: (raw && raw.version) || null,
           latencyMs,
@@ -139,7 +141,8 @@ function createHealthManager({ registry, timeoutMs = DEFAULT_TIMEOUT_MS, cacheTt
    * @param {object} [opts2] { force?: boolean }
    * @returns {Promise<Map<string, object>>} agentId -> health result
    */
-  async function checkAll({ force = false } = {}) {
+  async function checkAll(opts2 = {}) {
+    const { force = false, ...context } = opts2;
     const agents = registry.list();
     const results = new Map();
 
@@ -147,7 +150,7 @@ function createHealthManager({ registry, timeoutMs = DEFAULT_TIMEOUT_MS, cacheTt
     for (let i = 0; i < agents.length; i += MAX_CONCURRENCY) {
       const batch = agents.slice(i, i + MAX_CONCURRENCY);
       const batchResults = await Promise.all(
-        batch.map(a => check(a.id, { force }).then(r => [a.id, r]))
+        batch.map(a => check(a.id, { force, ...context }).then(r => [a.id, r]))
       );
       for (const [id, r] of batchResults) results.set(id, r);
     }

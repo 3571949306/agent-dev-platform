@@ -13,7 +13,7 @@
  */
 
 const SECRET_KEY_RE = /(api[_-]?key|authorization|bearer|token|oauth|session|cookie|password|secret|private[_-]?key)/i;
-const SECRET_VALUE_RE = /(Bearer\s+[A-Za-z0-9._\-]+|Basic\s+[A-Za-z0-9=]+|sk-[A-Za-z0-9]+|xox[baprs]-[A-Za-z0-9-]+)/g;
+const SECRET_VALUE_RE = /(Bearer\s+[A-Za-z0-9._~+\/-]+|Basic\s+[A-Za-z0-9+/=]+|sk-[A-Za-z0-9_-]{6,}|xox[baprs]-[A-Za-z0-9-]+)/g;
 const REDACTED = '[REDACTED]';
 const DEFAULT_RAW_MAX_LEN = 2000;
 

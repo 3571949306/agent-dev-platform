@@ -35,7 +35,7 @@ const openai = store.connections.list().find(c => c.provider === 'openai');
 const fakeConnName = 'Fake API';
 let fakeConn = store.connections.list().find(c => c.name === fakeConnName);
 if (!fakeConn && baseUrl) {
-  fakeConn = store.connections.create({ name: fakeConnName, provider: 'openai', base_url: baseUrl, api_key: 'sk-e2e-fake' });
+  fakeConn = store.connections.create({ name: fakeConnName, provider: 'openai', base_url: baseUrl, api_key: 'sk-test-e2e-fake' });
   // 总是把主智能体更新为 Fake API 连接 + model-B（确定 E2E 起点）
   if (main) store.agents.update(main.id, { api_connection_id: fakeConn.id, model: 'model-B' });
   try {

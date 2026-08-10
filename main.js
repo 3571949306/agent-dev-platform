@@ -10,11 +10,15 @@ if (process.env.ADP_USER_DATA) {
 
 let mainWindow = null;
 let httpServer = null;
+let handlersModule = null;
+let shutdownStarted = false;
+let shutdownComplete = false;
 
 // --smoke : boot headless-ish, load the UI, collect renderer errors, exit.
 // Used by `npm run smoke` so the packaged app is never shipped with a
 // renderer that throws on first paint.
 const SMOKE = process.argv.includes('--smoke');
+const INTEGRATION_SMOKE = process.argv.includes('--integration-smoke');
 const smokeErrors = [];
 
 async function bootstrap() {
@@ -36,6 +40,11 @@ async function bootstrap() {
     store.settings.set('_initialized', true);
   }
 
+  if (INTEGRATION_SMOKE) {
+    await runIntegrationSmoke(userDataPath);
+    return;
+  }
+
   // Static renderer server (127.0.0.1 only; logic goes through IPC)
   const { start } = require('./src/server/static');
   const { server, port } = await start(0);
@@ -43,11 +52,38 @@ async function bootstrap() {
 
   // Register IPC + connect MCP servers
   const handlers = require('./src/ipc/handlers');
+  handlersModule = handlers;
   mainWindow = createWindow(port);
   handlers.register(mainWindow);
   await handlers.initServices();
   console.log(`Agent Dev Platform ready on http://127.0.0.1:${port}`);
   if (SMOKE) runSmoke(port);
+}
+
+async function runIntegrationSmoke(userDataPath) {
+  const { ClineSidecarManager } = require('./src/agents/integrations/cline/sidecarManager');
+  const manager = new ClineSidecarManager({
+    resourcesPath: process.resourcesPath,
+    dataDir: path.join(userDataPath, 'cline')
+  });
+  let code = 0;
+  try {
+    const probe = await manager.probe(__dirname);
+    if (!probe.ok || probe.runtime !== 'ClineCore' || probe.networkCall !== false || !probe.coreConstructible) {
+      throw new Error('Packaged ClineCore probe returned an invalid health result');
+    }
+    console.log(`CLINE_PACKAGED_INTEGRATION_SMOKE_OK node=${probe.nodeVersion} sdk=${probe.clineSdkVersion} networkCall=false`);
+  } catch (error) {
+    code = 1;
+    console.error(`CLINE_PACKAGED_INTEGRATION_SMOKE_FAILED ${error.message}`);
+  } finally {
+    const stopped = await manager.shutdown();
+    if (!stopped.ok || manager.child) {
+      code = 1;
+      console.error(`CLINE_PACKAGED_INTEGRATION_SMOKE_FAILED sidecar shutdown: ${stopped.error || 'child still present'}`);
+    }
+  }
+  app.exit(code);
 }
 
 async function runSmoke(port) {
@@ -139,6 +175,22 @@ app.whenReady().then(bootstrap);
 app.on('window-all-closed', () => {
   if (httpServer) { try { httpServer.close(); } catch {} httpServer = null; }
   app.quit();
+});
+app.on('before-quit', event => {
+  if (shutdownComplete || !handlersModule?.shutdownServices) return;
+  event.preventDefault();
+  if (shutdownStarted) return;
+  shutdownStarted = true;
+  Promise.resolve(handlersModule.shutdownServices()).finally(() => {
+    shutdownComplete = true;
+    if (httpServer) { try { httpServer.close(); } catch {} httpServer = null; }
+    app.quit();
+  });
+});
+app.on('will-quit', () => {
+  // The sidecar also treats stdin EOF as shutdown; this is the final lifecycle
+  // backstop for forced app exits after before-quit cleanup has begun.
+  if (!shutdownComplete && handlersModule?.shutdownServices) void handlersModule.shutdownServices();
 });
 app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) bootstrap(); });
 

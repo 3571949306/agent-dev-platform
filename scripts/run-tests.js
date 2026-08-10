@@ -36,7 +36,10 @@ try {
 
 console.log(`运行 ${files.length} 个测试文件（Electron Node 运行时）：\n  ${files.join('\n  ')}\n`);
 
-const r = spawnSync(electronBin, ['--test', ...files], {
+// Running every file in parallel intermittently exhausts Windows loopback/
+// process resources and turns local HTTP fixture probes into false transport
+// failures. Deterministic release gates matter more than a few saved seconds.
+const r = spawnSync(electronBin, ['--test', '--test-concurrency=1', ...files], {
   cwd: ROOT,
   env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
   stdio: 'inherit'

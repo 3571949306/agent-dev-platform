@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "protocolVersion": 1,
+  "node": {
+    "version": "22.23.2",
+    "platform": "win32",
+    "arch": "x64",
+    "filename": "node-v22.23.2-win-x64.zip",
+    "downloadUrl": "https://nodejs.org/dist/v22.23.2/node-v22.23.2-win-x64.zip",
+    "shasumsUrl": "https://nodejs.org/dist/v22.23.2/SHASUMS256.txt",
+    "sha256": "1177b4137ba5adaa56354ae40f1080c7450e8ae09cecb47da459d1c52ac99f97"
+  },
+  "cline": {
+    "sdkVersion": "0.0.72",
+    "upstreamCommit": "b3cee3f973ffe9d023a10c5c414deba68cd6e09d"
+  }
+}

@@ -70,6 +70,20 @@ v2.7.0 新增。把平台从「拥有多个 Agent 功能」升级为「可以统
 
 详见 [`docs/AGENT_INTEGRATION_HUB.md`](docs/AGENT_INTEGRATION_HUB.md)。
 
+## ClineCore Sidecar Runtime
+
+v2.7.3 makes Cline a real coding provider. Production runs the official `@cline/sdk 0.0.72` and `ClineCore` in a separately bundled Node.js 22.23.2 sidecar. Cline receives the current canonical project root, parent-authorized tool scopes, an in-memory API credential, and a project mutation lock before it can edit or run commands.
+
+The Agent Center reports Node, SDK, sidecar, API, workspace, and overall health independently. A present runtime with a missing API connection is degraded—not healthy—and auto routing will not choose it. Use **Configure Cline** on the card to select an existing encrypted API connection and model.
+
+```bash
+npm run prepare-cline-runtime # verify/cache/stage pinned Node 22 + sidecar
+npm run integration-smoke     # real ClineCore coding fixture, no paid provider
+npm run e2e                   # includes Cline Cases 44-53
+```
+
+See [`docs/CLINE_SIDECAR_RUNTIME.md`](docs/CLINE_SIDECAR_RUNTIME.md), [`docs/CLINE_RUNTIME_DECISION.md`](docs/CLINE_RUNTIME_DECISION.md), and [`docs/UPSTREAM_REFERENCE_MATRIX.md`](docs/UPSTREAM_REFERENCE_MATRIX.md).
+
 ## 安装
 
 > 完整安装包与免安装版在 `dist-electron/` 目录中（构建产物，请参见 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)）。
@@ -98,6 +112,8 @@ npm install                  # 装依赖
 npm run rebuild              # 把 better-sqlite3 重新按 Electron ABI 编译
 npm run test                 # 跑 764 个单元 / 集成 / 服务端到端测试
 npm run smoke                # 启 Electron + 探测渲染层是否挂载（headless 友好）
+npm run integration-smoke    # Node 22 Sidecar + real ClineCore + local coding fixture
+npm run e2e                  # Playwright E2E（会先准备 pinned Cline runtime）
 npm run electron             # 开发模式启动
 npm run dist                 # 打 NSIS + Portable 到 dist-electron/
 ```

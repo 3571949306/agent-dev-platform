@@ -89,21 +89,40 @@ const workBuddyAdapter = new WorkBuddyAgentAdapter({ manifest: BUILTIN_AGENT_MAN
 agentHub.register(workBuddyAdapter);
 
 // v2.7.1 — Register external adapters (Cline, OpenCode, OpenHands)
-const clineAdapter = new ClineAgentAdapter({ manifest: BUILTIN_AGENT_MANIFESTS.find(m => m.id === 'cline'), store });
+const clineAdapter = new ClineAgentAdapter({
+  manifest: BUILTIN_AGENT_MANIFESTS.find(m => m.id === 'cline'),
+  store,
+  // Some isolated unit tests load handlers before the database fixture is
+  // initialized. Production initialization has a database; tests safely fall
+  // back to an empty, honestly degraded Cline configuration.
+  config: (() => { try { return store.extAgentConfigs.getCline(); } catch { return {}; } })(),
+  dataDir: path.join(app.getPath('userData'), 'cline')
+});
+const productionClineSidecarManager = clineAdapter._sidecar;
 agentHub.register(clineAdapter);
 const openCodeAdapter = new OpenCodeAgentAdapter({ manifest: BUILTIN_AGENT_MANIFESTS.find(m => m.id === 'opencode'), store, serverManager: openCodeServerManager });
 agentHub.register(openCodeAdapter);
 const openHandsAdapter = new OpenHandsAgentAdapter({ manifest: BUILTIN_AGENT_MANIFESTS.find(m => m.id === 'openhands'), store });
 agentHub.register(openHandsAdapter);
 
+let shutdownPromise = null;
+async function shutdownServices() {
+  if (shutdownPromise) return shutdownPromise;
+  shutdownPromise = (async () => {
+    projectLock.clearAll();
+    await Promise.allSettled([
+      clineAdapter.dispose(),
+      openCodeAdapter.dispose(),
+      openHandsAdapter.dispose()
+    ]);
+  })();
+  return shutdownPromise;
+}
+
 // v2.7.1 — cleanup on exit（guard：测试环境 mock 的 app 可能没有 .on）
 if (app && typeof app.on === 'function') {
   app.on('before-quit', () => {
-    projectLock.clearAll();
-    // Also dispose external adapters
-    clineAdapter.dispose().catch(() => {});
-    openCodeAdapter.dispose().catch(() => {});
-    openHandsAdapter.dispose().catch(() => {});
+    void shutdownServices();
   });
 }
 
@@ -407,7 +426,13 @@ function register(window) {
   reg('projects:create', (body) => store.projects.create(body));
   reg('projects:update', (id, body) => store.projects.update(id, body));
   reg('projects:remove', (id) => store.projects.remove(id));
-  reg('projects:open', (id) => { currentProjectId = id; const p = store.projects.get(id); if (p) store.projects.touch(id); return p; });
+  reg('projects:open', (id) => {
+    currentProjectId = id;
+    const p = store.projects.get(id);
+    if (p) store.projects.touch(id);
+    healthManager.invalidate('cline');
+    return p;
+  });
   reg('projects:current', () => currentProjectId ? store.projects.get(currentProjectId) : null);
 
   // connections
@@ -893,25 +918,48 @@ function register(window) {
 
   // v2.7.0 — Agent Integration Hub IPC
   ipcMain.handle('hub:manifests', () => agentHub.getManifests());
-  ipcMain.handle('hub:available', async () => agentHub.getAvailable());
+  ipcMain.handle('hub:available', async () => {
+    const project = currentProjectId ? store.projects.get(currentProjectId) : null;
+    await agentHub.detect();
+    await agentHub.health({ force: false, projectRoot: project?.root_path || null });
+    return agentHub.getAvailable();
+  });
   ipcMain.handle('hub:detect', async () => { return agentHub.detect(); });
-  ipcMain.handle('hub:health', async (e, { force = false } = {}) => agentHub.health({ force }));
+  ipcMain.handle('hub:health', async (e, { force = false } = {}) => {
+    const project = currentProjectId ? store.projects.get(currentProjectId) : null;
+    return agentHub.health({ force, projectRoot: project?.root_path || null });
+  });
   ipcMain.handle('hub:route', (e, task) => agentHub.route(task));
   // hub:start 支持两种调用约定：
   //   1) { agentId, task } 单参数对象（生产代码 / 内部调用）
   //   2) (agentId, task) 两个参数（E2E 测试 / 委派场景）
   ipcMain.handle('hub:start', async (e, agentIdOrObj, taskArg) => {
     const agentId = typeof agentIdOrObj === 'string' ? agentIdOrObj : (agentIdOrObj && agentIdOrObj.agentId);
-    const task = typeof agentIdOrObj === 'string' ? taskArg : (agentIdOrObj && agentIdOrObj.task);
+    const task = { ...((typeof agentIdOrObj === 'string' ? taskArg : (agentIdOrObj && agentIdOrObj.task)) || {}) };
+    const project = currentProjectId ? store.projects.get(currentProjectId) : null;
+    if (!task.projectRoot && project) task.projectRoot = project.root_path;
+    if (!task.projectId && project) task.projectId = project.id;
     return agentHub.start(agentId, task);
   });
   ipcMain.handle('hub:startAuto', async (e, taskOrObj) => {
-    const task = taskOrObj && taskOrObj.task ? taskOrObj.task : taskOrObj;
+    const task = { ...((taskOrObj && taskOrObj.task ? taskOrObj.task : taskOrObj) || {}) };
+    const project = currentProjectId ? store.projects.get(currentProjectId) : null;
+    if (!task.projectRoot && project) task.projectRoot = project.root_path;
+    if (!task.projectId && project) task.projectId = project.id;
     return agentHub.startAuto(task);
   });
   // hub:delegate — Main Agent 委派子任务给合适的 Agent（防环由 delegationPath 保证）
   ipcMain.handle('hub:delegate', async (e, { goal, required, preferred, delegationPath, parentRunId }) => {
-    const task = { goal, required: required || [], preferred: preferred || [], delegationPath: delegationPath || [], parentRunId };
+    const project = currentProjectId ? store.projects.get(currentProjectId) : null;
+    const task = {
+      goal,
+      required: required || [],
+      preferred: preferred || [],
+      delegationPath: delegationPath || [],
+      parentRunId,
+      projectRoot: project?.root_path || null,
+      projectId: project?.id || null
+    };
     return agentHub.startAuto(task);
   });
   ipcMain.handle('hub:cancel', async (e, runId) => agentHub.cancel(runId));
@@ -925,7 +973,22 @@ function register(window) {
 
   // v2.7.1 — External agent config IPC
   ipcMain.handle('extcfg:get', (e, agentId) => store.extAgentConfigs.get(agentId));
-  ipcMain.handle('extcfg:set', (e, agentId, config) => store.extAgentConfigs.set(agentId, config));
+  ipcMain.handle('extcfg:set', (e, agentId, config) => {
+    const safeConfig = agentId === 'cline'
+      ? {
+          connectionId: typeof config?.connectionId === 'string' ? config.connectionId : '',
+          model: typeof config?.model === 'string' ? config.model.trim() : '',
+          timeoutMs: Number.isFinite(config?.timeoutMs) ? config.timeoutMs : undefined,
+          maxIterations: Number.isInteger(config?.maxIterations) ? config.maxIterations : undefined
+        }
+      : config;
+    const saved = store.extAgentConfigs.set(agentId, safeConfig || {});
+    if (agentId === 'cline') {
+      clineAdapter.config = { ...saved };
+      healthManager.invalidate('cline');
+    }
+    return saved;
+  });
   ipcMain.handle('extcfg:getAll', () => ({
     cline: store.extAgentConfigs.getCline(),
     opencode: store.extAgentConfigs.getOpenCode(),
@@ -957,6 +1020,73 @@ function register(window) {
       clineAdapter._sdkInjected = false;
       // v2.7.1 — 重置后让 health 缓存失效并标记不可用，避免后续 Case 路由误判为 healthy
       clineAdapter.healthStatus = 'unavailable';
+      healthManager.invalidate('cline');
+      return { ok: true };
+    });
+
+    // Production-path E2E hook: replace only the process boundary with a
+    // deterministic sidecar-shaped fixture. The adapter remains in sidecar
+    // mode and consumes current official ClineCore event envelopes.
+    ipcMain.handle('test:setClineSidecarMode', (e, mode = 'healthy') => {
+      const active = new Map();
+      const state = { mode, cancelCount: 0, lateEventSent: false };
+      clineAdapter._sdkInjected = false;
+      clineAdapter._legacyBridge = false;
+      clineAdapter._sidecar = {
+        detect: () => mode === 'missing'
+          ? { available: false, installed: false, configured: false, version: null, nodeVersion: null, error: 'fixture runtime missing', runtime: { missing: ['node.exe'] } }
+          : { available: true, installed: true, configured: true, version: '0.0.72', nodeVersion: '22.23.2', runtime: { manifest: { protocolVersion: 1 } } },
+        probe: async projectRoot => ({ ok: true, runtime: 'ClineCore', coreConstructible: true, networkCall: false, nodeVersion: '22.23.2', clineSdkVersion: '0.0.72', projectRoot }),
+        run: async options => {
+          options.onStarted?.({ sessionId: `e2e-${mode}`, workspace: options.projectRoot });
+          if (mode === 'crash') {
+            const error = new Error('fixture sidecar crashed');
+            error.code = 'CLINE_SIDECAR_CRASHED';
+            throw error;
+          }
+          if (mode === 'hang') {
+            return new Promise(resolve => active.set(options.runId, resolve));
+          }
+          if (mode === 'timeout' || mode === 'late') {
+            if (mode === 'late') {
+              setTimeout(() => {
+                state.lateEventSent = true;
+                options.onEvent?.({ type: 'agent_event', payload: { sessionId: `e2e-${mode}`, event: { type: 'content_start', contentType: 'text', text: 'LATE_RESULT_MUST_BE_IGNORED' } } });
+              }, 30);
+            }
+            return { type: 'run.timeout', payload: { error: { code: 'CLINE_RUN_TIMEOUT', message: 'fixture timeout' } } };
+          }
+          options.onEvent?.({ type: 'agent_event', payload: { sessionId: `e2e-${mode}`, event: { type: 'content_start', contentType: 'text', text: 'CLINE_SIDECAR_E2E_OK' } } });
+          return {
+            type: 'run.result',
+            payload: {
+              result: { finishReason: 'completed', text: 'CLINE_SIDECAR_E2E_OK', iterations: 1, changedFiles: [] },
+              provenance: { runtime: 'ClineCore Sidecar', nodeVersion: '22.23.2', sdkVersion: '0.0.72', sessionId: `e2e-${mode}` }
+            }
+          };
+        },
+        cancel: runId => {
+          const resolve = active.get(runId);
+          if (!resolve) return false;
+          state.cancelCount += 1;
+          active.delete(runId);
+          resolve({ type: 'run.cancelled', payload: { error: { code: 'CLINE_RUN_CANCELLED', message: 'fixture cancelled' } } });
+          return true;
+        },
+        dispose: async () => {}
+      };
+      clineAdapter._testSidecarState = state;
+      clineAdapter._detected = null;
+      healthManager.invalidate('cline');
+      return { ok: true, mode };
+    });
+    ipcMain.handle('test:getClineSidecarState', () => ({ ...(clineAdapter._testSidecarState || {}) }));
+    ipcMain.handle('test:resetClineSidecar', () => {
+      clineAdapter._sidecar = productionClineSidecarManager;
+      clineAdapter._testSidecarState = null;
+      clineAdapter._detected = null;
+      clineAdapter._sdkInjected = false;
+      clineAdapter._legacyBridge = false;
       healthManager.invalidate('cline');
       return { ok: true };
     });
@@ -1058,4 +1188,4 @@ async function initServices() {
   rebuildMcpToolMap();
 }
 
-module.exports = { register, initServices, runChatTurn, runManager, _internals: { getTool, mcpManager, browser: browser.manager, computer: computer.manager } };
+module.exports = { register, initServices, shutdownServices, runChatTurn, runManager, _internals: { getTool, mcpManager, browser: browser.manager, computer: computer.manager, clineAdapter } };

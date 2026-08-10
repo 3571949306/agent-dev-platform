@@ -1,4 +1,75 @@
-# Test Report — Agent Dev Platform v2.6.0
+# Test Report — Agent Dev Platform v2.7.3
+
+## v2.7.3 — ClineCore Sidecar Runtime（2026-08-10）
+
+本节记录从精确基线 `v2.7.2 / cf573aba9479f8bb01f65018e27a7d15b3224357`
+升级到 v2.7.3 后的最终本地门禁。Cline 集成使用固定的 `@cline/sdk 0.0.72`、
+`ClineCore` 与内置 Node `22.23.2`，测试不调用付费模型。
+
+| Gate | Previous | New | Final result |
+| --- | ---: | ---: | --- |
+| Unit / integration tests | 922（919 pass / 2 fail / 1 skip） | +20 | 942 total / 941 pass / 0 fail / 1 skip |
+| Electron E2E | 43 | +10（Cases 44–53） | 53 pass / 0 fail / 0 skip |
+| Source smoke | — | — | `SMOKE_OK` |
+| Cline integration smoke | — | — | Real SDK + ClineCore + local model fixture + coding tools PASS |
+| Windows build | — | — | `npm run dist` ExitCode 0 |
+| win-unpacked smoke | — | — | `--smoke` ExitCode 0 |
+| win-unpacked integration | — | — | `--integration-smoke` ExitCode 0; sidecar processes 0 → 0 |
+
+基线的两个失败来自依赖环境状态的 service tests；v2.7.3 将其改为确定性 fixture，
+没有删除或跳过旧测试。最终 `npm test` 实际耗时 67.2 秒，`npm run e2e` 实际耗时
+约 1.5 分钟。
+
+### Integration evidence
+
+```text
+CLINE_INTEGRATION_SMOKE_OK node=22.23.2 sdk=0.0.72 networkCall=false
+CLINE_CODING_FIXTURE_OK turns=3 changed=src/math.js test=passed
+PACKAGED_SMOKE_EXIT=0
+PACKAGED_INTEGRATION_SMOKE_EXIT=0
+CLINE_SIDECAR_PROCESS_COUNT_AFTER=0
+```
+
+该 fixture 从固定 Node 22 启动真实 sidecar，导入真实 `@cline/sdk`，构造真实
+`ClineCore`，使用本地 OpenAI-compatible SSE fixture 驱动真实工作区工具修复
+`src/math.js` 并运行测试。结论分级如下：
+
+- ClineCore Runtime: **VERIFIED**
+- Model Execution Fixture: **VERIFIED**
+- Real paid/provider LLM task: **NOT VERIFIED**
+
+### Build size
+
+为避免猜测，v2.7.2 大小来自在 `.cache` 隔离 worktree 中对精确基线提交重新打包；
+该目录和所有生成产物均不提交。
+
+| Artifact | v2.7.2 | v2.7.3 | Delta |
+| --- | ---: | ---: | ---: |
+| NSIS setup | 84,969,786 B | 142,404,068 B | +57,434,282 B |
+| Portable | 84,762,073 B | 142,196,335 B | +57,434,262 B |
+
+官方 Node ZIP 为 35,683,585 B（解压后 `node.exe` 86,997,320 B）；Cline sidecar
+及生产依赖解压后为 164,898,682 B。按安装包压缩增量粗略拆分，Node 贡献约
+35.7 MB，SDK/sidecar/依赖及少量 manifest/source 贡献约 21.8 MB。
+
+### Dependency and license audit
+
+- Root production audit: 0 vulnerabilities (`npm audit --omit=dev`).
+- Root full audit: 13 development/build findings（12 high, 1 critical），来自既有
+  Electron/electron-builder/electron-rebuild/tar 工具链；它们不在 production dependency
+  audit 中，但仍需在后续 Electron/toolchain 升级中处理。
+- Sidecar production audit: 16 transitive findings（15 moderate, 1 high）。高危项是
+  SDK provider dependency tree 中的 `undici 5.29.0`；其余主要来自 OpenTelemetry。
+  `npm audit fix --package-lock-only --dry-run` 无可应用的非破坏性变更；强行跨 major
+  override 会偏离已验证的 Cline SDK 依赖闭包，因此本版如实保留并列为跟踪项。
+- Sidecar lockfile license metadata: Apache-2.0 104、MIT 186、BSD/ISC/0BSD 等 27；
+  三个 `@cline/*` 子包缺少 npm license metadata，但上游 Cline 仓库及 SDK 为
+  Apache-2.0。`@jerome-benoit/sap-ai-provider` 的 package metadata 名称不准确，随包
+  `LICENSE` 实际为 Apache-2.0。所有依赖自带 license/notice 文件随完整生产依赖树保留。
+
+---
+
+## Historical report — v2.6.0
 
 > **基线**：`v2.6.0`（基于 `v2.5.1 / commit 08fc7a5`）。
 > **本轮目标**：Main Agent 自主编码闭环 —— 实现状态机驱动的 Main Agent Runtime，让主智能体独立完成编码任务（理解需求 → 读项目 → 分析代码 → 制定计划 → 修改文件 → 运行命令 → 测试 → 错误检测 → 修复 → 输出结果），不依赖外部智能体（Codex/WorkBuddy）。

@@ -322,8 +322,8 @@ test('34) Cancel Isolation：取消一个 Run 不影响另一个', async () => {
 
   // 2. 在两个 Agent 上各启动一个 Run
   const starts = await page.evaluate(async () => {
-    const r1 = await window.api.invoke('hub:start', 'fake-agent-a', { goal: '任务 A' });
-    const r2 = await window.api.invoke('hub:start', 'fake-agent-b', { goal: '任务 B' });
+    const r1 = await window.api.invoke('hub:start', 'fake-agent-a', { goal: '任务 A', readOnly: true });
+    const r2 = await window.api.invoke('hub:start', 'fake-agent-b', { goal: '任务 B', readOnly: true });
     return {
       a: r1 && r1.data !== undefined ? r1.data : r1,
       b: r2 && r2.data !== undefined ? r2.data : r2

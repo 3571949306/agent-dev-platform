@@ -101,8 +101,8 @@ function createAgentHub(opts = {}) {
    * @param {object} [opts2] { force?: boolean }
    * @returns {Promise<Map>} id -> health result
    */
-  async function health({ force = false } = {}) {
-    return healthManager.checkAll({ force });
+  async function health(options = {}) {
+    return healthManager.checkAll(options);
   }
 
   /**
@@ -136,7 +136,7 @@ function createAgentHub(opts = {}) {
 
     // 2. 检查健康（标记为 checking，不阻塞启动）
     try {
-      const healthResult = await healthManager.check(agentId, { force: false });
+      const healthResult = await healthManager.check(agentId, { force: false, projectRoot: task.projectRoot });
       adapter.healthStatus = healthResult.status;
     } catch {
       // 健康检查失败不阻塞启动——让 adapter.startTask 自行决定
@@ -182,6 +182,7 @@ function createAgentHub(opts = {}) {
         agentId,
         projectRoot: task.projectRoot,
         projectId: task.projectId,
+        allowedScopes: Array.isArray(task.allowedScopes) ? task.allowedScopes : undefined,
         // 包装 emit：经过 eventNormalizer 归一化后发射
         // v2.7.1 — adapter 若已自行归一化（type 以 agent. 开头），直接发射，避免二次映射丢失事件类型。
         emit: (type, payload) => {
@@ -262,6 +263,13 @@ function createAgentHub(opts = {}) {
    * @returns {Promise<{ runId: string, agentId: string }|{ error: string, errorCode: string }>}
    */
   async function startAuto(task = {}) {
+    // Cline health includes runtime, API configuration, and this exact
+    // workspace, so refresh it immediately before making an auto-route choice.
+    if (registry.get('cline')) {
+      try {
+        await healthManager.check('cline', { force: true, projectRoot: task.projectRoot });
+      } catch { /* other candidates remain available */ }
+    }
     const candidates = router.route(task);
     if (!candidates.length) {
       return { error: '没有可用的 Agent', errorCode: ec('AGENT_ROUTE_EXHAUSTED', 'AGENT_ROUTE_EXHAUSTED') };

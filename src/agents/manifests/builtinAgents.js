@@ -92,7 +92,7 @@ const CLINE = {
   id: 'cline',
   displayName: 'Cline',
   source: 'external',
-  transport: 'sdk',
+  transport: 'protocol',
   capabilities: {
     coding: true,
     planning: true,
@@ -114,8 +114,8 @@ const CLINE = {
   },
   availability: false,
   version: null,
-  path: '@cline/sdk',
-  maxConcurrency: 2
+  path: 'cline-runtime',
+  maxConcurrency: 1
 };
 
 /**

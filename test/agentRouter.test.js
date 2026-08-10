@@ -191,3 +191,14 @@ test('route 不存在 agent 的 task 也能返回所有候选', () => {
     assert.ok(item.score < 1000, '不存在的 agent 不应得到 +1000');
   }
 });
+
+test('Cline is excluded from auto routing until its full health is healthy', () => {
+  const r = createAgentRegistry();
+  r.register(makeAdapter('native', ['coding']));
+  r.register(makeAdapter('cline', ['coding'], { healthStatus: HEALTH_STATE.DEGRADED }));
+  const router = createAgentRouter({ registry: r });
+  assert.ok(!router.route({ required: ['coding'] }).some(item => item.agentId === 'cline'));
+  assert.ok(router.route({ required: ['coding'], agentId: 'cline' }).some(item => item.agentId === 'cline'));
+  r.get('cline').healthStatus = HEALTH_STATE.HEALTHY;
+  assert.ok(router.route({ required: ['coding'] }).some(item => item.agentId === 'cline'));
+});

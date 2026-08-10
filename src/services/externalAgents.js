@@ -122,7 +122,15 @@ function resolveCliInPath(cmd) {
     child.stdout.on('data', d => { out += d.toString(); });
     child.on('error', () => resolve(null));
     child.on('close', code => {
-      if (code === 0 && out.trim()) resolve(out.trim().split(/\r?\n/)[0]);
+      if (code === 0 && out.trim()) {
+        const candidates = out.trim().split(/\r?\n/).filter(Boolean);
+        // Windows `where` may return an extensionless app alias before the
+        // actual executable. Spawning that alias can fail with EPERM.
+        const preferred = process.platform === 'win32'
+          ? candidates.find(candidate => /\.(exe|com)$/i.test(candidate)) || candidates[0]
+          : candidates[0];
+        resolve(preferred);
+      }
       else resolve(null);
     });
   });
@@ -135,7 +143,7 @@ function resolveCliInPath(cmd) {
  * - cliMode='api': return null (no CLI needed)
  */
 async function resolveCodexCli(cfg) {
-  const mode = cfg.cliMode || (cfg.cliPath ? 'path' : 'auto');
+  const mode = cfg.cliMode || (cfg.cliPath ? 'path' : (cfg.connectionId ? 'api' : 'auto'));
   if (mode === 'api') return null;
   if (mode === 'auto') return resolveCliInText('codex');
   // mode === 'path'

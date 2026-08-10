@@ -71,6 +71,10 @@ function createAgentRouter({ registry, preferences = {} } = {}) {
       if (a.disabled) return false;
       if (disabledSet.has(a.id)) return false;
       if (delegationPath.includes(a.id)) return false;
+      // The bundled runtime may be installed while API/workspace readiness is
+      // still incomplete. Only a fully healthy Cline can be auto-routed.
+      // An explicit override may still surface the concrete config error.
+      if (a.id === 'cline' && a.healthStatus !== HEALTH_STATE.HEALTHY && agentIdOverride !== 'cline') return false;
       return true;
     });
 

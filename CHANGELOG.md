@@ -1,5 +1,16 @@
 # Changelog
 
+## v2.7.3 — 2026-08-10
+
+> Cline Native Sidecar Runtime: real `@cline/sdk 0.0.72` / `ClineCore` coding execution under a bundled, checksum-verified Node.js 22.23.2 runtime.
+
+- Replaced the production in-process/fake-Agent Cline path with `ClineAgentAdapter -> ClineSidecarManager -> Node 22 -> ClineCore`; the old SDK bridge is test-only.
+- Added a reproducible sidecar project and lockfile, protocol 1 JSONL framing, official event mapping, one-run concurrency, exact workspace manifest validation, permission intersection, cancel/timeout/late/crash gates, graceful shutdown, and Windows process-tree fallback.
+- Added official Node-only download preparation, pinned SHA-256 plus `SHASUMS256.txt` verification, offline cache behavior, license staging, and electron-builder `extraResources` packaging.
+- Added honest Agent Center Node/SDK/Sidecar/API/Workspace health plus encrypted connection/model configuration; degraded Cline is excluded from auto routing.
+- Added real no-cost ClineCore coding integration smoke, packaged-layout smoke, Sidecar protocol/manager/adapter tests, and E2E Cases 44-53. CI now has Unit, Smoke, E2E, and Integration jobs.
+- Added the runtime decision, upstream reference matrix, sidecar operations guide, updated notices, and explicit `Real LLM: NOT VERIFIED` reporting.
+
 ## v2.7.2 — 2026-08-09
 
 > External Agent Runtime Reliability —— 让 Cline / OpenCode / OpenHands 三个外部 Adapter 在真实运行时的终态、取消、超时、打包与诚实性真正可靠。基于 v2.7.1 的 Agent Integration Hub，不引入新依赖、不改变 Main Agent Runtime 核心、旧连接完全兼容。

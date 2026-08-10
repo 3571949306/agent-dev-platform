@@ -131,6 +131,12 @@ async function main() {
 }
 
 main().catch(error => {
-  process.stderr.write(`CLINE_INTEGRATION_SMOKE_FAILED ${error.message}\n`);
+  // SidecarManager stores only a bounded, secret-redacted stderr tail. Include
+  // it on failure so a clean CI runner can diagnose platform-only crashes
+  // without exposing credentials or turning normal runs into verbose logs.
+  const stderrTail = typeof error?.detail?.stderr === 'string'
+    ? error.detail.stderr.trim().slice(-8192)
+    : '';
+  process.stderr.write(`CLINE_INTEGRATION_SMOKE_FAILED ${error.message}${stderrTail ? `\nCLINE_SIDECAR_STDERR ${stderrTail}` : ''}\n`);
   process.exitCode = 1;
 });

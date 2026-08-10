@@ -51,14 +51,17 @@ export function initOrchestration() {
   }
 
   function onDelegation(ev) {
-    if (ev.type === 'delegation.started' && ev.runId) {
-      const n = runs.get(ev.runId) || {};
-      n.routeReason = ev.routeReason || ev.reason || null;
-      n.goal = ev.goal || n.goal;
-      n.agentId = n.agentId || ev.agentId;
-      n.parentRunId = n.parentRunId != null ? n.parentRunId : ev.parentRunId;
-      runs.set(ev.runId, n);
-    }
+    const id = ev.runId;
+    if (!id) return;
+    const n = runs.get(id) || {};
+    // started 事件携带 routeReason / readOnly / goal / agentId / parentRunId（§71/§74）
+    if (ev.routeReason !== undefined) n.routeReason = ev.routeReason || n.routeReason || null;
+    n.goal = ev.goal || n.goal;
+    n.agentId = n.agentId || ev.agentId;
+    n.parentRunId = n.parentRunId != null ? n.parentRunId : ev.parentRunId;
+    // §73: 直接使用 readOnly === true，不再用 routeReason 子串猜测
+    n.readOnly = (ev.readOnly === true) ? true : (n.readOnly || false);
+    runs.set(id, n);
   }
 
   function agentName(node) {
@@ -116,7 +119,7 @@ export function initOrchestration() {
         html += `<div class="orch-card">
           <div class="orch-card-row"><span class="orch-k">Agent:</span><span class="orch-v">${esc(agentName(n))}</span></div>
           <div class="orch-card-row"><span class="orch-k">Reason:</span><span class="orch-v">${esc(n.routeReason || n.goal || '—')}</span></div>
-          <div class="orch-card-row"><span class="orch-k">Mode:</span><span class="orch-v">${n.routeReason && /read.only/i.test(n.routeReason) ? 'Read-only' : 'Default'}</span></div>
+          <div class="orch-card-row"><span class="orch-k">Mode:</span><span class="orch-v">${n.readOnly ? 'Read-only' : 'Default'}</span></div>
           <div class="orch-card-row"><span class="orch-k">Status:</span><span class="orch-v">${esc(statusLabel(n.status))}</span></div>
           <div class="orch-card-row"><span class="orch-k">Duration:</span><span class="orch-v">${esc(duration(n))}</span></div>
           <div class="orch-card-actions">
@@ -140,7 +143,10 @@ export function initOrchestration() {
     mount.querySelectorAll('[data-stop]').forEach((b) => {
       b.addEventListener('click', async () => {
         const id = b.getAttribute('data-stop');
-        try { await api.orchCancel(id); toast('已发送停止指令'); }
+        const node = runs.get(id);
+        const parentRunId = node ? node.parentRunId : null;
+        // §56-61: Child Stop 走明确 IPC（parentRunId + childRunId），不再误用 Parent cancel
+        try { await api.orchCancelChild(parentRunId, id); toast('已发送停止指令'); }
         catch (e) { toast('停止失败: ' + e.message); }
       });
     });
@@ -150,7 +156,8 @@ export function initOrchestration() {
     try {
       if (!ev || !ev.type) return;
       if (ev.type === 'run_state_changed') { upsert(ev); render(); }
-      else if (ev.type.startsWith('delegation.')) { onDelegation(ev); render(); }
+      // §65: 统一命名空间 — 同时匹配 canonical(orchestration.delegation.*) 与 legacy(agent.delegation.*)
+      else if (ev.type.includes('delegation.')) { onDelegation(ev); render(); }
     } catch (err) { /* 隔离：不影响其他事件处理 */ }
   });
 }

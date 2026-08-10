@@ -36,7 +36,7 @@
 
 ### 四、IPC / Prompt / 链接创建风险（§58/§14-17）
 
-* 新增 `orchestrator:start/cancel/status/result/children` IPC（§58），保留兼容 `mainAgent:*`/`hub:*`/`agent:*`（§59）。
+* 新增 `orchestrator:cancel/status/result/children/cancelChild` IPC（§58，**不新增 `orchestrator:start`**——统一 Parent 入口为 `mainAgent:run`，见 §58），保留兼容 `mainAgent:*`/`hub:*`/`agent:*`（§59）。
 * Main Agent Prompt 更新：加 delegate action 类型 + 委派指导（什么时候 delegate / 自己做，§14-17）。
 * `mainAgentRuntime` 创建 Orchestrator 并注入 ctx.orchestrator（打通 delegate 闭环）。
 * GUI（§60-64）：新增 `public/js/orchestration.js` 隔离模块 + 右侧栏「编排 Run Tree」面板，从 `run_state_changed` 事件流渲染 Main Agent → Delegate → Child 树与 Delegation Card（Agent/Reason/Mode/Status/Duration + 查看/停止），`run_state_changed` 事件现携带 parentRunId/rootRunId/depth/adapterId。
@@ -58,7 +58,44 @@
 ### 八、预留未来接口（§69-73，不实现）
 
 * AgentDefinition（Dynamic Agent，v2.9.1）/ modelRequirements（Model Router，v2.9.2）/ skillIds（Skill，v2.9.3）/ Hook Engine（v2.9.4）/ Workflow（v2.9.5）/ AI Extension Generator（v2.9.6）。
-* 事件总线稳定（run.started/delegation.*/verification.*/run.completed），供未来 Hook 订阅。
+* 事件总线稳定（`orchestration.*` canonical + `agent.delegation.*` legacy alias，§65-72），供未来 Hook 订阅。
+
+### 九、Framework Closure Patch — 收口 5 个框架缺口（保持 v2.9.0，冻结框架）
+
+> 本节对应 spec「Framework Closure Patch」：在 v2.9.0 Unified Orchestrator 闭环之上，补掉 5 个
+> 上线前必堵的框架缺口；版本号维持 2.9.0（不 bump），随后冻结框架，下一代为 v2.9.1 Dynamic Agent。
+
+* **Gap 1 — NativeAgentAdapter 空 Model Context（spec §7B/§9）**：新增 `nativeModelContextResolver.js`
+  （优先级链：modelOverride → context.model → agent.api_connection_id/model → parentModelContext →
+  抛 `NATIVE_MODEL_CONTEXT_UNRESOLVED`）；`executionContextFactory.create` 经 `createNativeModelContextResolver`
+  注入 `providerModelAdapter`（非仅 ModelInfo 元数据），`NativeAgentAdapter.startTask` 不再因 `model=null` 抛 FAIL。
+  新增 `nativeModelContextResolver.test.js`（8 用例）/ `nativeHubIntegration.test.js`（1 用例，§16-17）。
+* **Gap 2 — `test:real-ai:orchestrator` 仅占位（spec §2/§74-99）**：`scripts/real-ai-orchestrator-smoke.js`
+  重写为真实轻量链路（resolveRealAiConnection → buildMainModelAdapter → executeRealAiChain → Blackboard），
+  无 DeepSeek Test Connection 配置时**诚实 SKIP**（打印 `STATUS: SKIPPED / REASON: CONNECTION_NOT_CONFIGURED` +
+  exit 0），绝不编造 PASS。修复 `createBudgetEnforcer` 误用 `||` 导致 `maxModelCalls:0` 回退为 6 的 bug（改用 `??`）。
+  新增 `realAiSmoke.test.js`（8 用例）。
+  * 本机 env 存在 `DEEPSEEK_API_KEY`，故 Gate 4 **实际打通了真实 DeepSeek 链路**（7 次 model call，API 可达、
+    key 有效），最终因 smoke harness 以 `store:null`/`getTool:()=>null` 驱动 `runMainAgent`、触发 `RunManager`
+    严格的 `preparing→executing_tool` 状态守卫而 **FAIL**（DeepSeek 未产生 delegate action）—— 此为
+    harness/集成限制，**非 5 个框架缺口回归**；脚本**如实报告 FAIL（exit 1），绝不伪造 PASS**。另修复 `finally`
+    中 `process.exit` 抢先于 cleanup 导致 TEMP fixture 残留的 bug（§50/§128：defer exit → fixture 清理、无 zombie dir）。
+* **Gap 3 — GUI Child Stop 参数错位（spec §56-61）**：`public/js/orchestration.js` 的「停止」按钮改为
+  显式 `api.orchCancelChild(parentRunId, childRunId)`（此前误把 childRunId 当 parentRunId 传 → `ORCHESTRATOR_NOT_FOUND`）；
+  `api.orchCancelChild` 映射 `orchestrator:cancelChild` 正确传 `{ parentRunId, childRunId }`。
+* **Gap 4 — 委派事件命名错位（spec §65-72）**：新增 `src/agent/orchestrator/events.js` 单一真相源
+  `ORCHESTRATION_EVENT`（`orchestration.*`）+ `LEGACY_EVENT`（`agent.delegation.*` alias），后端
+  （AgentHubBridge/MainAgentOrchestrator）与前端（`public/js/orchestration.js`）统一消费，杜绝
+  「后端发 `agent.delegation.*` 而前端监听 `delegation.*`」的错位。新增 `orchestrationEvents.test.js`（8 用例）。
+* **Gap 5 — Orchestrator Registry 生命周期泄漏（spec §77-90）**：`mainAgentRuntime.js` 的 Main Agent Run
+  `finally` 段补 `await _orch.dispose()` + `if (_unregister) _unregister(runId)`，Run 终态后从 module-level
+  registry 解绑，杜绝每次对话泄漏一个 orchestrator 实例。`dispose` 仅清 child/timer/listener，不取消已完成 child。
+  新增 `orchestratorLifecycle.test.js`（5 用例：register/get/unregister、生命周期、dispose 幂等、100× 无泄漏）。
+* 同步清理：删除前端 `api.orchStart`（`orchestrator:start` 通道不存在，死绑定）；CHANGELOG/UNIFIED 文档移除
+  `orchestrator:start`，对齐「统一 Parent 入口为 `mainAgent:run`」。
+* IPC 命名空间最终确定：`orchestrator:cancel/status/result/children/cancelChild`（5 通道，无 start）。
+* 测试总盘面：单元测试 **1474 / 1473 PASS / 0 FAIL / 1 SKIP**（v2.8.2 的 1426 + v2.9.0 原 14 +
+  Closure Patch +34 = 1474；相对 v2.8.2 净增 48）。
 
 ## v2.8.2 — 2026-08-10
 

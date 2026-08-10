@@ -163,10 +163,24 @@ function createChildRunTracker() {
     emitters.clear();
   }
 
+  /**
+   * 释放资源（§81）：唤醒所有 waiters → 清除 maps / emitters。
+   * Orchestrator dispose 时调用，确保无僵尸 timer / listener。
+   */
+  function dispose() {
+    for (const [runId, em] of emitters) {
+      try { em.emit('terminal', { runId, status: 'interrupted', result: null }); } catch { /* noop */ }
+    }
+    parentOf.clear();
+    childrenOf.clear();
+    runs.clear();
+    emitters.clear();
+  }
+
   return {
     register, getChildren, getParent, get, getRoot, depth,
     isTerminal, setTerminal, wait, cancel,
-    snapshot, clear, TERMINAL_STATUSES
+    snapshot, clear, dispose, TERMINAL_STATUSES
   };
 }
 

@@ -47,13 +47,50 @@ function createExecutionContextFactory(runtimeDeps) {
     const isNative = transport === 'native';
 
     if (isNative) {
-      // Native Main Agent：需要完整运行时依赖来驱动 runMainAgent
-      // §7B 缺口修复：补全 runManager/model/getTool/store/permissionEngine/pathSecurity
-      const model = task.model || (deps.resolveModel ? deps.resolveModel(task) : null);
+      // §8-17: Native Hub Model Context 真修复（Gap 1）。
+      // 优先用 shared resolver 产出真实 ProviderModelAdapter（带 decide），
+      // 优先级：modelOverride → context.model → agent api_connection_id/model → parentModelContext。
+      // 其中 parentModelContext 仅在「Main Agent 委派子任务」的编排路径注入（见 handlers.js
+      // 与 orchestrator 构造），用于让 native child 复用 Main Agent 当前 model（Gap 1 修复点）。
+      const resolver = deps.nativeModelContextResolver;
+      let providerModelAdapter = null;
+      let modelInfo = null;
+      let connection = null;
+      if (resolver) {
+        try {
+          const resolved = resolver.resolveNativeModelContext(agent, {
+            modelOverride: task.modelOverride || null,
+            contextModel: (task.context && task.context.model) || null,
+            parentModelContext: deps.parentModelContext || null
+          });
+          providerModelAdapter = resolved.providerModelAdapter;
+          modelInfo = resolved.modelInfo;
+          connection = resolved.connection;
+        } catch (e) {
+          // §9-6：resolver 在无「真实 ProviderModelAdapter」来源时明确抛错（不静默选首个 Connection）。
+          // 但生产「顶层」native-start（fallback-to-native-main / 用户直接启动 native-main）不携带
+          // parentModelContext，且 native-main 的真实模型由 mainAgentRuntime 内部解析。NativeAgentAdapter
+          // 仅要求 context.model 非空（startTask line 98）。故此处沿用 v2.9.0 之前行为：给一个 truthy
+          // 的 model 描述（resolveModel(agent) / defaultModel），避免回归 fallback / 顶层启动路径。
+          try {
+            modelInfo = (deps.resolveModel ? deps.resolveModel(agent) : null) || deps.defaultModel || { model: null };
+          } catch {
+            modelInfo = deps.defaultModel || { model: null };
+          }
+        }
+      } else {
+        // 无 resolver（极端降级）：保持最小可用 model 描述
+        modelInfo = (deps.resolveModel ? deps.resolveModel(agent) : null) || deps.defaultModel || { model: null };
+      }
+      // §13: 明确字段 modelInfo / modelAdapter / provider / connection；
+      // NativeAgentAdapter 使用 context.model（真实 adapter 优先，否则 model 描述）。
       return Object.assign(base, {
         runManager: deps.runManager || null,
-        model: model || (deps.defaultModel || null),
-        provider: (model && model.provider) || (deps.buildProvider ? deps.buildProvider(model) : null),
+        model: providerModelAdapter || modelInfo || (deps.defaultModel || null),
+        modelInfo,
+        modelAdapter: providerModelAdapter,
+        provider: providerModelAdapter,
+        connection: connection || (modelInfo && modelInfo.connectionId ? { id: modelInfo.connectionId } : null),
         getTool: deps.getTool || null,
         store: deps.store || null,
         requestPermission: deps.requestPermission || null,

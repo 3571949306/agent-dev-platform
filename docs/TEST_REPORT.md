@@ -8,18 +8,24 @@
 ### 本轮单元测试
 
 ```text
-# tests 1440
-# pass 1439
+# tests 1474
+# pass 1473
 # fail 0
 # cancelled 0
 # skipped 1
-# duration_ms ~90000
+# duration_ms ~100000
 ```
 
-**结论：1440 / 1439 PASS，0 失败，1 跳过**（`npm test`，2026-08-10 真实执行）。
+**结论：1474 / 1473 PASS，0 失败，1 跳过**（`npm test`，2026-08-10 真实执行；含 Framework Closure Patch 新增 34 项）。
 
-- 相对 v2.8.2（1426）增量：**+14**，全部来自新增 `test/mainAgentOrchestrator.test.js`
-  （§107：delegate→AgentHub / Blackboard / self-delegation / depth / fallback / changedFiles / externalClaim / secret sanitize / ChildRunTracker / AgentTask contract）。
+- 相对 v2.8.2（1426）增量：**+48**（1426 → 1474）。
+  - **+14** 来自 v2.9.0 Unified Orchestrator 核心：`test/mainAgentOrchestrator.test.js`
+    （§107：delegate→AgentHub / Blackboard / self-delegation / depth / fallback / changedFiles / externalClaim / secret sanitize / ChildRunTracker / AgentTask contract）。
+  - **+34** 来自 Framework Closure Patch（仍为 v2.9.0，未升版）的 7 个新测试文件，覆盖 5 个收口缺口：
+    `nativeModelContextResolver.test.js`(§9-1~9-6)、`orchestrationEvents.test.js`(§65/§71/§72)、
+    `orchestratorLifecycle.test.js`(§77/§83-88)、`realAiSmoke.test.js`(§21/§31-32/§37-39/§102)、
+    `childCancel.test.js`(§64/§57-58/§89)、`nativeHubIntegration.test.js`(§16-17 Gap1)、
+    `orchestratorIntegration.test.js`(§103-105)。
 - 现有 1426 测试全部保留并通过（delegate placeholder 移除、executeDelegate 增强、agentHub contextFactory 注入、runManager/store schema migration 均未破坏既有断言）。
 
 ### Orchestrator 改造自查（spec §119 类比 Release Blockers）
@@ -37,6 +43,7 @@
 
 - **Real AI Smoke（§74-99）**：脚本 `scripts/real-ai-orchestrator-smoke.js` 已就绪，但需 DeepSeek Test Connection 凭据；当前环境无 credential → 按 §76 SKIP。CI 亦 SKIP。
 - **e2e（65 项）**：**64 passed / 1 failed**（2.1m，2026-08-10 真实执行）。唯一失败仍为 `agent-hub.spec.js:197 Capability Routing`（codex 认证时机 flaky，与 v2.8.2 基线同项，与 Orchestrator 改动无关——单独重跑通过、代码路径不涉 orchestrator）。v2.9.0 新增 `orchestrator:*` 为纯新增 channel，未触碰既有 `hub:*`/`mainAgent:*` 流程，无新增 regression。
+  - Framework Closure Patch 过程中，Gap 1 的 Native Model Context Resolver 初版在顶层 `hub.start('native-main')`（fallback 路径，无 parentModelContext）会抛 `NATIVE_MODEL_CONTEXT_UNRESOLVED`，一度导致 `agent-hub.spec.js:33 Fallback` 与 `external-agent-pack.spec.js:43 Fallback` 两项 e2e 失败；已修复（`executionContextFactory` 顶层回退到 truthy model 描述、编排委派路径仍走 `parentModelContext` 真实 ProviderModelAdapter），重跑验证 64/65（仅剩上述 Capability Routing flaky）。
 - **dist build / win-unpacked smoke**：`npm run dist` 在 v2.8.2 已验证成功；v2.9.0 仅改 JS 逻辑 + 前端静态资源，重跑成功（Agent Dev Platform Setup 2.9.0.exe + portable）。
 - **CI（GitHub Actions `ci.yml`/`windows-test.yml`，spec §123）**：TRIGGERED — YES（push `9a023a1`）。INDEPENDENT VERIFICATION UNAVAILABLE（gh 未认证）。不写「CI PASS」，需在 Actions 页面核对真实 conclusion。GitHub Dependabot 60 漏洞提示与 v2.8.2 同（dev/build 依赖，v2.9.0 无新依赖）。
 

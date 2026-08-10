@@ -50,6 +50,7 @@ v2.9.0 建立 **MainAgentOrchestrator** 统一编排层（§9），不合并底�
 | `orchestrationBlackboard.js` | Root Run 共享工作状态 + secret sanitize + context budget | §34-38/§115 |
 | `childRunTracker.js` | Parent/Child Run 树 + 取消级联 + event-driven wait | §23-29 |
 | `executionContextFactory.js` | 统一 Adapter context（修复 Native Hub Context 缺口） | §39-40 |
+| `nativeModelContextResolver.js` | Native Child Model 解析（Gap 1：产出真实 ProviderModelAdapter，优先级 modelOverride→context.model→agent api_connection_id/model→parentModelContext） | §5-17 |
 | `delegationController.js` | fallback policy + no-bypass | §30-33 |
 | `agentHubBridge.js` | AgentTask → AgentHub.route/start → wait → AgentResult | §18 |
 | `mainAgentOrchestrator.js` | 统一编排入口 + 事件总线 | §9/§72 |
@@ -67,6 +68,8 @@ v2.9.0 建立 **MainAgentOrchestrator** 统一编排层（§9），不合并底�
 **v2.8.2**：`agentHub.start` 只传 8 字段（runId/projectRoot/emit/finishRun/...），缺 `runManager`/`model`/`getTool`。NativeAgentAdapter.startTask 第 97-98 行因 `runManager`/`model` 必填而 throw。
 
 **v2.9.0 修复**：`ExecutionContextFactory` 统一构建 context（§39-40）。`handlers.js` 创建 AgentHub 时注入 `contextFactory`（含 runManager/getTool/store/buildProvider/resolveModel/pathSecurity/projectMutationLock）。`hub.start` 用 `contextFactory.create(adapter, task, run, hubCtx)` 补全 Native 必填字段。
+
+Framework Closure Patch（Gap 1）进一步把「Native Child 的 Model 来源」抽成 `nativeModelContextResolver`，明确优先级与「无来源即明确失败（不静默取首个 Connection）」契约；编排委派路径经 `parentModelContext` 注入 Main Agent 当前 model（真实 ProviderModelAdapter，带 decide），顶层 `hub.start('native-main')` 则沿用 truthy model 描述由 `mainAgentRuntime` 内部解析。
 
 ## 4. AgentTask Contract（§11）
 
@@ -134,14 +137,19 @@ v2.9.0 建立 **MainAgentOrchestrator** 统一编排层（§9），不合并底�
 - **Main Final Verification**（§51）：External Agent 的"完成"只是 Claim，Main Agent 仍需本地 `git diff`/`test`/`CompletionPolicy` 复核。
 - **externalClaim ≠ localVerification**（§53）：Child 报 tests passed 标记 externalClaim，不自动当本地验证。
 
-## 10. 事件总线（§72，供未来 Hook 订阅）
+## 10. 事件总线（§65/§71/§72，供未来 Hook 订阅）
+
+Framework Closure Patch（Gap 4）统一了事件命名空间，**单一标准命名空间 `orchestration.*`**：
 
 ```
-run.started
-delegation.before / delegation.started / delegation.completed / delegation.failed
-verification.started / verification.completed
-run.before_complete / run.completed
+orchestration.run.started
+orchestration.delegation.before / delegation.started / delegation.completed / delegation.failed
+orchestration.verification.started / verification.completed
+orchestration.run.before_complete / run.completed
 ```
+
+为兼容旧前端（`delegation.*` 直接订阅），保留 **Legacy alias `agent.delegation.*`**（`agentHubBridge` 同时 emit canonical + legacy，
+`orchestrationEvents.test.js` §65/§71 验证两者并存）。后端不再以 `agent.delegation.*` 作为规范名。
 
 本轮不实现 Hook Engine（§73），只确保事件稳定。
 
@@ -154,7 +162,7 @@ run.before_complete / run.completed
 
 ## 12. IPC（§58-59）
 
-新增 `orchestrator:start/cancel/status/result/children`。现有 `mainAgent:*`/`hub:*`/`agent:*` 保留兼容（§59，不删除，内部可转发）。
+新增 `orchestrator:cancel/status/result/children/cancelChild`（§56-60，**不新增 `orchestrator:start`**——统一 Parent 入口为 `mainAgent:run`，见 §58）。现有 `mainAgent:*`/`hub:*`/`agent:*` 保留兼容（§59，不删除，内部可转发）。
 
 ## 13. Real AI Smoke（§74-99）
 

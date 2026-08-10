@@ -18,6 +18,7 @@ const { createExecutionContextFactory } = require('./executionContextFactory');
 const { createAgentHubBridge } = require('./agentHubBridge');
 const { createAgentTask } = require('./agentTaskContract');
 const { EventEmitter } = require('events');
+const { ORCHESTRATION_EVENT } = require('./events');
 
 /**
  * 创建 MainAgentOrchestrator 实例（per Parent Run）。
@@ -66,7 +67,7 @@ function createMainAgentOrchestrator(opts) {
     started = true;
     goal = taskGoal;
     blackboard.setGoal(taskGoal);
-    eventBus.emit('run.started', { parentRunId, goal: taskGoal });
+    eventBus.emit(ORCHESTRATION_EVENT.RUN_STARTED, { parentRunId, goal: taskGoal });
   }
 
   /**
@@ -100,9 +101,9 @@ function createMainAgentOrchestrator(opts) {
       return { ok: false, status: 'failed', agentId: null, runId: null, errors: [error], errorCode };
     }
 
-    eventBus.emit('delegation.before', { parentRunId, goal: task.goal });
+    eventBus.emit(ORCHESTRATION_EVENT.DELEGATION_BEFORE, { parentRunId, goal: task.goal });
     const result = await bridge.startChildTask(task, options);
-    eventBus.emit(result.ok ? 'delegation.completed' : 'delegation.failed',
+    eventBus.emit(result.ok ? ORCHESTRATION_EVENT.DELEGATION_COMPLETED : ORCHESTRATION_EVENT.DELEGATION_FAILED,
       { parentRunId, agentId: result.agentId, runId: result.runId, status: result.status });
     return result;
   }
@@ -150,7 +151,7 @@ function createMainAgentOrchestrator(opts) {
    * @returns {Promise<object>} { verified, localTests, externalClaims, unresolved }
    */
   async function finalVerify(verifyOpts, runLocalTests) {
-    eventBus.emit('verification.started', { parentRunId });
+    eventBus.emit(ORCHESTRATION_EVENT.VERIFICATION_STARTED, { parentRunId });
     const snap = blackboard.snapshot();
     const externalClaims = [];
     for (const cr of snap.childResults) {
@@ -164,7 +165,7 @@ function createMainAgentOrchestrator(opts) {
     }
     const unresolved = snap.blockers.length > 0;
     const verified = !unresolved && (!localTests || localTests.passed);
-    eventBus.emit('verification.completed', { parentRunId, verified, localPassed: localTests && localTests.passed });
+    eventBus.emit(ORCHESTRATION_EVENT.VERIFICATION_COMPLETED, { parentRunId, verified, localPassed: localTests && localTests.passed });
     return {
       verified,
       localTests,
@@ -179,13 +180,44 @@ function createMainAgentOrchestrator(opts) {
    * 完成 Parent Run（§72 run.completed / run.before_complete）。
    */
   function complete(status) {
-    eventBus.emit('run.before_complete', { parentRunId });
-    eventBus.emit('run.completed', { parentRunId, status: status || 'completed' });
+    eventBus.emit(ORCHESTRATION_EVENT.RUN_BEFORE_COMPLETE, { parentRunId });
+    eventBus.emit(ORCHESTRATION_EVENT.RUN_COMPLETED, { parentRunId, status: status || 'completed' });
+  }
+
+  /**
+   * 取消单个 child run（§57-58）：registry.get(parentRunId) → orch.cancelChild(childRunId)。
+   * @param {string} childRunId
+   * @returns {Promise<string[]>}
+   */
+  async function cancelChild(childRunId) {
+    return bridge.cancelChild(childRunId);
+  }
+
+  /**
+   * 释放资源（§78-85）：取消仍在运行的 child → bridge.dispose → tracker.dispose → eventBus 清空。
+   * dispose 只清资源，不取消已完成的 child。写完即与 live registry 解耦。
+   */
+  async function dispose() {
+    try {
+      const kids = childRunTracker.getChildren(parentRunId);
+      for (const childId of kids) {
+        if (!childRunTracker.isTerminal(childId)) {
+          try {
+            await childRunTracker.cancel(childId, async (id) => {
+              try { await hub.cancel(id); } catch { /* noop */ }
+            });
+          } catch { /* noop */ }
+        }
+      }
+    } catch { /* noop */ }
+    try { bridge.dispose(); } catch { /* noop */ }
+    try { childRunTracker.dispose(); } catch { /* noop */ }
+    try { eventBus.removeAllListeners(); } catch { /* noop */ }
   }
 
   return {
     start, delegate, getObservation, createExecutionContext,
-    getChildren, cancelAllChildren, finalVerify, complete,
+    getChildren, cancelAllChildren, cancelChild, finalVerify, complete, dispose,
     blackboard, childRunTracker, bridge, executionContextFactory,
     eventBus,
     parentRunId, parentAgentId
@@ -205,4 +237,9 @@ function unregister(parentRunId) {
   registry.delete(parentRunId);
 }
 
-module.exports = { createMainAgentOrchestrator, register, get, unregister };
+/** §88: 测试 helper — 当前活跃 orchestrator 数量（registry size）。仅供 leak test 使用。 */
+function _activeCount() {
+  return registry.size;
+}
+
+module.exports = { createMainAgentOrchestrator, register, get, unregister, _activeCount };

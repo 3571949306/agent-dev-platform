@@ -86,6 +86,7 @@ const projectLock = createProjectMutationLock();
 //   hub.start 时 contextFactory.create(adapter, task, run, hubCtx) 补全 NativeAgentAdapter 必填字段。
 const _pathSecurity = require('../security/pathSecurity');
 const { createExecutionContextFactory, get: orchestratorGet } = require('../agent/orchestrator');
+const { createNativeModelContextResolver } = require('../agent/orchestrator/nativeModelContextResolver');
 const executionContextFactory = createExecutionContextFactory({
   runManager,
   getTool,
@@ -96,7 +97,8 @@ const executionContextFactory = createExecutionContextFactory({
   pathSecurity: _pathSecurity,
   projectMutationLock: projectLock,
   emit,
-  defaultModel: null   // 由 resolveModelFor(task) 在 create 时解析
+  defaultModel: null,   // 由 nativeModelContextResolver 在 create 时按优先级解析（§8-17）
+  nativeModelContextResolver: createNativeModelContextResolver({ buildProvider, resolveModel: resolveModelFor })
 });
 const agentHub = createAgentHub({ registry: agentRegistry, router: agentRouter, healthManager, lifecycleManager, eventNormalizer, runBridge, emit, projectLock, contextFactory: executionContextFactory });
 setAgentHub(agentHub);
@@ -1116,6 +1118,14 @@ function register(window) {
     const cancelled = await orch.cancelAllChildren(async (childId) => {
       try { await agentHub.cancel(childId); } catch { /* noop */ }
     });
+    return { ok: true, cancelled };
+  });
+  ipcMain.handle('orchestrator:cancelChild', async (e, { parentRunId, childRunId } = {}) => {
+    // §56-60: 明确区分 Parent cancel 与单 child cancel
+    if (!parentRunId || !childRunId) return { ok: false, error: 'INVALID_ARGS', errorCode: 'INVALID_ARGS' };
+    const orch = orchestratorGet(parentRunId);
+    if (!orch) return { ok: false, error: 'ORCHESTRATOR_NOT_FOUND', errorCode: 'ORCHESTRATOR_NOT_FOUND' };
+    const cancelled = await orch.cancelChild(childRunId);
     return { ok: true, cancelled };
   });
   ipcMain.handle('orchestrator:status', async (e, runId) => {

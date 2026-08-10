@@ -84,12 +84,15 @@ function runMainAgent(opts) {
   // v2.9.0 §9 — 创建 Orchestrator 并注册（打通 delegate → AgentHub 闭环）
   //   executeDelegate 优先用 ctx.orchestrator.delegate 走完整编排链。
   //   AgentHub 不可用（隔离单测）时 orchestrator=null，delegate 回退现有逻辑。
+  let _orch = null;
+  let _unregister = null;
   try {
-    const { createMainAgentOrchestrator, register } = require('../orchestrator');
+    const { createMainAgentOrchestrator, register, unregister } = require('../orchestrator');
+    _unregister = unregister;
     const { getAgentHub } = require('../../agents/hub/agentHub');
     const _hub = getAgentHub();
     if (_hub) {
-      const _orch = createMainAgentOrchestrator({
+      _orch = createMainAgentOrchestrator({
         hub: _hub, parentRunId: runId, parentAgentId: agentId || 'native-main',
         projectRoot, projectId, emit
       });
@@ -188,6 +191,11 @@ function runMainAgent(opts) {
     } finally {
       if (timeoutTimer) clearTimeout(timeoutTimer);
       if (opts.unregisterAbort) opts.unregisterAbort(conversationId);
+      // §78-85: Orchestrator 生命周期收口 — dispose（清 child/timer/listener）+ unregister（避免 registry 泄漏）
+      if (_orch) {
+        try { await _orch.dispose(); } catch { /* noop */ }
+        try { if (_unregister) _unregister(runId); } catch { /* noop */ }
+      }
     }
   })();
 

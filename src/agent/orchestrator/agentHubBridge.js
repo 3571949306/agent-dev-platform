@@ -17,6 +17,7 @@ const { checkDelegationDepth, isSelfDelegation, MAX_DELEGATION_DEPTH } = require
 const { classifyFailure, shouldFallback, chooseFallback } = require('./delegationController');
 const { sanitize } = require('./orchestrationBlackboard');
 const { TERMINAL_STATUSES } = require('./childRunTracker');
+const { ORCHESTRATION_EVENT, LEGACY_EVENT, delegationTerminalEvent } = require('./events');
 
 const POLL_INTERVAL_MS = 500;
 
@@ -33,13 +34,18 @@ function createAgentHubBridge(opts) {
   const parentAgentId = (opts && opts.parentAgentId) || null;
   const emit = (opts && opts.emit) || null;
 
+  // §83: dispose 时需要停止轮询，避免 zombie timer
+  let disposed = false;
+  let activeTimer = null;
+
   /**
    * 后台轮询 hub.result 直到终态，然后 setTerminal（§19 event-driven wait）。
    */
   function pollUntilTerminal(runId, abortSignal, timeoutMs) {
+    if (disposed) return;
     const deadline = Date.now() + (timeoutMs || 300000);
     const poll = async () => {
-      if (tracker.isTerminal(runId)) return;
+      if (disposed || tracker.isTerminal(runId)) return;
       if (abortSignal && abortSignal.aborted) {
         try { await hub.cancel(runId); } catch { /* noop */ }
         tracker.setTerminal(runId, 'cancelled', null);
@@ -57,8 +63,8 @@ function createAgentHubBridge(opts) {
           return;
         }
       } catch { /* transient */ }
-      const _t = setTimeout(poll, POLL_INTERVAL_MS);
-      if (_t && _t.unref) _t.unref();   // 不阻止 process 退出（测试环境）
+      activeTimer = setTimeout(poll, POLL_INTERVAL_MS);
+      if (activeTimer && activeTimer.unref) activeTimer.unref();   // 不阻止 process 退出（测试环境）
     };
     poll();
   }
@@ -132,6 +138,18 @@ function createAgentHubBridge(opts) {
       return { ok: false, status: 'failed', agentId: null, runId: null, errors: ['NO_AVAILABLE_AGENT'], summary: '无可用 Agent' };
     }
 
+    // §74: 从真实 route result 提取 routeReason（可读摘要），供 GUI 展示
+    let routeReason = null;
+    if (rankedAgents && rankedAgents.length) {
+      const top = rankedAgents[0];
+      routeReason = (Array.isArray(top.reasons) && top.reasons.length) ? top.reasons.join('\n') : null;
+    }
+    const routeContext = {
+      routeReason,
+      readOnly: agentTask.readOnly === true,
+      requiredCapabilities: agentTask.requiredCapabilities || []
+    };
+
     // §42: 防自委派
     if (isSelfDelegation(parentAgentId, agentId)) {
       return { ok: false, status: 'failed', agentId, runId: null, errors: ['SELF_DELEGATION_BLOCKED'], summary: '禁止委派给自身' };
@@ -142,7 +160,7 @@ function createAgentHubBridge(opts) {
 
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       triedAgentIds.push(agentId);
-      const result = await runOnce(agentTask, agentId, abortSignal);
+      const result = await runOnce(agentTask, agentId, abortSignal, routeContext);
       // 成功或不可 fallback 的失败 → 直接返回
       if (result.ok) return result;
       const failureType = classifyFailure(result);
@@ -168,8 +186,10 @@ function createAgentHubBridge(opts) {
 
   /**
    * 单次执行：hub.start → wait terminal → AgentResult。
+   * @param {object} routeContext  { routeReason, readOnly, requiredCapabilities }（§71/§74）
    */
-  async function runOnce(agentTask, agentId, abortSignal) {
+  async function runOnce(agentTask, agentId, abortSignal, routeContext) {
+    const rc = routeContext || {};
     const hubTask = {
       goal: agentTask.goal,
       required: agentTask.requiredCapabilities,
@@ -205,9 +225,20 @@ function createAgentHubBridge(opts) {
     // 注册到 Run tree
     tracker.register(parentRunId, runId, agentId);
 
-    // §20: child started event 到 GUI
+    // §20/§71: child started event 到 GUI（canonical orchestration.* + legacy agent.* 兼容）
     if (emit) {
-      try { emit('agent.delegation.started', { runId, agentId, parentRunId, goal: sanitize(agentTask.goal) }); } catch { /* noop */ }
+      const startedPayload = {
+        runId, agentId, parentRunId,
+        goal: sanitize(agentTask.goal),
+        reason: sanitize(agentTask.goal),
+        readOnly: !!rc.readOnly,
+        requiredCapabilities: rc.requiredCapabilities || [],
+        routeReason: rc.routeReason || null,
+        status: 'running',
+        timestamp: Date.now()
+      };
+      try { emit(ORCHESTRATION_EVENT.DELEGATION_STARTED, startedPayload); } catch { /* noop */ }
+      try { emit(LEGACY_EVENT.DELEGATION_STARTED, startedPayload); } catch { /* noop */ }
     }
 
     // §19: 后台轮询 hub.result，终态时 setTerminal
@@ -223,9 +254,16 @@ function createAgentHubBridge(opts) {
       try { blackboard.addChildResult(agentResult); } catch { /* noop */ }
     }
 
-    // §20: child terminal event 到 GUI
+    // §20/§72: child terminal event 到 GUI（canonical orchestration.* + legacy agent.* 兼容）
     if (emit) {
-      try { emit('agent.delegation.terminal', { runId, agentId, status, parentRunId }); } catch { /* noop */ }
+      const terminalPayload = {
+        runId, agentId, parentRunId, status,
+        routeReason: rc.routeReason || null,
+        readOnly: !!rc.readOnly,
+        timestamp: Date.now()
+      };
+      try { emit(delegationTerminalEvent(status), terminalPayload); } catch { /* noop */ }
+      try { emit(LEGACY_EVENT.DELEGATION_TERMINAL, terminalPayload); } catch { /* noop */ }
     }
 
     return agentResult;
@@ -240,7 +278,18 @@ function createAgentHubBridge(opts) {
     });
   }
 
-  return { startChildTask, runOnce, cancelChild };
+  /**
+   * 释放资源（§84）：停止后台轮询 timer，避免 zombie（dispose 只清资源，不取消已完成 child）。
+   */
+  function dispose() {
+    disposed = true;
+    if (activeTimer) {
+      try { clearTimeout(activeTimer); } catch { /* noop */ }
+      activeTimer = null;
+    }
+  }
+
+  return { startChildTask, runOnce, cancelChild, dispose };
 }
 
 module.exports = { createAgentHubBridge };

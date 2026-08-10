@@ -42,6 +42,34 @@ function safeEmit(emit, type, payload) {
 }
 
 /**
+ * v2.8.0 spec §77 — Agent Center 的 Transport 人类可读标签。
+ * 多运行时 Agent 按当前生效运行时给精确值，未运行时给候选集。
+ */
+function transportLabelFor(adapter) {
+  const id = adapter.id;
+  const rt = typeof adapter.getActiveRuntime === 'function' ? adapter.getActiveRuntime() : null;
+  if (id === 'codex') {
+    if (rt === 'app-server') return 'Codex App Server';
+    if (rt === 'exec') return 'Codex Exec (structured)';
+    if (rt === 'legacy') return 'Codex CLI (legacy)';
+    return 'App Server / Exec';
+  }
+  if (id === 'claude-code') {
+    if (rt === 'sdk') return 'Claude Agent SDK';
+    if (rt === 'cli') return 'Claude CLI (structured)';
+    if (rt === 'acp') return 'ACP';
+    return 'Agent SDK / CLI';
+  }
+  if (id === 'cline') return 'ClineCore Sidecar';
+  if (id === 'native-main' || id === 'native') return 'Native Runtime';
+  if (adapter.transport === 'acp') return 'ACP';
+  if (id === 'opencode') return 'OpenCode Server';
+  if (id === 'openhands') return 'OpenHands Server';
+  if (adapter.transport === 'desktop') return 'Desktop Bridge';
+  return adapter.transport || adapter.adapterType || 'unknown';
+}
+
+/**
  * 创建 AgentHub。
  * @param {object} opts
  * @param {object} opts.registry — AgentRegistry 实例
@@ -387,14 +415,31 @@ function createAgentHub(opts = {}) {
    * @returns {Array<{ id, adapterType, transport, healthStatus, health, capabilities }>}
    */
   function getAvailable() {
-    return registry.listAvailable().map(adapter => ({
-      id: adapter.id,
-      adapterType: adapter.adapterType || null,
-      transport: adapter.transport || null,
-      healthStatus: adapter.healthStatus || HEALTH_STATE.UNKNOWN,
-      health: healthManager.getStatus(adapter.id),
-      capabilities: adapter.capabilities || []
-    }));
+    return registry.listAvailable().map(adapter => {
+      // v2.8.0 spec §77/§78/§79：Agent Center 需要 transport 展示 / 安装态 / 版本 / 认证状态。
+      // 认证只暴露状态机展示值（state/mode/authenticated/detail），绝不暴露凭据本体。
+      let auth = null;
+      if (typeof adapter.getAuthState === 'function') {
+        try {
+          const a = adapter.getAuthState();
+          if (a) auth = { state: a.state || 'UNKNOWN', mode: a.mode || '', authenticated: !!a.authenticated, detail: a.detail || '' };
+        } catch { auth = null; }
+      }
+      const detected = adapter._detected || null;
+      return {
+        id: adapter.id,
+        adapterType: adapter.adapterType || null,
+        transport: adapter.transport || null,
+        transportLabel: transportLabelFor(adapter),
+        healthStatus: adapter.healthStatus || HEALTH_STATE.UNKNOWN,
+        health: healthManager.getStatus(adapter.id),
+        capabilities: adapter.capabilities || [],
+        installed: !!adapter.available,
+        version: (detected && detected.version) || null,
+        activeRuntime: typeof adapter.getActiveRuntime === 'function' ? adapter.getActiveRuntime() : null,
+        auth
+      };
+    });
   }
 
   return {

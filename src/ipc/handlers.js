@@ -42,7 +42,9 @@ const { WorkBuddyAgentAdapter } = require('../agents/adapters/workBuddyAgentAdap
 const { ClineAgentAdapter } = require('../agents/adapters/clineAgentAdapter');
 const { OpenCodeAgentAdapter } = require('../agents/adapters/openCodeAgentAdapter');
 const { OpenHandsAgentAdapter } = require('../agents/adapters/openHandsAgentAdapter');
+const { ClaudeCodeAgentAdapter } = require('../agents/adapters/claudeCodeAgentAdapter');
 const { createOpenCodeServerManager } = require('../agents/integrations/opencode/serverManager');
+const { createDbSessionPersistence } = require('../agents/session/externalAgentSessionManager');
 const { createProjectMutationLock } = require('../security/projectMutationLock');
 
 const mcpManager = new McpManager();
@@ -81,9 +83,11 @@ const agentHub = createAgentHub({ registry: agentRegistry, router: agentRouter, 
 setAgentHub(agentHub);
 
 // Register built-in adapters
+// v2.8.0 — 外部 Agent 会话落库后端（spec §110/§111）。DB 未就绪（隔离单测）时为 null → 纯内存。
+const sessionPersistence = (() => { try { return createDbSessionPersistence(store.externalAgentSessions); } catch { return null; } })();
 const nativeAdapter = new NativeAgentAdapter({ manifest: BUILTIN_AGENT_MANIFESTS[0], runMainAgentFn: require('../agent/runtime/mainAgentRuntime').runMainAgent, emit });
 agentHub.register(nativeAdapter);
-const codexAdapter = new CodexAgentAdapter({ manifest: BUILTIN_AGENT_MANIFESTS[1], store });
+const codexAdapter = new CodexAgentAdapter({ manifest: BUILTIN_AGENT_MANIFESTS[1], store, sessionPersistence });
 agentHub.register(codexAdapter);
 const workBuddyAdapter = new WorkBuddyAgentAdapter({ manifest: BUILTIN_AGENT_MANIFESTS[2], computerManager: computer.manager });
 agentHub.register(workBuddyAdapter);
@@ -104,6 +108,15 @@ const openCodeAdapter = new OpenCodeAgentAdapter({ manifest: BUILTIN_AGENT_MANIF
 agentHub.register(openCodeAdapter);
 const openHandsAdapter = new OpenHandsAgentAdapter({ manifest: BUILTIN_AGENT_MANIFESTS.find(m => m.id === 'openhands'), store });
 agentHub.register(openHandsAdapter);
+
+// v2.8.0 — Claude Code（primary: Claude Agent SDK；fallback: claude -p --output-format stream-json）
+const claudeCodeAdapter = new ClaudeCodeAgentAdapter({
+  manifest: BUILTIN_AGENT_MANIFESTS.find(m => m.id === 'claude-code'),
+  // 与 Cline 同理：隔离单测可能在 DB fixture 就绪前加载 handlers，缺配置时退化为空配置
+  config: (() => { try { return store.extAgentConfigs.getClaudeCode(); } catch { return {}; } })(),
+  sessionPersistence
+});
+agentHub.register(claudeCodeAdapter);
 
 let shutdownPromise = null;
 async function shutdownServices() {
@@ -922,9 +935,30 @@ function register(window) {
     const project = currentProjectId ? store.projects.get(currentProjectId) : null;
     await agentHub.detect();
     await agentHub.health({ force: false, projectRoot: project?.root_path || null });
-    return agentHub.getAvailable();
+    const available = agentHub.getAvailable();
+    // v2.8.0 spec §110 — 认证状态落库：只存状态机的展示值，绝不存凭据。
+    // UNKNOWN 不落库（无信息量，且会覆盖更精确的历史状态）。
+    try {
+      if (store.externalAgentAuthStates) {
+        for (const a of available) {
+          if (a && a.auth && a.auth.state && a.auth.state !== 'UNKNOWN') {
+            store.externalAgentAuthStates.set(a.id, { state: a.auth.state, mode: a.auth.mode, detail: a.auth.detail });
+          }
+        }
+      }
+    } catch { /* DB 写失败不得影响读路径 */ }
+    return available;
   });
   ipcMain.handle('hub:detect', async () => { return agentHub.detect(); });
+  // v2.8.0 spec §81 — Session UI：外部 Agent 会话列表 + 认证状态（均不含凭据）
+  ipcMain.handle('hub:sessions', () => {
+    try {
+      return {
+        sessions: store.externalAgentSessions ? store.externalAgentSessions.list() : [],
+        authStates: store.externalAgentAuthStates ? store.externalAgentAuthStates.list() : []
+      };
+    } catch { return { sessions: [], authStates: [] }; }
+  });
   ipcMain.handle('hub:health', async (e, { force = false } = {}) => {
     const project = currentProjectId ? store.projects.get(currentProjectId) : null;
     return agentHub.health({ force, projectRoot: project?.root_path || null });
@@ -1002,6 +1036,56 @@ function register(window) {
       const adapter = new TestAgentAdapter(config);
       agentHub.register(adapter);
       return { ok: true, id: adapter.id };
+    });
+
+    // v2.8.0 — ACP E2E hook：注册一个**真实的** AcpAgentAdapter，其 command/args
+    // 指向 fake ACP Agent 子进程（wire v1 严格实现）。走的是与生产完全相同的
+    // 握手 / 协商 / 权限交集 / 取消 / 超时 / 崩溃 / resume / 落库 代码路径。
+    const { AcpAgentAdapter } = require('../agents/adapters/acpAgentAdapter');
+    const FAKE_ACP_AGENT_SCRIPT = path.join(__dirname, '..', '..', 'test', 'fakes', 'fakeAcpAgent.js');
+    ipcMain.handle('hub:testRegisterAcpAdapter', (e, opts = {}) => {
+      const manifest = opts.manifest || {
+        id: 'fake-acp', displayName: 'Fake ACP Agent', transport: 'acp',
+        capabilities: { coding: true }, maxConcurrency: 2
+      };
+      const adapter = new AcpAgentAdapter({
+        manifest,
+        config: {
+          command: process.execPath,
+          args: [FAKE_ACP_AGENT_SCRIPT],
+          environment: {
+            // Electron 以 Node 模式运行 fake agent；纯 Node 环境下该变量无害。
+            ELECTRON_RUN_AS_NODE: '1',
+            FAKE_ACP_CONFIG: JSON.stringify(opts.agentConfig || {})
+          },
+          cancelGraceMs: 1500,
+          ...(opts.adapterConfig || {})
+        },
+        sessionPersistence
+      });
+      agentHub.register(adapter);
+      return { ok: true, id: adapter.id };
+    });
+
+    // v2.8.0 — Codex auth E2E hook：模拟 app-server 运行时 getAuthStatus 的读取结果，
+    // 驱动真实的 CodexAgentAdapter.getAuthState() 状态映射（不含任何凭据）。
+    ipcMain.handle('hub:testSetCodexAuth', (e, status) => {
+      codexAdapter._lastAuthStatus = status === 'authenticated' ? 'authenticated' : 'required';
+      return { ok: true, auth: codexAdapter.getAuthState() };
+    });
+
+    // v2.8.0 — Codex detect E2E hook：CI 机器上没有真实 codex CLI 时，预设探测结果，
+    // 使适配器表面（transportLabel / auth 面 / 路由候选 / GUI 卡片）可被验证。
+    // detect() 对已缓存的 _detected 短路返回，后续 hub:available 的 detect 不会覆盖它。
+    ipcMain.handle('hub:testSetCodexDetected', (e, detected) => {
+      codexAdapter._detected = {
+        available: true,
+        path: 'fake-codex',
+        version: '0.0.0-test',
+        supportsAppServer: true,
+        ...(detected || {})
+      };
+      return { ok: true, detected: codexAdapter._detected };
     });
 
     // v2.7.1 — External Agent Pack test injection hooks

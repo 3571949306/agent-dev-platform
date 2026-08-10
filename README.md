@@ -70,6 +70,17 @@ v2.7.0 新增。把平台从「拥有多个 Agent 功能」升级为「可以统
 
 详见 [`docs/AGENT_INTEGRATION_HUB.md`](docs/AGENT_INTEGRATION_HUB.md)。
 
+## Universal External Agent Runtime（v2.8.0）
+
+v2.8.0 把外部 Agent 接入升级为统一运行时：Main Agent → Agent Router → Agent Hub → External Agent Runtime（ACP 优先 / Codex 深度集成 / Claude Code 集成）。
+
+* **ACP 优先**：wire protocolVersion=1 的严格 JSON-RPC 2.0 客户端（握手 / 能力协商 / auth 状态机 / session / 权限交集桥 / cancel），期望能力缺失即失败，绝不降级硬发。
+* **Codex 深度集成**：app-server（primary）→ `codex exec --json`（fallback）→ legacy 兜底，降级发 `agent.fallback` 事件留痕；capability 随实际运行时动态回填。
+* **Claude Code 集成**：SDK（primary）→ CLI stream-json（fallback）；平台不读取任何登录凭据，无 API Key 时 auth 状态如实为 UNKNOWN。
+* **安全约束**：权限取交集（Parent Run ∩ Platform Policy ∩ Agent Policy）；终态 exactly-once；unexpected exit 绝不判 COMPLETED；超时 ≠ 取消。
+
+详见 [`docs/ACP_RUNTIME.md`](docs/ACP_RUNTIME.md)、[`docs/CODEX_DEEP_INTEGRATION.md`](docs/CODEX_DEEP_INTEGRATION.md)、[`docs/CLAUDE_CODE_INTEGRATION.md`](docs/CLAUDE_CODE_INTEGRATION.md)。
+
 ## ClineCore Sidecar Runtime
 
 v2.7.3 makes Cline a real coding provider. Production runs the official `@cline/sdk 0.0.72` and `ClineCore` in a separately bundled Node.js 22.23.2 sidecar. Cline receives the current canonical project root, parent-authorized tool scopes, an in-memory API credential, and a project mutation lock before it can edit or run commands.
@@ -132,6 +143,9 @@ npm run dist                 # 打 NSIS + Portable 到 dist-electron/
 - [`docs/EXTERNAL_CONFIG_IMPORT.md`](docs/EXTERNAL_CONFIG_IMPORT.md) — 外部 API 配置一键迁移（v2.5.0）
 - [`docs/MAIN_AGENT_RUNTIME.md`](docs/MAIN_AGENT_RUNTIME.md) — Main Agent 自主编码闭环（v2.6.0）
 - [`docs/AGENT_INTEGRATION_HUB.md`](docs/AGENT_INTEGRATION_HUB.md) — Agent Integration Hub 统一智能体适配层（v2.7.0）
+- [`docs/ACP_RUNTIME.md`](docs/ACP_RUNTIME.md) — ACP 通用外部 Agent 运行时（v2.8.0）
+- [`docs/CODEX_DEEP_INTEGRATION.md`](docs/CODEX_DEEP_INTEGRATION.md) — Codex 深度集成（v2.8.0）
+- [`docs/CLAUDE_CODE_INTEGRATION.md`](docs/CLAUDE_CODE_INTEGRATION.md) — Claude Code 集成（v2.8.0）
 - [`docs/TEST_REPORT.md`](docs/TEST_REPORT.md) — 真实测试结果
 - [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) — 第三方开源项目声明
 - [`CHANGELOG.md`](CHANGELOG.md) — 版本变更

@@ -131,7 +131,17 @@ function createLifecycleManager({ emit } = {}) {
       if (newState === LIFECYCLE.COMPLETED) {
         run.result = detail;
       } else if (detail != null) {
-        run.error = typeof detail === 'string' ? detail : String(detail);
+        // v2.8.0 spec §107/§113：非 completed 终态同样保留结构化结果（GUI / 诊断
+        // 需要 errorCode / errors），error 保持人类可读字符串，绝不退化成
+        // "[object Object]"。
+        if (typeof detail === 'object') {
+          run.result = detail;
+          run.error = detail.message
+            || (Array.isArray(detail.errors) && detail.errors.length ? detail.errors.join('; ') : null)
+            || (detail.status ? String(detail.status) : 'unknown error');
+        } else {
+          run.error = String(detail);
+        }
       }
     } else if (detail != null) {
       run.metadata.lastDetail = detail;

@@ -15,6 +15,8 @@
  *   可用性：healthy +20 / degraded +5 / unavailable -200 / disabled -500
  *   健康加分：healthy +10 / degraded +0
  *   负载达上限 -30
+ *   认证状态（v2.8.0 spec §75，仅对实现 getAuthState 的 Adapter 生效）：
+ *     已认证 +5 / 需要登录 -80 / 认证失败 -80 / 状态未知 -40
  *   用户偏好 Agent +50
  *   手动指定 +1000
  */
@@ -32,6 +34,9 @@ const SCORES = {
   HEALTHY_BONUS: 10,
   DEGRADED_BONUS: 0,
   BUSY_PENALTY: -30,
+  AUTH_OK_BONUS: 5,
+  AUTH_REQUIRED_PENALTY: -80,
+  AUTH_UNKNOWN_PENALTY: -40,
   PREFERRED_AGENT: 50,
   DELEGATION_LOOP: -1000,
   MANUAL_OVERRIDE: 1000
@@ -139,13 +144,34 @@ function createAgentRouter({ registry, preferences = {} } = {}) {
         penalties.push(`已达最大并发 ${maxConcurrency} (${SCORES.BUSY_PENALTY})`);
       }
 
-      // 5. 用户偏好
+      // 5. 认证状态（v2.8.0 spec §75）。
+      // 只对实现 getAuthState() 的 Adapter（Codex / Claude / ACP）计分：
+      // 未登录/登录状态未知的外部 Agent 不得压过确定可用的 Agent，
+      // 否则 fallback 链会被"看起来 healthy 但其实跑不了"的 Agent 截胡。
+      if (typeof adapter.getAuthState === 'function') {
+        let auth = null;
+        try { auth = adapter.getAuthState(); } catch { auth = null; }
+        const authState = (auth && auth.state) || 'UNKNOWN';
+        if (auth && auth.authenticated) {
+          score += SCORES.AUTH_OK_BONUS;
+          reasons.push(`已完成认证 (+${SCORES.AUTH_OK_BONUS})`);
+        } else if (authState === 'AUTH_REQUIRED' || authState === 'FAILED') {
+          score += SCORES.AUTH_REQUIRED_PENALTY;
+          penalties.push(`认证未完成 (${SCORES.AUTH_REQUIRED_PENALTY})`);
+        } else {
+          // UNKNOWN：平台无法核实登录态（禁止读取凭据文件），按保守口径扣分。
+          score += SCORES.AUTH_UNKNOWN_PENALTY;
+          penalties.push(`认证状态未知 (${SCORES.AUTH_UNKNOWN_PENALTY})`);
+        }
+      }
+
+      // 6. 用户偏好
       if (preferredAgent && adapter.id === preferredAgent) {
         score += SCORES.PREFERRED_AGENT;
         reasons.push(`用户偏好 Agent (+${SCORES.PREFERRED_AGENT})`);
       }
 
-      // 6. 手动指定
+      // 7. 手动指定
       if (agentIdOverride && adapter.id === agentIdOverride) {
         score += SCORES.MANUAL_OVERRIDE;
         reasons.push(`手动指定 (+${SCORES.MANUAL_OVERRIDE})`);

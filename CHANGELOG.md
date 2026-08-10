@@ -1,5 +1,50 @@
 # Changelog
 
+## v2.8.0 — 2026-08-10
+
+> Universal External Agent Runtime：Main Agent → Agent Router → Agent Hub → External Agent Runtime（ACP 优先 / Codex 深度集成 / Claude Code 集成）。不提取用户登录凭据、权限取交集、终态 exactly-once。
+
+### 一、ACP Client Runtime（wire protocolVersion=1，§20-§38/§94）
+
+* `jsonRpcSession` 通用信封层：严格模式（ACP，固定 `jsonrpc:"2.0"`，违规报文丢弃）与裸信封模式（Codex App Server，上游故意不带该字段）共用一套实现；dispose → pending 以 CANCELLED 拒绝，超时打 `timeout=true` 标（超时 ≠ 取消）。
+* `capabilityMapper`：按 v1 AgentCapabilities 真实形状解析（baseline 恒 true；`resume:{}` 即支持）；期望能力缺失 → `ACP_CAPABILITY_NEGOTIATION_FAILED`，绝不降级硬发。
+* `authBroker` 认证状态机：只存状态 + 方式，绝不存 token / cookie / refresh token；登录由官方 CLI / SDK / ACP auth flow 完成。
+* `permissionBroker` 权限交集：Parent Run Permission ∩ Platform Policy ∩ External Agent Policy；允许时优先 `allow_once`（绝不代选 allow_always）；无 GUI resolver 一律按交集结论收尾；只读父 Run + 写操作 → PARENT_READ_ONLY → agent refusal。
+* `acpClientRuntime` + `acpAgentAdapter`：session/cancel 通知 + grace 兜底强杀（只杀本 Run 进程树，§106）；终态归类顺序 取消 > 超时 > 意外退出 > 失败（unexpected exit 绝不判 COMPLETED，§65）。
+* `externalAgentSessionManager`：Session ≠ Run（一会话多 Run）；DB 持久化走唯一索引 upsert 幂等，异常不影响 Run；`toPersistable` 无任何凭据字段。
+
+### 二、通用 CLI 进程监督器（§26-§28）
+
+* `cliProcessSupervisor`：detect / version / spawn / killTree 统一实现，禁止每个 Adapter 各写一套；`spawnProcess` spawn 后立即返回 handle（长驻协议服务不死锁），`done` 永不 reject；ENV 白名单透传 + 显式注入，绝不整体复制 process.env；输出 8MiB cap。
+
+### 三、Codex 深度集成（§42-§48）
+
+* 运行时选路：app-server（primary，结构化 JSON-RPC）→ `codex exec --json`（fallback）→ legacy 兜底；降级均发 `agent.fallback` 事件留痕；显式模式不静默降级。文本抓取绝非主协议。
+* capability 随实际运行时动态回填（app-server 有 review/approval/interrupt，exec 无），不一律 true。
+* 只读 `getAuthStatus` 登录态并缓存展示；绝不触碰 token 本体；无凭据可核实时一律 UNKNOWN。
+* 审批：交集评估 → 无 GUI 一律 decline。
+
+### 四、Claude Code 集成（§49-§53）
+
+* SDK（primary）→ CLI `claude -p --output-format stream-json`（fallback）；ACP 仅显式指定。平台不读取 Claude 凭据文件，无显式 API Key 时 auth 状态如实为 UNKNOWN。
+
+### 五、Router / Agent Center GUI / 会话面板
+
+* Router 接入 auth 状态评分（§75）：authenticated +5 / AUTH_REQUIRED・FAILED -80 / UNKNOWN -40；未登录的外部 Agent 不得截胡 fallback 链。
+* Agent Center：transportLabel（如 Codex App Server / Claude Agent SDK / ACP）+ 安装态 + auth chip（已认证 / 需要登录 / 认证状态未知）；认证状态非 UNKNOWN 才落库（只存展示值）。
+* 会话面板：只展示尾 4 位短标识（如 `#ION1`）与可继续状态，绝不展示完整外部 sessionId。
+
+### 六、其他修正
+
+* `lifecycleManager`：非 completed 终态同样保留结构化结果（errorCode/errors 可供 GUI 与诊断），error 保持人类可读字符串，绝不退化为 `[object Object]`。
+
+### 七、测试
+
+* 新增 `test/fakes/fakeAcpAgent.js`：wire v1 严格实现的 ACP Agent（进程内 / 真子进程双模式，记录客户端违规），E2E 走与生产完全相同的适配器路径。
+* 新增单测：`acpTransport` / `acpCapabilityMapper` / `acpAuthBroker` / `externalSessionManager` / `cliProcessSupervisor` / `codexDeepAdapter`（选路降级 / FALLBACK 事件 / 意外退出判 FAILED / 超时判 timeout / auth 三分支 / 审批交集）。
+* E2E 新增 Cases 54-65：ACP 注册 / 握手协商（含负向）/ 权限交集 / 取消唯一终态 / 挂死超时 / 崩溃判败 / resume / Codex・Claude 适配器表面与 auth 落库 / 外部会话落库幂等无凭据。
+* 全量：unit 1345 tests（1344 PASS / 0 FAIL / 1 SKIP）；E2E 65 PASS / 0 FAIL；smoke / integration-smoke 绿。真实 LLM：NOT VERIFIED（全程不消耗付费额度）。
+
 ## v2.7.3 — 2026-08-10
 
 > Cline Native Sidecar Runtime: real `@cline/sdk 0.0.72` / `ClineCore` coding execution under a bundled, checksum-verified Node.js 22.23.2 runtime.

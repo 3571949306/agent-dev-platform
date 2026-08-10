@@ -328,3 +328,148 @@ test('§30 Runtime 不依赖 import_source：connections.list/get 返回值不�
     rmrf(userData);
   }
 });
+
+// ─── v2.8.0 spec §110/§111 — external_agent_sessions / external_agent_auth_states ───
+
+/**
+ * v2.7.3 时代的库：含既有表与数据，但**没有** external_agent_sessions /
+ * external_agent_auth_states（v2.8.0 新增）。验证升级到 v2.8.0 无数据损失。
+ */
+const V273_EXTERNAL_AGENTS_SCHEMA = `
+CREATE TABLE IF NOT EXISTS external_agents (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  description TEXT DEFAULT '',
+  adapter_type TEXT NOT NULL,
+  endpoint TEXT DEFAULT '',
+  command TEXT DEFAULT '',
+  config_json TEXT DEFAULT '{}',
+  capabilities_json TEXT DEFAULT '[]',
+  online INTEGER DEFAULT 0,
+  last_status TEXT,
+  last_run_at TEXT,
+  transport TEXT DEFAULT '',
+  health_status TEXT DEFAULT 'unknown',
+  detected_version TEXT DEFAULT '',
+  executable_path TEXT DEFAULT '',
+  last_health_check TEXT,
+  enabled INTEGER DEFAULT 1,
+  created_at TEXT,
+  updated_at TEXT
+);
+`;
+
+const V273_RUNS_SCHEMA = `
+CREATE TABLE IF NOT EXISTS runs (
+  id TEXT PRIMARY KEY,
+  conversation_id TEXT,
+  agent_id TEXT,
+  task_id TEXT,
+  status TEXT DEFAULT 'preparing',
+  stage TEXT DEFAULT 'preparing',
+  started_at TEXT,
+  updated_at TEXT,
+  last_activity_at TEXT,
+  terminal_at TEXT,
+  error TEXT DEFAULT '',
+  message TEXT DEFAULT '',
+  provider_type TEXT DEFAULT '',
+  adapter_id TEXT DEFAULT '',
+  parent_run_id TEXT
+);
+`;
+
+function createV273Database(dbPath) {
+  const db = new Database(dbPath);
+  db.pragma('journal_mode = WAL');
+  db.exec(V273_EXTERNAL_AGENTS_SCHEMA);
+  db.exec(V273_RUNS_SCHEMA);
+  const now = new Date().toISOString();
+  db.prepare(`INSERT INTO external_agents (id,name,adapter_type,transport,health_status,enabled,created_at,updated_at)
+    VALUES (?,?,?,?,?,?,?,?)`)
+    .run('codex', 'Codex', 'cli', 'cli', 'healthy', 1, now, now);
+  db.prepare(`INSERT INTO runs (id,agent_id,status,stage,started_at,updated_at)
+    VALUES (?,?,?,?,?,?)`)
+    .run('run-old-1', 'native-main', 'completed', 'done', now, now);
+  db.close();
+}
+
+test('v2.8.0 §110 新库：external_agent_sessions / external_agent_auth_states 存在且形状正确', () => {
+  const userData = fs.mkdtempSync(path.join(os.tmpdir(), 'adp-mig-v28-new-'));
+  try {
+    store.init(userData);
+    const sessCols = store.getDb().prepare('PRAGMA table_info(external_agent_sessions)').all().map(c => c.name);
+    for (const col of ['id', 'agent_id', 'external_session_id', 'project_id', 'project_root',
+      'transport', 'resumable', 'created_at', 'updated_at', 'last_status', 'metadata_json']) {
+      assert.ok(sessCols.includes(col), `external_agent_sessions 缺列 ${col}`);
+    }
+    const authCols = store.getDb().prepare('PRAGMA table_info(external_agent_auth_states)').all().map(c => c.name);
+    for (const col of ['agent_id', 'state', 'mode', 'detail', 'updated_at']) {
+      assert.ok(authCols.includes(col), `external_agent_auth_states 缺列 ${col}`);
+    }
+  } finally {
+    rmrf(userData);
+  }
+});
+
+test('v2.8.0 §110 v2.7.3 老库升级：新表自动创建且旧数据不丢失', () => {
+  const userData = fs.mkdtempSync(path.join(os.tmpdir(), 'adp-mig-v273-'));
+  try {
+    createV273Database(path.join(userData, 'agent.db'));
+    // 前置条件：老库没有新表
+    {
+      const raw = new Database(path.join(userData, 'agent.db'));
+      const tables = raw.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map(r => r.name);
+      raw.close();
+      assert.ok(!tables.includes('external_agent_sessions'), '前置条件：v2.7.3 库不应有新会话表');
+    }
+    store.init(userData);
+    const tables = store.getDb().prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map(r => r.name);
+    assert.ok(tables.includes('external_agent_sessions'), '升级后应创建 external_agent_sessions');
+    assert.ok(tables.includes('external_agent_auth_states'), '升级后应创建 external_agent_auth_states');
+    // 旧数据保留
+    const ea = store.getDb().prepare('SELECT * FROM external_agents WHERE id=?').get('codex');
+    assert.ok(ea, 'v2.7.3 的 external_agents 数据不得丢失');
+    assert.strictEqual(ea.health_status, 'healthy');
+    const run = store.getDb().prepare('SELECT * FROM runs WHERE id=?').get('run-old-1');
+    assert.ok(run, 'v2.7.3 的 runs 数据不得丢失');
+    assert.strictEqual(run.status, 'completed');
+  } finally {
+    rmrf(userData);
+  }
+});
+
+test('v2.8.0 §111 session 仓储 CRUD：upsert 幂等、按 agent 查询、删除', () => {
+  const userData = fs.mkdtempSync(path.join(os.tmpdir(), 'adp-mig-v28-crud-'));
+  try {
+    store.init(userData);
+    const repo = store.externalAgentSessions;
+    const rec = {
+      id: 'sess-1', agent_id: 'codex', external_session_id: 'thread-abc',
+      project_id: 'p1', project_root: 'd:/proj', transport: 'app-server',
+      resumable: true, created_at: Date.now(), updated_at: Date.now(),
+      last_status: 'created', metadata_json: JSON.stringify({ hint: 'no-secret' })
+    };
+    repo.upsert(rec);
+    // 幂等：同 id 再 upsert 不产生重复行
+    repo.upsert({ ...rec, last_status: 'completed', updated_at: Date.now() });
+    assert.strictEqual(repo.list('codex').length, 1);
+    const got = repo.get('sess-1');
+    assert.strictEqual(got.last_status, 'completed');
+    assert.strictEqual(got.resumable, true);
+    assert.deepStrictEqual(got.metadata, { hint: 'no-secret' });
+    assert.ok(repo.getByExternal('codex', 'thread-abc'), '按 agent+external 可查');
+    // Session ≠ Run：同一 session 可被另一 run 再次 upsert（不报错）
+    repo.upsert({ ...rec, last_status: 'running', updated_at: Date.now() });
+    assert.strictEqual(repo.list().length, 1);
+    repo.remove('sess-1');
+    assert.strictEqual(repo.get('sess-1'), null);
+    // auth states：只存状态机展示值
+    store.externalAgentAuthStates.set('codex', { state: 'AUTHENTICATED', mode: 'external_login', detail: 'ChatGPT Login' });
+    const auth = store.externalAgentAuthStates.get('codex');
+    assert.strictEqual(auth.state, 'AUTHENTICATED');
+    assert.strictEqual(store.externalAgentAuthStates.list().length, 1);
+  } finally {
+    rmrf(userData);
+  }
+});

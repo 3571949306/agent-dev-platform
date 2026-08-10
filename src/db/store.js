@@ -614,7 +614,10 @@ const extAgentConfigs = {
   getOpenCode() { return extAgentConfigs.get('opencode'); },
   setOpenCode(config) { return extAgentConfigs.set('opencode', config); },
   getOpenHands() { return extAgentConfigs.get('openhands'); },
-  setOpenHands(config) { return extAgentConfigs.set('openhands', config); }
+  setOpenHands(config) { return extAgentConfigs.set('openhands', config); },
+  // v2.8.0 — Claude Code（runtimeMode / model / permissionMode / allowedTools 等）
+  getClaudeCode() { return extAgentConfigs.get('claude-code'); },
+  setClaudeCode(config) { return extAgentConfigs.set('claude-code', config); }
 };
 
 // ---------- runs (v2.3.1: Run 持久化，重启后把非终态标记为 interrupted) ----------
@@ -656,6 +659,65 @@ const runs = {
     return runs.get(id);
   },
   remove(id) { db().prepare('DELETE FROM runs WHERE id=?').run(id); return true; }
+};
+
+// ---------- v2.8.0 external agent sessions（spec §109/§110/§111） ----------
+/** 时间戳归一：toPersistable 给的是 epoch ms，这里统一转 ISO 字符串。 */
+function iso(v) {
+  if (!v) return now();
+  if (typeof v === 'string') return v;
+  const d = new Date(v);
+  return Number.isNaN(d.getTime()) ? now() : d.toISOString();
+}
+
+const externalAgentSessions = {
+  /** 幂等落库（id 为主键，agent_id+external_session_id 唯一）。只接受无凭据字段。 */
+  upsert(rec) {
+    if (!rec || !rec.id || !rec.agent_id || !rec.external_session_id) return null;
+    db().prepare(`INSERT INTO external_agent_sessions
+      (id,agent_id,external_session_id,project_id,project_root,transport,resumable,created_at,updated_at,last_status,metadata_json)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?)
+      ON CONFLICT(id) DO UPDATE SET
+        project_id=excluded.project_id, project_root=excluded.project_root,
+        transport=excluded.transport, resumable=excluded.resumable,
+        updated_at=excluded.updated_at, last_status=excluded.last_status,
+        metadata_json=excluded.metadata_json`)
+      .run(rec.id, rec.agent_id, rec.external_session_id, rec.project_id || null, rec.project_root || null,
+        rec.transport || '', rec.resumable ? 1 : 0, iso(rec.created_at), iso(rec.updated_at),
+        rec.last_status || '', rec.metadata_json || '{}');
+    return externalAgentSessions.get(rec.id);
+  },
+  get(id) {
+    const r = db().prepare('SELECT * FROM external_agent_sessions WHERE id=?').get(id);
+    return r ? { ...r, resumable: !!r.resumable, metadata: p(r.metadata_json, {}) } : null;
+  },
+  getByExternal(agentId, externalSessionId) {
+    const r = db().prepare('SELECT * FROM external_agent_sessions WHERE agent_id=? AND external_session_id=?')
+      .get(agentId, externalSessionId);
+    return r ? { ...r, resumable: !!r.resumable, metadata: p(r.metadata_json, {}) } : null;
+  },
+  list(agentId) {
+    const rows = agentId
+      ? db().prepare('SELECT * FROM external_agent_sessions WHERE agent_id=? ORDER BY updated_at DESC').all(agentId)
+      : db().prepare('SELECT * FROM external_agent_sessions ORDER BY updated_at DESC').all();
+    return rows.map(r => ({ ...r, resumable: !!r.resumable, metadata: p(r.metadata_json, {}) }));
+  },
+  remove(id) { db().prepare('DELETE FROM external_agent_sessions WHERE id=?').run(id); return true; }
+};
+
+// ---------- v2.8.0 external agent auth states（spec §110；只存状态，不存凭据） ----------
+const externalAgentAuthStates = {
+  set(agentId, { state, mode, detail } = {}) {
+    if (!agentId) return null;
+    db().prepare(`INSERT INTO external_agent_auth_states (agent_id,state,mode,detail,updated_at)
+      VALUES (?,?,?,?,?)
+      ON CONFLICT(agent_id) DO UPDATE SET state=excluded.state, mode=excluded.mode,
+        detail=excluded.detail, updated_at=excluded.updated_at`)
+      .run(agentId, state || 'UNKNOWN', mode || '', detail || '', now());
+    return externalAgentAuthStates.get(agentId);
+  },
+  get(agentId) { return db().prepare('SELECT * FROM external_agent_auth_states WHERE agent_id=?').get(agentId) || null; },
+  list() { return db().prepare('SELECT * FROM external_agent_auth_states ORDER BY agent_id').all(); }
 };
 
 // ---------- v1 JSON migration ----------
@@ -714,5 +776,6 @@ module.exports = {
   db, init: dbm.initDb, getDb: dbm.getDb,
   projects, connections, models, prompts, skills, agents, externalAgents,
   conversations, messages, events, tasks, runs, agentMessages, tools, mcpServers,
-  memories, checkpoints, fileChanges, usage, modelCalls, permissionGrants, audit, settings, agentPrefs, extAgentConfigs, migrateFromJson
+  memories, checkpoints, fileChanges, usage, modelCalls, permissionGrants, audit, settings, agentPrefs, extAgentConfigs,
+  externalAgentSessions, externalAgentAuthStates, migrateFromJson
 };

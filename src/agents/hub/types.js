@@ -96,6 +96,9 @@ const AGENT_EVENT = {
   RUN_STARTED: 'agent.run.started',
   RUN_STATUS: 'agent.run.status',
   PLAN_UPDATED: 'agent.plan.updated',
+  // v2.8.0 §46：官方提供的 reasoning summary / thought 事件。
+  // 只承载上游主动给出的摘要，绝不尝试提取隐藏内部思维链。
+  REASONING: 'agent.reasoning',
   MESSAGE: 'agent.message',
   TOOL_STARTED: 'agent.tool.started',
   TOOL_COMPLETED: 'agent.tool.completed',
@@ -103,6 +106,8 @@ const AGENT_EVENT = {
   FILE_READ: 'agent.file.read',
   FILE_CHANGED: 'agent.file.changed',
   COMMAND_STARTED: 'agent.command.started',
+  // v2.8.0：终端 / 命令的增量输出（ACP terminal_output_chunk、Codex outputDelta 等）
+  COMMAND_OUTPUT: 'agent.command.output',
   COMMAND_COMPLETED: 'agent.command.completed',
   TEST_FAILED: 'agent.test.failed',
   TEST_PASSED: 'agent.test.passed',

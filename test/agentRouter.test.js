@@ -202,3 +202,62 @@ test('Cline is excluded from auto routing until its full health is healthy', () 
   r.get('cline').healthStatus = HEALTH_STATE.HEALTHY;
   assert.ok(router.route({ required: ['coding'] }).some(item => item.agentId === 'cline'));
 });
+
+// ---------- v2.8.0 spec §75：认证状态评分 ----------
+
+test('认证状态：未实现 getAuthState 的 Adapter 不受影响', () => {
+  const r = createAgentRegistry();
+  r.register(makeAdapter('native', ['coding']));
+  const router = createAgentRouter({ registry: r });
+  const res = router.route({ required: ['coding'] });
+  // 40 + 20 + 10 = 70，无认证相关加/扣分
+  assert.strictEqual(res[0].score, 70);
+  assert.ok(!res[0].penalties.some(p => p.includes('认证')));
+});
+
+test('认证状态：已认证 +5，未知 -40，需要登录/失败 -80', () => {
+  const r = createAgentRegistry();
+  const ok = makeAdapter('ok-agent', ['coding']);
+  ok.getAuthState = () => ({ state: 'AUTHENTICATED', authenticated: true });
+  const unknown = makeAdapter('unknown-agent', ['coding']);
+  unknown.getAuthState = () => ({ state: 'UNKNOWN', authenticated: false });
+  const required = makeAdapter('required-agent', ['coding']);
+  required.getAuthState = () => ({ state: 'AUTH_REQUIRED', authenticated: false });
+  const failed = makeAdapter('failed-agent', ['coding']);
+  failed.getAuthState = () => ({ state: 'FAILED', authenticated: false });
+  r.register(ok); r.register(unknown); r.register(required); r.register(failed);
+
+  const router = createAgentRouter({ registry: r });
+  const byId = Object.fromEntries(router.route({ required: ['coding'] }).map(x => [x.agentId, x.score]));
+  const base = SCORES.REQUIRED_MATCH + SCORES.HEALTHY_AVAIL + SCORES.HEALTHY_BONUS;
+  assert.strictEqual(byId['ok-agent'], base + SCORES.AUTH_OK_BONUS);
+  assert.strictEqual(byId['unknown-agent'], base + SCORES.AUTH_UNKNOWN_PENALTY);
+  assert.strictEqual(byId['required-agent'], base + SCORES.AUTH_REQUIRED_PENALTY);
+  assert.strictEqual(byId['failed-agent'], base + SCORES.AUTH_REQUIRED_PENALTY);
+});
+
+test('认证状态：未登录的外部 Agent 不得压过确定可用的 Agent（v2.8.0 fallback 回归）', () => {
+  const r = createAgentRegistry();
+  // 模拟 E2E 场景：native-main 健康状态 unknown（无加扣分），
+  // claude-code healthy 但认证状态未知。
+  const native = makeAdapter('native-main', ['coding', 'filesystem'], { healthStatus: HEALTH_STATE.UNKNOWN });
+  const claude = makeAdapter('claude-code', ['coding', 'filesystem'], { healthStatus: HEALTH_STATE.HEALTHY });
+  claude.getAuthState = () => ({ state: 'UNKNOWN', authenticated: false });
+  r.register(claude); r.register(native);
+
+  const router = createAgentRouter({ registry: r });
+  const res = router.route({ required: ['coding', 'filesystem'] });
+  // native: 80；claude: 80 + 20 + 10 - 40 = 70
+  assert.strictEqual(res[0].agentId, 'native-main', '认证未知的 Agent 不应排在最前');
+  assert.ok(res.find(x => x.agentId === 'claude-code').penalties.some(p => p.includes('认证状态未知')));
+});
+
+test('认证状态：getAuthState 抛错时按 UNKNOWN 处理，不 crash', () => {
+  const r = createAgentRegistry();
+  const bad = makeAdapter('bad-auth', ['coding']);
+  bad.getAuthState = () => { throw new Error('boom'); };
+  r.register(bad);
+  const router = createAgentRouter({ registry: r });
+  const res = router.route({ required: ['coding'] });
+  assert.strictEqual(res[0].score, 40 + 20 + 10 + SCORES.AUTH_UNKNOWN_PENALTY);
+});

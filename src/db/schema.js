@@ -312,6 +312,33 @@ CREATE TABLE IF NOT EXISTS runs (
   error TEXT DEFAULT '',
   message TEXT DEFAULT ''
 );
+
+-- v2.8.0 spec §109/§110/§111 — 外部 Agent 会话（Session ≠ Run：一个 Session 可含多个 Run/Turn，
+-- sessionId 与 runId 不硬绑定）。禁止保存 auth token / cookie / api key，只存会话元数据。
+CREATE TABLE IF NOT EXISTS external_agent_sessions (
+  id TEXT PRIMARY KEY,
+  agent_id TEXT NOT NULL,
+  external_session_id TEXT NOT NULL,
+  project_id TEXT,
+  project_root TEXT,
+  transport TEXT DEFAULT '',
+  resumable INTEGER DEFAULT 0,
+  created_at TEXT,
+  updated_at TEXT,
+  last_status TEXT DEFAULT '',
+  metadata_json TEXT DEFAULT '{}'
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_eas_agent_external
+  ON external_agent_sessions(agent_id, external_session_id);
+
+-- v2.8.0 spec §110 — 外部 Agent 认证状态（仅状态机展示值，绝不存凭据本体）。
+CREATE TABLE IF NOT EXISTS external_agent_auth_states (
+  agent_id TEXT PRIMARY KEY,
+  state TEXT NOT NULL DEFAULT 'UNKNOWN',
+  mode TEXT DEFAULT '',
+  detail TEXT DEFAULT '',
+  updated_at TEXT
+);
 `;
 
 /**

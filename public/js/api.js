@@ -150,6 +150,9 @@ export const api = {
   hubStatus: (runId) => call('hub:status', runId),
   hubResult: (runId) => call('hub:result', runId),
 
+  // v2.8.0 — 外部 Agent 会话 / 认证状态（仅展示值，不含凭据）
+  hubSessions: () => call('hub:sessions'),
+
   // v2.7.1 — External agent configs & project mutation lock
   extcfgGet: (agentId) => call('extcfg:get', agentId),
   extcfgSet: (agentId, config) => call('extcfg:set', agentId, config),

@@ -1311,8 +1311,30 @@ function hubHealthText(status) {
 
 /** 能力键 → 展示标签（首字母大写 camelCase） */
 function hubCapLabel(cap) {
-  const map = { coding: 'Coding', planning: 'Planning', research: 'Research', review: 'Review', filesystem: 'Filesystem', terminal: 'Terminal', git: 'Git', browser: 'Browser', computer: 'Computer', vision: 'Vision', mcp: 'MCP', longRunning: 'LongRunning', parallel: 'Parallel', streaming: 'Streaming', resume: 'Resume', diff: 'Diff', sandbox: 'Sandbox' };
+  const map = { coding: 'Coding', planning: 'Planning', research: 'Research', review: 'Review', filesystem: 'Filesystem', terminal: 'Terminal', git: 'Git', browser: 'Browser', computer: 'Computer', vision: 'Vision', mcp: 'MCP', longRunning: 'LongRunning', parallel: 'Parallel', streaming: 'Streaming', resume: 'Resume', diff: 'Diff', sandbox: 'Sandbox', session: 'Session', approval: 'Approval', interrupt: 'Interrupt', reasoning: 'Reasoning', web: 'Web', subagent: 'Subagent' };
   return map[cap] || cap;
+}
+
+/**
+ * v2.8.0 spec §79/§80 — 认证状态 chip。只展示状态机文本，
+ * 绝不展示 Token / Cookie / Refresh Token 本体（spec §79 红线）。
+ */
+function hubAuthChip(auth) {
+  if (!auth) return '';
+  if (auth.authenticated) {
+    const label = auth.mode === 'api_key' ? '已认证 (API Key)' : '已认证';
+    return `<span class="chip ok" title="${esc(auth.detail || '')}">${label}</span>`;
+  }
+  if (auth.state === 'AUTH_REQUIRED' || auth.state === 'FAILED') {
+    return `<span class="chip bad" title="${esc(auth.detail || '')}">需要登录</span>`;
+  }
+  return `<span class="chip" title="${esc(auth.detail || '')}">认证状态未知</span>`;
+}
+
+/** v2.8.0 spec §81 — 会话短标识：只显示尾 4 位，不暴露完整 UUID。 */
+function hubSessionShort(externalSessionId) {
+  const s = String(externalSessionId || '').replace(/[^a-zA-Z0-9]/g, '');
+  return '#' + (s.slice(-4) || '????').toUpperCase();
 }
 
 /** 从 Agent Integration Hub 注册表加载并渲染统一卡片视图 */
@@ -1323,9 +1345,11 @@ async function loadHubCards(body) {
   let manifests = [];
   let connections = [];
   let clineConfig = {};
+  let sessionData = { sessions: [], authStates: [] };
   try {
-    [available, manifests, connections, clineConfig] = await Promise.all([
-      api.hubAvailable(), api.hubManifests(), api.connections(), api.extcfgGet('cline')
+    [available, manifests, connections, clineConfig, sessionData] = await Promise.all([
+      api.hubAvailable(), api.hubManifests(), api.connections(), api.extcfgGet('cline'),
+      (typeof api.hubSessions === 'function' ? api.hubSessions() : Promise.resolve({ sessions: [], authStates: [] }))
     ]);
   } catch (e) {
     cardsEl.innerHTML = `<div class="muted small">注册表不可用：${esc(e.message)}</div>`;
@@ -1338,10 +1362,16 @@ async function loadHubCards(body) {
     return;
   }
   const availById = new Map((available || []).map(a => [a.id, a]));
+  const sessionsByAgent = new Map();
+  for (const s of (sessionData && sessionData.sessions) || []) {
+    if (!sessionsByAgent.has(s.agent_id)) sessionsByAgent.set(s.agent_id, []);
+    sessionsByAgent.get(s.agent_id).push(s);
+  }
   cardsEl.innerHTML = manifests.map(m => {
     const a = availById.get(m.id) || {};
     const name = esc(m.displayName || m.id);
-    const transport = esc((m.transport || a.transport || a.adapterType || 'unknown').toUpperCase());
+    // v2.8.0 spec §77：优先用人类可读 transport 标签（如 Codex App Server / ClineCore Sidecar）
+    const transport = esc(a.transportLabel || (m.transport || a.transport || a.adapterType || 'unknown').toUpperCase());
     const caps = (m.capabilities && typeof m.capabilities === 'object')
       ? Object.keys(m.capabilities).filter(k => m.capabilities[k])
       : (Array.isArray(a.capabilities) ? a.capabilities : []);
@@ -1364,8 +1394,14 @@ async function loadHubCards(body) {
         </div>`
       : '';
     return `<div class="acard" data-hub-id="${esc(m.id)}">
-      <div class="acard-h"><b>${name}</b><span class="chip">${transport}</span><span class="chip ${hubHealthClass(healthStatus)}">${esc(hubHealthText(healthStatus))}</span></div>
+      <div class="acard-h"><b>${name}</b><span class="chip">${transport}</span><span class="chip ${hubHealthClass(healthStatus)}">${esc(hubHealthText(healthStatus))}</span>${hubAuthChip(a.auth)}</div>
       <div class="acard-meta">${caps.map(c => `<span class="chip">${esc(hubCapLabel(c))}</span>`).join('') || '<span class="muted small">无能力声明</span>'}</div>
+      ${a.version || a.auth || (sessionsByAgent.get(m.id) || []).length ? `
+      <div class="small" style="margin-top:8px;line-height:1.55">
+        ${a.version ? `<div><b>Version:</b> ${esc(a.version)}</div>` : ''}
+        ${a.auth ? `<div><b>Authentication:</b> ${esc(a.auth.detail || a.auth.state || '')}</div>` : ''}
+        ${(sessionsByAgent.get(m.id) || []).slice(0, 3).map(s => `<div><b>Session:</b> ${esc(hubSessionShort(s.external_session_id))} · ${esc(s.transport || '')}${s.resumable ? ' · 可继续' : ''} · ${esc(s.last_status || '')}</div>`).join('')}
+      </div>` : ''}
       ${clineRuntime}
       <div class="acard-f">${m.id === 'cline' ? '<button class="btn tiny" data-cline-config>Configure Cline</button>' : ''}<button class="btn tiny" data-hub-test="${esc(m.id)}">测试</button></div>
     </div>`;

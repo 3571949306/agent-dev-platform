@@ -188,7 +188,48 @@ const OPENHANDS = {
   maxConcurrency: 1
 };
 
-const BUILTIN_AGENT_MANIFESTS = [NATIVE_MAIN, CODEX, WORKBUDDY, CLINE, OPENCODE, OPENHANDS];
+/**
+ * Claude Code：外部 Agent，v2.8.0 新增（spec §49/§50/§53）。
+ *
+ * transport 记为 'protocol' —— 因为 production primary 是
+ * @anthropic-ai/claude-agent-sdk 的 query()（进程内 SDK，不是裸 CLI 文本），
+ * CLI（claude -p --output-format stream-json）只是同 schema 的 fallback。
+ *
+ * capabilities 是**静态保守初值**：适配器会按实际生效的运行时
+ * （sdk / cli / acp）动态回填（见 claudeCodeAgentAdapter 的 RUNTIME_CAPABILITIES，spec §45）。
+ * 这里 approval/resume 取"至少 CLI 也能满足"的口径，避免未探测前就吹能力。
+ */
+const CLAUDE_CODE = {
+  id: 'claude-code',
+  displayName: 'Claude Code',
+  source: 'external',
+  transport: 'protocol',
+  capabilities: {
+    coding: true,
+    planning: true,
+    research: true,
+    review: false,
+    filesystem: true,
+    terminal: true,
+    git: true,
+    browser: false,
+    computer: false,
+    vision: false,
+    mcp: true,
+    longRunning: true,
+    parallel: false,
+    streaming: true,
+    resume: true,
+    diff: true,
+    sandbox: false
+  },
+  availability: false,
+  version: null,
+  path: 'claude',
+  maxConcurrency: 2
+};
+
+const BUILTIN_AGENT_MANIFESTS = [NATIVE_MAIN, CODEX, WORKBUDDY, CLINE, OPENCODE, OPENHANDS, CLAUDE_CODE];
 
 module.exports = {
   BUILTIN_AGENT_MANIFESTS,
@@ -197,5 +238,6 @@ module.exports = {
   WORKBUDDY,
   CLINE,
   OPENCODE,
-  OPENHANDS
+  OPENHANDS,
+  CLAUDE_CODE
 };

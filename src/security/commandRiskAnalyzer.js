@@ -278,8 +278,54 @@ function analyzeCmdDelete(exec, args, signals) {
 }
 
 /**
- * Detect whether the targetPath/cwd fall outside the project root using the
- * same containment logic as pathguard.isInside (pure string comparison).
+ * v2.8.2 §82-§95：检测链接 / reparse point 创建命令。
+ *   - cmd: mklink /J（junction）、mklink /D（目录符号链接）、mklink（文件符号链接）
+ *   - powershell: New-Item -ItemType Junction|SymbolicLink
+ *   - unix: ln -s
+ *
+ * 这些操作改变路径拓扑，可让未来路径边界判断失效，至少 HIGH；
+ * 若目标 outside project 应升级 CRITICAL（由 PermissionRiskClassifier §83/§84）。
+ */
+function analyzeLinkCreation(exec, args, signals) {
+  if (exec === 'mklink') {
+    signals.isLinkCreation = true;
+    const lowerArgs = args.map((a) => a.toLowerCase());
+    const isJunction = lowerArgs.includes('/j');
+    const isDir = lowerArgs.includes('/d');
+    signals.matchedPatterns.push(
+      `创建 ${isJunction ? 'Junction' : (isDir ? '目录符号链接' : '符号链接')}（mklink，改变路径拓扑）`
+    );
+  } else if (exec === 'new-item') {
+    const lowerArgs = args.map((a) => a.toLowerCase());
+    for (let i = 0; i < lowerArgs.length; i += 1) {
+      if ((lowerArgs[i] === '-itemtype' || lowerArgs[i] === '/itemtype')
+        && i + 1 < lowerArgs.length) {
+        const t = lowerArgs[i + 1];
+        if (t === 'junction' || t === 'symboliclink' || t === 'symlink') {
+          signals.isLinkCreation = true;
+          signals.matchedPatterns.push(`创建 ${t}（New-Item -ItemType，改变路径拓扑）`);
+        }
+      }
+    }
+  } else if (exec === 'ln') {
+    const lowerArgs = args.map((a) => a.toLowerCase());
+    if (lowerArgs.includes('-s') || hasCombinedFlag(args, 's') || lowerArgs.includes('--symbolic')) {
+      signals.isLinkCreation = true;
+      signals.matchedPatterns.push('创建符号链接（ln -s，改变路径拓扑）');
+    }
+  }
+}
+
+/**
+ * v2.8.2 §30：lexical outside-root 信号（纯字符串 path.resolve + path.relative）。
+ *
+ * 注意：本函数只提供 lexical 快速信号，**不是**最终安全 enforcement。
+ * 最终 security decision 必须以 PathSecurity（canonicalPath.js）的 canonical
+ * containment 结果为准。lexical 信号用于：
+ *   - 快速拒绝明显 ../ 逃逸（性能）；
+ *   - 与 canonical 信号组合判断 REPARSE_ESCAPE（lexicalInside + canonicalOutside）。
+ *
+ * signals.targetsOutsideRoot 保持原名以向后兼容，语义为 lexical outside。
  */
 function checkOutsideRoot(input, signals) {
   const root = input.projectRoot || input.root;
@@ -291,7 +337,7 @@ function checkOutsideRoot(input, signals) {
   const rel = path.relative(base, abs);
   if (rel.startsWith('..') || path.isAbsolute(rel)) {
     signals.targetsOutsideRoot = true;
-    signals.matchedPatterns.push(`目标路径「${target}」超出项目根目录范围`);
+    signals.matchedPatterns.push(`目标路径「${target}」超出项目根目录范围（lexical）`);
   }
 }
 
@@ -321,6 +367,8 @@ function defaultSignals() {
     isReadonlyGit: false,
     isKnownTestLint: false,
     isUnknownExecutable: false,
+    // v2.8.2 §82-§95：链接 / reparse point 创建会改变路径拓扑，至少 HIGH。
+    isLinkCreation: false,
     matchedPatterns: []
   };
 }
@@ -383,6 +431,9 @@ function analyzeCommandRisk(input = {}) {
     } else {
       analyzeUnixDelete(exec, args, signals);
     }
+
+    // v2.8.2 §93-§95：链接 / reparse point 创建检测（跨平台）
+    analyzeLinkCreation(exec, args, signals);
 
     if (matchesTestLint(exec, args)) {
       signals.isKnownTestLint = true;

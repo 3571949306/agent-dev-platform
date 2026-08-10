@@ -2,7 +2,7 @@
 
 > 本地 AI Agent IDE（智能体开发环境）—— 一个真正能读项目、改代码、跑命令、调子 Agent、把活干完的 Windows 桌面 Coding Agent。
 
-![platform](https://img.shields.io/badge/platform-Windows%2010%2F11-0078d4) ![electron](https://img.shields.io/badge/electron-31-47848F) ![node](https://img.shields.io/badge/node-20-339933) ![sqlite](https://img.shields.io/badge/sqlite-WAL-003B57) ![tests](https://img.shields.io/badge/tests-764%2B35-3fb950)
+![platform](https://img.shields.io/badge/platform-Windows%2010%2F11-0078d4) ![electron](https://img.shields.io/badge/electron-31-47848F) ![node](https://img.shields.io/badge/node-20-339933) ![sqlite](https://img.shields.io/badge/sqlite-WAL-003B57) ![tests](https://img.shields.io/badge/tests-1426%2B65-3fb950)
 
 ## 它能做什么
 
@@ -15,6 +15,10 @@
 * **调子 Agent**：Reviewer / Computer / External（Codex / WorkBuddy Bridge）
 * **随时停止**：AbortController 真的中断正在进行的 LLM 请求
 * **多重校验**：权限门控（ask / once / always）+ 文件路径守卫 + 密钥不落明文
+
+## Canonical Path Security（v2.8.2）
+
+所有文件操作经统一 PathSecurity 做 canonical containment：用 `fs.realpathSync.native()` 解析 Junction / Symlink / Reparse Point 到真实路径，彻底消除"字符串路径看似在项目内、实则经链接逃逸到项目外"的安全问题。覆盖已存在目标、不存在目标（deepest-existing-ancestor 算法）、Windows 大小写、TOCTOU 执行时复检、链接创建风险分类。详见 [`docs/CANONICAL_PATH_SECURITY.md`](docs/CANONICAL_PATH_SECURITY.md)。
 
 ## 智能 API 快速接入
 

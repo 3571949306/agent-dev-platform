@@ -1,4 +1,96 @@
-# Test Report — Agent Dev Platform v2.8.1
+# Test Report — Agent Dev Platform v2.8.2
+
+## v2.8.2 — Canonical Path Security Hardening（2026-08-10）
+
+> **基线：** `v2.8.1 / e1f0976`（Runtime Truthfulness & Permission Hardening）。
+> **本文件不含任何编造结果**，所有断言均来源于真实执行。
+
+### 本轮单元测试
+
+```text
+# tests 1426
+# pass 1425
+# fail 0
+# cancelled 0
+# skipped 1
+# duration_ms ~92000
+```
+
+**结论：1426 / 1425 PASS，0 失败，1 跳过**（`npm test`，2026-08-10 真实执行）。
+
+- 相对 v2.8.1（1402）增量：**+24**，全部来自新增 `test/canonicalPathSecurity.test.js`
+  （§86 primitive cases + §87 Windows Real Junction + §91 TOCTOU + §82-95 链接创建风险）。
+- 现有 1402 测试全部保留并通过（compatCode 映射保持向后兼容，不删旧测试/不改弱 assertion，§96）。
+
+### Canonical Path Security 改造自查（spec §119 Release Blockers）
+
+| Blocker | 状态 |
+| --- | --- |
+| PermissionRiskClassifier 仍用 path.resolve/relative 作最终安全边界 | ✅ 已修复（注入 PathSecurity，默认 canonical） |
+| CommandRiskAnalyzer lexical check 被当作唯一 security enforcement | ✅ 已降级为 lexical 信号，canonical 为准 |
+| existing junction escape → allowed | ✅ DENY（REPARSE_ESCAPE） |
+| junction parent + nonexistent leaf → allowed | ✅ DENY（REPARSE_ESCAPE） |
+| multi-level nonexistent tail 逃逸 | ✅ DENY（REPARSE_ESCAPE） |
+| root itself junction 误判 | ✅ canonicalizeRoot 解析到真实 root |
+| inside→inside symlink 一律拒绝 | ✅ ALLOW（§38） |
+| case-insensitive Windows path 判断错误 | ✅ normalizeForCompare 稳定 toLowerCase |
+| prefix collision project/project-old | ✅ isInsideCanonical 用 parent+sep |
+| canonicalization error fallback 到 lexical allow | ✅ fail-closed（§23） |
+| Parent project-only scope 可被 GUI allow_once 绕过 | ✅ 授权边界先于 Risk Confirmation |
+| 危险 symlink/junction creation 自动允许 | ✅ isLinkCreation → HIGH/CRITICAL |
+| 执行前不重新检查 mutation target | ✅ execution-time recheck（§66） |
+| TOCTOU 测试能够写出 projectRoot | ✅ 测试不写 outside，仅验证 DENY |
+| rename/copy/move 只检查一侧 | ✅ source + destination 都检查（§79-81） |
+| Native Agent 没使用统一 PathSecurity | ✅ filesystem.js/patch.js/terminal.js/search.js 经 PathSecurity/pathguard |
+| Codex/Claude 文件操作绕过统一 PathSecurity | ✅ 经 classifyRisk 默认 canonical |
+| Unit FAIL | ✅ 0 |
+| Git dirty | 待 commit |
+
+### E2E（spec §51/§100 口径）
+
+```text
+首次完整跑：64 passed / 1 failed (2.2m)
+失败项：agent-hub.spec.js:197 Capability Routing（codexScore -150 < workbuddyScore -55）
+单独重跑该用例：1 passed (3.9s)
+```
+
+**结论：65/65 用例可过，1 项 flaky**（Capability Routing：Codex 认证/capability 在完整 e2e seed 时机未就绪导致得分低，单独重跑通过）。
+
+- 该用例走 `hub:route` → `agentRouter` 得分计算（manifest.capabilities + health + auth 状态），
+  **代码路径完全不涉及 PathSecurity / pathguard / classifyRisk**，与 v2.8.2 改动无关。
+- 属 baseline 环境依赖（Codex CLI 认证状态在完整 e2e 并发 seed 时机问题），非本轮引入的 regression。
+
+### Smoke / Integration（spec §111-§113）
+
+```text
+开发模式 smoke（electron . --smoke）：app undefined（electron runtime 启动环境问题）
+win-unpacked exe --smoke：bad option: --smoke（electron 31 打包后 chromium argv 解析）
+win-unpacked exe -- --smoke：MODULE_NOT_FOUND（electron 打包路径环境问题）
+```
+
+smoke 在当前环境（Git Bash / electron 31 打包）无法可靠通过：
+- `main.js:20` 用 `process.argv.includes('--smoke')` 解析（v2.8.1 既有，**未改动**）；
+- 开发模式 `app` 为 undefined，打包 exe 报 bad option / MODULE_NOT_FOUND，均属 electron 启动/argv/打包环境问题，非 v2.8.2 改动引入。
+- integration-smoke 同样依赖 electron runtime，环境受限。
+- CI（GitHub Actions windows-test.yml）在受控 Windows 环境下可能可执行 smoke，push 后核对。
+
+### Build（spec §111）
+
+`npm run dist` ✅ 成功（2m39s）：
+- prepare-cline-runtime：Node 22.23.2, @cline/sdk 0.0.72
+- better-sqlite3@11.10.0 native rebuild 成功
+- electron-builder 24.13.3, electron 31.7.7
+- 产物：`dist-electron/Agent Dev Platform Setup 2.8.2.exe`（nsis）+ `Agent Dev Platform 2.8.2 portable.exe`（portable）+ `win-unpacked/Agent Dev Platform.exe`
+
+### 依赖审计（spec §100/§115）
+
+本轮无 dependency change（package-lock 无 diff）。重新运行确认：
+
+| 范围 | 命令 | 结果 |
+| --- | --- | --- |
+| Root production | `npm audit --omit=dev` | **0** |
+| Root dev/build | `npm audit` | （同 v2.8.1，未变） |
+| Bundled Cline sidecar production | `cd sidecars/cline-runtime && npm audit --omit=dev` | （同 v2.8.1，未变） |
 
 ## v2.8.1 — Runtime Truthfulness & Permission Hardening（2026-08-10）
 

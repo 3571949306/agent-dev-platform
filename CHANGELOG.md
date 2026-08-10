@@ -1,5 +1,66 @@
 # Changelog
 
+## v2.8.2 — 2026-08-10
+
+> Canonical Path Security Hardening：彻底消除"字符串路径看似在 projectRoot 内，但真实文件
+> 系统目标经 Junction / Symlink / Reparse Point 跳到项目外"的安全问题。新建统一 PathSecurity
+> 单一真相源，覆盖 existing/non-existent target、Windows Junction、TOCTOU 执行时复检、
+> 链接创建风险分类。
+
+### 一、Canonical Path Security 单一真相源（§12/§14-26）
+
+* 新建 `src/security/pathSecurity/`：
+  - `canonicalPath.js`：filesystem-aware 原语层（canonicalizeRoot / canonicalizeExistingPath /
+    canonicalizeTargetPath / deepest-existing-ancestor 算法 / isInsideCanonical / normalizeForCompare）。
+  - `pathContainment.js`：containment 判断层，返回结构化 PathContainmentResult
+    （lexicalInside + canonicalInside 双层信号，§31）。
+  - `index.js`：工厂 `createPathSecurity({ cacheRoots })` + 默认实例。
+* 修复 §5 核心：`PermissionRiskClassifier.targetInsideRoot` 与 `CommandRiskAnalyzer.checkOutsideRoot`
+  不再用 path.resolve/path.relative 作最终安全边界，改由 PathSecurity canonical containment。
+* §20-22 不存在目标：deepest-existing-ancestor 算法找到最深已存在祖先目录，realpath 解析
+  reparse point，再词汇拼接 tail，得到 predicted canonical target。
+* §23 fail-closed：canonicalization 错误（EACCES/EPERM/ELOOP/broken symlink）不 fallback 回
+  lexical 判断。
+* §77 修复：Windows junction 的 `lstatSync.isDirectory()` 返回 false，改用 realpath 后
+  `statSync(realAncestor).isDirectory()` 判断祖先是否目录。
+
+### 二、双层信号与风险分级（§30-32/§51）
+
+* lexicalInside + canonicalOutside → REPARSE_ESCAPE → HIGH。
+* destructive + canonical outside → CRITICAL（§32）。
+* 链接创建（mklink /J、New-Item -ItemType Junction/SymbolicLink、ln -s）→ isLinkCreation → HIGH；
+  链接创建 + canonical outside → CRITICAL（§83/§84）。
+* CommandRiskAnalyzer.checkOutsideRoot 降级为 lexical 信号，security decision 以 canonical 为准。
+
+### 三、TOCTOU 执行时复检（§64-67）
+
+* mutation 工具（write/create/patch/delete/move/copy）在实际 fs 操作前再次 assertPathInside
+  （execution-time recheck），检测 permission 评估后到执行前路径被替换为 junction 逃逸。
+* `src/tools/filesystem.js` / `src/tools/patch.js` 全部接入 PathSecurity + recheck。
+
+### 四、工具覆盖（§60-62/§119）
+
+* Native filesystem tools（filesystem.js/patch.js）：PathSecurity + execution-time recheck。
+* PermissionRiskClassifier：默认注入 defaultPathSecurity，所有调用方自动获得 canonical 安全。
+* pathguard.js 升级为 PathSecurity 兼容层：terminal.js/search.js 等旧调用方自动获得 canonical
+  安全，保持接口不变（§119 Native tools 统一 PathSecurity）。
+* External Agents（Codex/Claude/ACP）经 classifyRisk 默认 canonical。
+
+### 五、测试（§86-91/§96）
+
+* 新增 `test/canonicalPathSecurity.test.js`（24 用例）：覆盖 §86 全部 primitive case +
+  Windows Real Junction（fs.symlinkSync junction，非 mock）+ TOCTOU deterministic test +
+  链接创建风险分级。
+* 现有 1402 测试全部保留并通过（compatCode 映射 PATH_OUTSIDE_ROOT → PATH_OUTSIDE_WORKSPACE
+  保持向后兼容，不删旧测试/不改弱 assertion，§96）。
+* 单元测试 1426 total / 1425 PASS / 0 FAIL / 1 SKIP。
+
+### 六、文档（§106-108）
+
+* 新增 `docs/CANONICAL_PATH_SECURITY.md`：Threat Model / 架构 / Deepest Existing Ancestor
+  算法 / 双层信号 / Fail-Closed / TOCTOU / 授权边界 / 链接创建风险 / Windows 特性 /
+  性能 / 已知限制 / 上游参考矩阵。
+
 ## v2.8.1 — 2026-08-10
 
 > Runtime Truthfulness & Permission Hardening：外部 Agent 审批进 GUI、Cline 权限统一入口、

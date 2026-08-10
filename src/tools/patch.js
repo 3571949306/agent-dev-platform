@@ -6,7 +6,36 @@
 const fs = require('fs');
 const fsp = require('fs/promises');
 const path = require('path');
-const { guard, PathGuardError } = require('../security/pathguard');
+const pathSecurityMod = require('../security/pathSecurity');
+const { PathSecurityError, CODE } = pathSecurityMod;
+
+/** 获取 ctx 的 PathSecurity 实例（per-run cache 或 default）。 */
+function psOf(ctx) {
+  return (ctx && ctx.pathSecurity) || pathSecurityMod;
+}
+
+/** Canonical guard：返回 canonical-verified 绝对路径，不在 root 内则抛 PathSecurityError。 */
+function guardCanonical(ctx, inputPath) {
+  const ps = psOf(ctx);
+  const r = ps.checkPathContainment(ctx.projectRoot, inputPath);
+  if (!r.allowed) {
+    throw new PathSecurityError(r.errorCode || CODE.OUTSIDE_ROOT, r.reason || '路径不在项目根目录内');
+  }
+  return r.canonicalTarget || path.resolve(ctx.projectRoot, inputPath);
+}
+
+/** §66 execution-time recheck before mutation. */
+function recheckMutationTarget(ctx, inputPath) {
+  guardCanonical(ctx, inputPath);
+}
+
+/** 向后兼容 pathguard PATH_OUTSIDE_WORKSPACE 码（§119 不破坏现有测试）。 */
+function compatCode(code) {
+  if (code === CODE.OUTSIDE_ROOT || code === CODE.REPARSE_ESCAPE || code === CODE.TAIL_ESCAPE) {
+    return 'PATH_OUTSIDE_WORKSPACE';
+  }
+  return code;
+}
 
 function ok(data) { return { ok: true, data }; }
 function fail(code, message, retryable = true) { return { ok: false, error: { code, message, retryable } }; }
@@ -155,7 +184,7 @@ const tools = [
     input_schema: { type: 'object', properties: { path: { type: 'string', description: '文件路径（相对项目根）' }, patch: { type: 'string', description: '统一 diff 文本' }, record_change: { type: 'boolean', default: true } }, required: ['path', 'patch'] },
     async exec(ctx, args) {
       try {
-        const abs = guard(ctx.projectRoot, args.path);
+        const abs = guardCanonical(ctx, args.path);
         let before = null;
         if (fs.existsSync(abs)) before = await fsp.readFile(abs, 'utf8');
         const beforeLines = (before || '').split(/\r?\n/);
@@ -163,6 +192,8 @@ const tools = [
         try { newLines = applyToLines(beforeLines, args.patch); }
         catch (e) { return fail('PATCH_FAILED', e.message, true); }
         const after = newLines.join('\n');
+        // §66 execution-time recheck immediately before mutation
+        recheckMutationTarget(ctx, args.path);
         await fsp.mkdir(path.dirname(abs), { recursive: true });
         await fsp.writeFile(abs, after, 'utf8');
         if (args.record_change !== false && ctx.store) {
@@ -171,7 +202,7 @@ const tools = [
           if (ctx.emit) ctx.emit('file_changed', { path: args.path, diff: d, taskId: ctx.taskId });
         }
         return ok({ applied: args.path, added: newLines.length - beforeLines.length });
-      } catch (e) { return e instanceof PathGuardError ? fail(e.code, e.message) : fail('PATCH_FAILED', e.message, true); }
+      } catch (e) { return e instanceof PathSecurityError ? fail(compatCode(e.code), e.message) : fail('PATCH_FAILED', e.message, true); }
     }
   }
 ];

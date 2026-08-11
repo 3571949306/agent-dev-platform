@@ -63,6 +63,13 @@ function runMainAgent(opts) {
   // 1. 创建 Run（status=preparing，立即返回 runId）
   const run = runManager.createRun({ conversationId, agentId });
   const runId = run.id;
+  if (typeof opts.onRunCreated === 'function') {
+    try { opts.onRunCreated({ runId, conversationId: conversationId || null, agentId: agentId || null }); }
+    catch (error) {
+      try { runManager.finishRun(runId, 'failed', { error: error.message, source: 'modelRouteBinding' }); } catch { /* best effort */ }
+      throw error;
+    }
+  }
 
   const lim = limits || createLimits({ maxRuntimeMs: timeoutMs || lim0() });
   const plan = createPlan(goal, initialPlan || []);

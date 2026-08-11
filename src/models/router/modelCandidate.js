@@ -1,6 +1,7 @@
 'use strict';
 
 const { sanitizePublic } = require('./publicData');
+const { normalizeCurrency, normalizePriceUnit, toPerMillion } = require('./pricing');
 
 const EVIDENCE_STATES = new Set(['tested', 'declared', 'inferred', 'unknown']);
 
@@ -25,6 +26,27 @@ function metricValue(input) {
   return ev.value === null ? null : ev;
 }
 
+function connectionUsability(input) {
+  const validState = input && ['tested', 'declared', 'unknown'].includes(input.state) ? input.state : 'unknown';
+  const validValue = input && (typeof input.value === 'boolean' || input.value === null) ? input.value : null;
+  return { value: validValue, state: validValue === null ? 'unknown' : validState, source: input && typeof input.source === 'string' ? input.source : null };
+}
+
+function authEvidence(input) {
+  const modes = new Set(['api_key', 'custom_headers', 'none', 'local', 'unknown']);
+  return {
+    mode: input && modes.has(input.mode) ? input.mode : 'unknown',
+    configured: input && (typeof input.configured === 'boolean' || input.configured === null) ? input.configured : null
+  };
+}
+
+function normalizePriceMetric(input, unit) {
+  const metric = metricValue(input);
+  if (!metric) return null;
+  const normalized = toPerMillion(metric.value, unit);
+  return normalized === null ? metric : { ...metric, value: normalized };
+}
+
 function normalizeModelCandidate(input) {
   if (!input || typeof input !== 'object') throw new Error('MODEL_CANDIDATE_INVALID');
   const connectionId = typeof input.connectionId === 'string' ? input.connectionId.trim() : '';
@@ -33,6 +55,7 @@ function normalizeModelCandidate(input) {
   if (!connectionId || !modelId || !provider) throw new Error('MODEL_CANDIDATE_INVALID: connectionId, provider and modelId are required');
   const caps = input.capabilities || {};
   const pricing = input.pricing || {};
+  const originalPriceUnit = normalizePriceUnit(pricing.unit);
   const latency = input.latency || {};
   const contextWindow = metricValue(input.contextWindow);
   return sanitizePublic({
@@ -43,7 +66,8 @@ function normalizeModelCandidate(input) {
     modelId,
     displayName: typeof input.displayName === 'string' && input.displayName ? input.displayName : modelId,
     enabled: input.enabled !== false && input.enabled !== 0,
-    authenticated: input.authenticated === true,
+    connectionUsability: connectionUsability(input.connectionUsability),
+    authEvidence: authEvidence(input.authEvidence),
     capabilities: {
       text: evidence(caps.text),
       vision: evidence(caps.vision),
@@ -52,9 +76,11 @@ function normalizeModelCandidate(input) {
     },
     contextWindow: contextWindow || { value: null, state: 'unknown', source: null },
     pricing: {
-      input: metricValue(pricing.input),
-      output: metricValue(pricing.output),
-      currency: typeof pricing.currency === 'string' ? pricing.currency : null,
+      input: normalizePriceMetric(pricing.input, originalPriceUnit),
+      output: normalizePriceMetric(pricing.output, originalPriceUnit),
+      currency: normalizeCurrency(pricing.currency),
+      unit: originalPriceUnit === 'unknown' ? 'unknown' : 'per_1m_tokens',
+      originalUnit: originalPriceUnit,
       source: typeof pricing.source === 'string' ? pricing.source : null
     },
     latency: {
@@ -67,4 +93,4 @@ function normalizeModelCandidate(input) {
   });
 }
 
-module.exports = { EVIDENCE_STATES, evidence, normalizeModelCandidate };
+module.exports = { EVIDENCE_STATES, evidence, connectionUsability, authEvidence, normalizeModelCandidate };

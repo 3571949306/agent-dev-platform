@@ -2,6 +2,32 @@
 
 ## v2.9.2 — Model Router Framework（2026-08-11）
 
+### Model Router Final Closure
+
+Starting HEAD: `7e00afbd1910c05d0646c0a9fc9292c8535ee47e`. The starting worktree was clean; no pre-existing or unrelated local changes were present.
+
+| Closure requirement | Deterministic proof | Status |
+| --- | --- | --- |
+| R0 Local reconciliation | Status, HEAD, staged and unstaged diffs inspected before edits; all resulting files belong to this closure | VERIFIED |
+| R1 Connection usability | API-key, custom-header, tested no-auth, untested no-auth, disabled, local and secret-sentinel fixtures; no `CONNECTION_UNAUTHENTICATED` path | VERIFIED |
+| R2 Real Run attribution | Production Main decision binds `conversation-X` separately from the actual Run; Dynamic decision binds exact AgentHub child/root/parent; failed pre-run route remains `NULL` | VERIFIED |
+| R3 Pricing comparability | Same-currency ordering, mixed-currency global skip, per-1K to per-1M normalization, required hard basis, unit/currency failures, unknown-price penalty | VERIFIED |
+
+The production proof retains `selected model = B`, `provider wire model = B`, and zero paid provider calls. Final production identities were:
+
+```text
+Main: conversationId=conversation-X
+      actualRunId=ea4564f9-cdc3-49c8-8ee9-50623b2d7bed
+      decisionRunId=ea4564f9-cdc3-49c8-8ee9-50623b2d7bed
+Dynamic: rootRunId=production-route-root
+         parentRunId=production-parent-run
+         actualChildRunId=a9793ac6-afb6-434e-a5c3-1b7903b2b90c
+         decisionRunId=a9793ac6-afb6-434e-a5c3-1b7903b2b90c
+Failed pre-run route: runId=NULL
+```
+
+Serialized final gates: unit 1536/1535 pass/0 fail/1 skip; Dynamic 9/9; Dynamic production 1/1; Model Router 11/11; Model Router production 1/1; E2E 65/65; Windows NSIS + portable dist PASS. One complete unit attempt reported a single non-reproducing failure; the immediate full diagnostic rerun passed with the counts above. The final secret gate scanned all 22 modified/new files; matches were public schema field names, security documentation, or explicit fake leak sentinels, with no real credential value introduced.
+
 Baseline at `ac99bbed1bb2d86d19c6ecd0e6202144c6736e1f`, version `2.9.1`: unit 1524/1523 pass/0 fail/1 skip; Dynamic 9/9; Dynamic production 1/1. Paid provider calls: 0.
 
 | Requirement | Automated proof |
@@ -28,7 +54,7 @@ paid provider calls: 0
 
 ```text
 npm test
-1534 tests / 1533 pass / 0 fail / 1 skip
+1536 tests / 1535 pass / 0 fail / 1 skip
 
 npm run test:dynamic-agent
 9 pass / 0 fail
@@ -37,7 +63,7 @@ npm run test:dynamic-agent:production
 1 pass / 0 fail
 
 npm run test:model-router
-9 pass / 0 fail
+11 pass / 0 fail
 
 npm run test:model-router:production
 1 pass / 0 fail

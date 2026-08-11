@@ -18,12 +18,39 @@ function metadataFor(modelRow, key, aliases = []) {
   return undefined;
 }
 
+function publicConnectionEvidence(connection, locality) {
+  if (locality === 'local') {
+    return {
+      connectionUsability: { value: true, state: 'declared', source: 'locality' },
+      authEvidence: { mode: 'local', configured: true }
+    };
+  }
+  const hasKey = connection.has_key === true;
+  const hasHeaders = connection.has_custom_headers === true;
+  const auth = hasKey
+    ? { mode: 'api_key', configured: true }
+    : (hasHeaders ? { mode: 'custom_headers', configured: true } : { mode: 'none', configured: false });
+  if (connection.tested === true || connection.tested === 1) {
+    return {
+      connectionUsability: { value: true, state: 'tested', source: 'connection-test' },
+      authEvidence: auth
+    };
+  }
+  return {
+    connectionUsability: { value: null, state: 'unknown', source: null },
+    authEvidence: auth
+  };
+}
+
 function createModelCatalog({ store } = {}) {
   if (!store || !store.connections || !store.models) throw new Error('MODEL_CATALOG_STORE_REQUIRED');
 
   function listCandidates() {
     const candidates = [];
-    const connections = store.connections.list().slice().sort((a, b) => String(a.id).localeCompare(String(b.id)));
+    const listConnections = typeof store.connections.listForModelRouting === 'function'
+      ? store.connections.listForModelRouting.bind(store.connections)
+      : store.connections.list.bind(store.connections);
+    const connections = listConnections().slice().sort((a, b) => String(a.id).localeCompare(String(b.id)));
     for (const connection of connections) {
       const rows = store.models.listByConnection(connection.id);
       const rowById = new Map(rows.map(row => [row.model_id, row]));
@@ -35,6 +62,7 @@ function createModelCatalog({ store } = {}) {
         const contextWindow = metadataFor(row, 'contextWindow', ['context_window']);
         const pricing = metadataFor(row, 'pricing') || {};
         const locality = publicLocality(connection);
+        const connectionEvidence = publicConnectionEvidence(connection, locality);
         candidates.push(normalizeModelCandidate({
           connectionId: connection.id,
           connectionName: connection.name,
@@ -43,7 +71,8 @@ function createModelCatalog({ store } = {}) {
           modelId: model.id,
           displayName: (row && row.display_name) || model.displayName || model.id,
           enabled: connection.enabled !== false && connection.enabled !== 0 && connection.disabled !== true,
-          authenticated: locality === 'local' || connection.has_key === true,
+          connectionUsability: connectionEvidence.connectionUsability,
+          authEvidence: connectionEvidence.authEvidence,
           capabilities: {
             // Presence in the configured model catalog is provider/manual declaration
             // of a text model; no capability is inferred from the model name.
@@ -78,4 +107,4 @@ function createModelCatalog({ store } = {}) {
   return { listCandidates, getCandidate };
 }
 
-module.exports = { createModelCatalog, publicLocality };
+module.exports = { createModelCatalog, publicLocality, publicConnectionEvidence };

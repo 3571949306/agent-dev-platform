@@ -58,6 +58,21 @@ const connections = {
     return db().prepare('SELECT id,name,provider,base_url,api_key_masked,headers_json,models_json,tested,tested_at,last_error,latency_ms,enabled,import_source,import_source_path,created_at,updated_at FROM api_connections ORDER BY created_at').all()
       .map(r => ({ ...r, headers: p(r.headers_json, {}), models: normalizeModels(p(r.models_json, [])), has_key: !!r.api_key_masked }));
   },
+  /** Public, secret-free projection consumed by ModelCatalog. Header values never cross this boundary. */
+  listForModelRouting() {
+    return db().prepare('SELECT id,name,provider,base_url,api_key_masked,headers_json,models_json,tested,tested_at,latency_ms,enabled,created_at,updated_at FROM api_connections ORDER BY created_at').all()
+      .map(r => {
+        const headerNames = Object.keys(p(r.headers_json, {}));
+        return {
+          id: r.id, name: r.name, provider: r.provider, base_url: r.base_url,
+          models: normalizeModels(p(r.models_json, [])), tested: r.tested,
+          tested_at: r.tested_at, latency_ms: r.latency_ms, enabled: r.enabled,
+          created_at: r.created_at, updated_at: r.updated_at,
+          has_key: !!r.api_key_masked,
+          has_custom_headers: headerNames.length > 0
+        };
+      });
+  },
   get(id) {
     const r = db().prepare('SELECT * FROM api_connections WHERE id=?').get(id);
     if (!r) return null;
@@ -583,9 +598,10 @@ const modelRouteDecisions = {
     const value = sanitizePublic(input);
     const id = uuid(); const t = now();
     db().prepare(`INSERT INTO model_route_decisions
-      (id,run_id,agent_id,connection_id,model_id,mode,requirements_json,score,reasons_json,rejected_json,status,latency_ms,input_tokens,output_tokens,error_code,created_at,updated_at)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
-      .run(id, value.runId || null, value.agentId || null, value.connectionId || null, value.modelId || null,
+      (id,run_id,conversation_id,root_run_id,parent_run_id,agent_id,connection_id,model_id,mode,requirements_json,score,reasons_json,rejected_json,status,latency_ms,input_tokens,output_tokens,error_code,created_at,updated_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+      .run(id, value.runId || null, value.conversationId || null, value.rootRunId || null, value.parentRunId || null,
+        value.agentId || null, value.connectionId || null, value.modelId || null,
         value.mode || 'auto', j(value.requirements || {}), value.score ?? null, j(value.reasons || []),
         j(value.rejectedCandidates || []), value.status || 'routed', value.latencyMs ?? null,
         value.inputTokens ?? null, value.outputTokens ?? null, value.errorCode || null, t, t);
@@ -600,6 +616,15 @@ const modelRouteDecisions = {
     const result = db().prepare(`UPDATE model_route_decisions SET status=?,latency_ms=?,input_tokens=?,output_tokens=?,error_code=?,updated_at=? WHERE id=?`)
       .run(value.status || 'unknown', value.latencyMs ?? null, value.inputTokens ?? null,
         value.outputTokens ?? null, value.errorCode || null, now(), id);
+    return result.changes > 0;
+  },
+  bindRunIdentity(id, identity = {}) {
+    if (!identity.runId || typeof identity.runId !== 'string') return false;
+    const result = db().prepare(`UPDATE model_route_decisions
+      SET run_id=?,conversation_id=COALESCE(?,conversation_id),root_run_id=COALESCE(?,root_run_id),parent_run_id=COALESCE(?,parent_run_id),updated_at=?
+      WHERE id=? AND (run_id IS NULL OR run_id=?)`)
+      .run(identity.runId, identity.conversationId || null, identity.rootRunId || null,
+        identity.parentRunId || null, now(), id, identity.runId);
     return result.changes > 0;
   }
 };

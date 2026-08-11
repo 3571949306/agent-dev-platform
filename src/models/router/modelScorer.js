@@ -1,10 +1,11 @@
 'use strict';
 
 const EVIDENCE_WEIGHT = Object.freeze({ tested: 8, declared: 5, inferred: 1, unknown: 0 });
+const { priceBasisKey } = require('./pricing');
 
 function round(value) { return Math.round(value * 1000) / 1000; }
 
-function scoreOne(requirements, candidate) {
+function scoreOne(requirements, candidate, costContext = null) {
   const breakdown = { capabilityEvidence: 0, latency: 0, cost: 0, locality: 0, providerPreference: 0, modelPreference: 0 };
   for (const cap of Object.values(candidate.capabilities)) {
     if (cap && cap.value === true) breakdown.capabilityEvidence += EVIDENCE_WEIGHT[cap.state] || 0;
@@ -25,8 +26,11 @@ function scoreOne(requirements, candidate) {
   if (costPref !== 'ignore') {
     const input = candidate.pricing.input && candidate.pricing.input.value;
     const output = candidate.pricing.output && candidate.pricing.output.value;
-    if (input === null || input === undefined || output === null || output === undefined) {
+    const comparable = input !== null && input !== undefined && output !== null && output !== undefined && !!priceBasisKey(candidate.pricing);
+    if (!comparable) {
       breakdown.cost = costPref === 'low' ? -6 : -2;
+    } else if (costContext && costContext.skip) {
+      breakdown.cost = 0;
     } else {
       const total = input + output;
       breakdown.cost = costPref === 'low' ? Math.max(-10, 20 - total * 4) : Math.max(-5, 8 - total);
@@ -39,7 +43,7 @@ function scoreOne(requirements, candidate) {
   if (modelIndex >= 0) breakdown.modelPreference = Math.max(1, 16 - modelIndex);
   for (const key of Object.keys(breakdown)) breakdown[key] = round(breakdown[key]);
   const totalScore = round(Object.values(breakdown).reduce((sum, value) => sum + value, 0));
-  return { candidate, totalScore, breakdown };
+  return { candidate, totalScore, breakdown, reasons: costContext && costContext.reason ? [{ code: costContext.reason }] : [] };
 }
 
 function compareScored(a, b) {
@@ -50,7 +54,17 @@ function compareScored(a, b) {
 }
 
 function scoreCandidates(requirements, candidates) {
-  return candidates.map(candidate => scoreOne(requirements, candidate)).sort(compareScored);
+  const bases = new Set(candidates.map(candidate => {
+    const input = candidate.pricing.input && candidate.pricing.input.value;
+    const output = candidate.pricing.output && candidate.pricing.output.value;
+    return input !== null && input !== undefined && output !== null && output !== undefined
+      ? priceBasisKey(candidate.pricing)
+      : null;
+  }).filter(Boolean));
+  const costContext = requirements.preferences.cost !== 'ignore' && bases.size > 1
+    ? { skip: true, reason: 'COST_COMPARISON_SKIPPED_MIXED_BASIS' }
+    : { skip: false, reason: null };
+  return candidates.map(candidate => scoreOne(requirements, candidate, costContext)).sort(compareScored);
 }
 
 module.exports = { EVIDENCE_WEIGHT, scoreOne, scoreCandidates, compareScored };

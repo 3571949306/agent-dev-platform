@@ -2,6 +2,7 @@
 
 const ERROR_CODE = 'MODEL_REQUIREMENTS_INVALID';
 const PREFERENCE_LEVELS = new Set(['low', 'balanced', 'ignore']);
+const { normalizeCurrency, normalizePriceUnit, toPerMillion } = require('./pricing');
 
 const DEFAULT_REQUIREMENTS = Object.freeze({
   schemaVersion: 1,
@@ -11,7 +12,7 @@ const DEFAULT_REQUIREMENTS = Object.freeze({
     allowedConnectionIds: Object.freeze([]), deniedConnectionIds: Object.freeze([]),
     allowedProviders: Object.freeze([]), deniedProviders: Object.freeze([]),
     allowedModels: Object.freeze([]), deniedModels: Object.freeze([]),
-    maxInputPrice: null, maxOutputPrice: null, maxLatencyMs: null
+    maxInputPrice: null, maxOutputPrice: null, maxLatencyMs: null, priceBasis: null
   })
 });
 
@@ -84,6 +85,17 @@ function normalizeModelRequirements(input = {}) {
   constraints.maxInputPrice = nullableNonNegative(constraints.maxInputPrice, 'requirements.constraints.maxInputPrice');
   constraints.maxOutputPrice = nullableNonNegative(constraints.maxOutputPrice, 'requirements.constraints.maxOutputPrice');
   constraints.maxLatencyMs = nullableNonNegative(constraints.maxLatencyMs, 'requirements.constraints.maxLatencyMs');
+  if (constraints.priceBasis !== null) {
+    if (!plain(constraints.priceBasis)) throw invalid('requirements.constraints.priceBasis', 'must be null or a plain object');
+    rejectUnknownKeys(constraints.priceBasis, new Set(['currency', 'unit']), 'requirements.constraints.priceBasis');
+    const currency = normalizeCurrency(constraints.priceBasis.currency);
+    const originalUnit = normalizePriceUnit(constraints.priceBasis.unit);
+    if (!currency) throw invalid('requirements.constraints.priceBasis.currency', 'must be a non-empty currency code');
+    if (originalUnit === 'unknown') throw invalid('requirements.constraints.priceBasis.unit', 'unsupported price unit');
+    if (constraints.maxInputPrice !== null) constraints.maxInputPrice = toPerMillion(constraints.maxInputPrice, originalUnit);
+    if (constraints.maxOutputPrice !== null) constraints.maxOutputPrice = toPerMillion(constraints.maxOutputPrice, originalUnit);
+    constraints.priceBasis = { currency, unit: 'per_1m_tokens' };
+  }
   return { schemaVersion, required, preferences, constraints };
 }
 

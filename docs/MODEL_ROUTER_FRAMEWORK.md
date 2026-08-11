@@ -38,6 +38,10 @@ Evidence states retain their meaning: `tested > declared > inferred > unknown`. 
 
 The catalog reads existing public connection/model metadata. Model names never imply price, speed, context, or quality. Presence in the configured model catalog declares a text model; optional vision, tools, streaming, context, price, and latency retain stored evidence or remain unknown.
 
+Connection usability is independent from authentication configuration. An API key proves only that a key is configured, while custom headers are represented only by their presence; header names and values never enter a candidate. Untested remote connections, including no-auth connections, retain unknown usability and are not rejected for a missing key. Local connections are declared usable without authentication. Only explicit tested-unusable evidence is a hard rejection.
+
+Pricing is normalized to `per_1m_tokens` from `per_token`, `per_1k_tokens`, or `per_1m_tokens`, while retaining the currency and original unit as public evidence. Unknown units remain unknown. A hard price limit requires an explicit `priceBasis`; missing basis, unknown unit/value, or currency mismatch fails closed. Soft cost scoring compares only one common currency/canonical-unit basis. If eligible known prices span currencies, cost comparison is globally skipped with `COST_COMPARISON_SKIPPED_MIXED_BASIS`; unknown price is never treated as zero.
+
 ## Filtering, scoring, and explicit selection
 
 Filtering explains every rejection with stable codes such as `VISION_REQUIRED_NOT_PROVEN`, `CONTEXT_WINDOW_UNKNOWN`, `PRICE_UNKNOWN_FOR_HARD_LIMIT`, `CONNECTION_DISABLED`, and `MODEL_DENIED`.
@@ -60,7 +64,9 @@ For Main Agent, a manual Connection + Model binding always remains explicit. Aut
 
 ## Explainability and audit
 
-Each selection contains public identity, normalized requirements, score and breakdown, selection reasons, rejected candidates and reasons, mode, and route time. `model_route_decisions` persists that data plus nullable outcome status, latency, token counts, and error code. No-candidate failures also record requirements and rejection evidence.
+Each selection contains public identity, normalized requirements, score and breakdown, selection reasons, rejected candidates and reasons, mode, and route time. `model_route_decisions` persists that data plus distinct nullable `conversation_id`, `root_run_id`, `parent_run_id`, and `run_id` fields, outcome status, latency, token counts, and error code. No-candidate failures also record requirements and rejection evidence.
+
+Routing may happen before the runtime Run exists. In that case the decision is first stored with `run_id = NULL`; conversation, root, and parent identity never impersonate a Run. Immediately after `RunManager` creates a Main Run, or `AgentHub` creates a Dynamic Child Run, the runtime binds the decision to that actual Run before the first `modelAdapter.decide()`. Binding is fail-closed and cannot replace a different already-bound Run ID. A failed pre-run no-candidate route remains unbound.
 
 Candidates, selections, logs, and route decisions exclude decrypted connections, credentials, provider objects, and ModelAdapter objects. Outcome records do not estimate missing token data.
 
@@ -68,4 +74,4 @@ Candidates, selections, logs, and route decisions exclude decrypted connections,
 
 Run `npm run test:model-router` for the fast contract/adversarial suite and `npm run test:model-router:production` for the deterministic production smoke.
 
-The production smoke uses a TEMP SQLite Store, production ModelCatalog/ModelRouter/AgentFactory/ProviderModelAdapter, and only a fake network provider. It proves Dynamic auto selects B, provider wire receives B, the child completes, the outcome is audited, and failed auto routing cannot continue on a Parent model. Paid provider calls are zero.
+The production smoke uses a TEMP SQLite Store, production ModelCatalog/ModelRouter/RouteAudit/RuntimeModelResolver/ProviderModelAdapter, real Main and Dynamic Run creation, and only a fake network provider. It proves Dynamic auto selects B, provider wire receives B, the child completes, Main and Dynamic decisions bind to their actual runtime Run IDs before model execution, failed auto routing remains `run_id = NULL`, and failed Dynamic routing cannot continue on a Parent model. Paid provider calls are zero.

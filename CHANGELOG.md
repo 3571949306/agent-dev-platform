@@ -2,6 +2,8 @@
 
 ## v2.9.2 — Model Router Framework
 
+- Closed the final routing invariants without changing the framework pipeline: connection usability is separate from API-key/custom-header configuration, decisions bind to actual Main/Dynamic Run IDs, and prices are compared only after unit normalization on a compatible currency basis.
+- Added adversarial and production proofs for key/header/no-auth connections, secret-free header handling, pre-run `NULL` attribution followed by real Run binding, same/cross-currency pricing, deterministic unit conversion, hard-price basis validation, and unknown-price handling.
 - Added versioned `ModelRequirements`, secret-free `ModelCandidate` discovery from existing Connections/Models/probe evidence, and strict unknown-preserving capability/numeric semantics.
 - Added hard filtering, deterministic metadata-only scoring, stable tie-breaking, explainable `ModelSelection`, and exact explicit/no-candidate fail-closed errors.
 - Added one `resolveRuntimeModel()` entry for Main and Dynamic Native Agents while retaining the existing `ProviderModelAdapter` and credential-owning `buildProvider()` boundary.

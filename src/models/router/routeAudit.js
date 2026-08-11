@@ -2,12 +2,21 @@
 
 const { sanitizePublic } = require('./publicData');
 
+function routeIdentity(context = {}) {
+  return {
+    runId: context.runId || null,
+    conversationId: context.conversationId || null,
+    rootRunId: context.rootRunId || null,
+    parentRunId: context.parentRunId || null,
+    agentId: context.agentId || null
+  };
+}
+
 function createRouteAudit(decisionStore) {
   function recordSelection(selection, context = {}) {
     if (!decisionStore || typeof decisionStore.record !== 'function') return null;
     return decisionStore.record(sanitizePublic({
-      runId: context.runId || null,
-      agentId: context.agentId || null,
+      ...routeIdentity(context),
       connectionId: selection.selected && selection.selected.connectionId,
       modelId: selection.selected && selection.selected.modelId,
       mode: selection.mode,
@@ -22,8 +31,7 @@ function createRouteAudit(decisionStore) {
   function recordFailure({ mode, requirements, rejectedCandidates, errorCode }, context = {}) {
     if (!decisionStore || typeof decisionStore.record !== 'function') return null;
     return decisionStore.record(sanitizePublic({
-      runId: context.runId || null,
-      agentId: context.agentId || null,
+      ...routeIdentity(context),
       connectionId: null,
       modelId: null,
       mode,
@@ -40,7 +48,17 @@ function createRouteAudit(decisionStore) {
     if (!decisionId || !decisionStore || typeof decisionStore.updateOutcome !== 'function') return false;
     return decisionStore.updateOutcome(decisionId, sanitizePublic(outcome));
   }
-  return { recordSelection, recordFailure, recordOutcome };
+  function bindRunIdentity(decisionId, identity) {
+    if (!decisionId || !decisionStore || typeof decisionStore.bindRunIdentity !== 'function') return false;
+    const ok = decisionStore.bindRunIdentity(decisionId, sanitizePublic(identity || {}));
+    if (!ok) {
+      const error = new Error('MODEL_ROUTE_RUN_BINDING_FAILED');
+      error.code = 'MODEL_ROUTE_RUN_BINDING_FAILED';
+      throw error;
+    }
+    return true;
+  }
+  return { recordSelection, recordFailure, recordOutcome, bindRunIdentity };
 }
 
-module.exports = { createRouteAudit };
+module.exports = { createRouteAudit, routeIdentity };

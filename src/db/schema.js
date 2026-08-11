@@ -327,6 +327,9 @@ CREATE TABLE IF NOT EXISTS permission_decisions (
 CREATE TABLE IF NOT EXISTS model_route_decisions (
   id TEXT PRIMARY KEY,
   run_id TEXT,
+  conversation_id TEXT,
+  root_run_id TEXT,
+  parent_run_id TEXT,
   agent_id TEXT,
   connection_id TEXT,
   model_id TEXT,
@@ -439,7 +442,11 @@ const COLUMN_MIGRATIONS = [
   ['runs', 'parent_run_id', 'TEXT'],
   // v2.9.0 — Run Tree（§21/§116）：root_run_id + depth 完整化 Run 树追踪
   ['runs', 'root_run_id', 'TEXT'],
-  ['runs', 'depth', 'INTEGER', '0']
+  ['runs', 'depth', 'INTEGER', '0'],
+  // v2.9.2 closure: route decisions are created pre-run, then bound to real runtime identity.
+  ['model_route_decisions', 'conversation_id', 'TEXT'],
+  ['model_route_decisions', 'root_run_id', 'TEXT'],
+  ['model_route_decisions', 'parent_run_id', 'TEXT']
 ];
 
 function ensureColumns(db) {

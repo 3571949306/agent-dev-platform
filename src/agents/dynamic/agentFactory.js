@@ -45,7 +45,10 @@ function createAgentFactory(options = {}) {
         parentSelection: context.parentModelSelection || null,
         context: {
           ...context,
-          runId: context.rootRunId || context.parentRunId || null,
+          runId: null,
+          conversationId: context.conversationId || null,
+          rootRunId: context.rootRunId || null,
+          parentRunId: context.parentRunId || null,
           agentId: context.adapterId || definition.id,
           definition
         }
@@ -92,7 +95,8 @@ function createAgentFactory(options = {}) {
 
     const instanceId = `dyn-instance-${crypto.randomUUID()}`;
     const adapterId = `dyn-agent-${instanceId.slice('dyn-instance-'.length)}`;
-    const modelResolution = resolveModel(definition, { ...context, rootRunId, adapterId });
+    const actualRootRunId = context.rootRunId || null;
+    const modelResolution = resolveModel(definition, { ...context, rootRunId: actualRootRunId, adapterId });
     const instance = {
       instanceId,
       definitionId: definition.id,
@@ -100,6 +104,7 @@ function createAgentFactory(options = {}) {
       adapterId,
       parentRunId: context.parentRunId || null,
       rootRunId,
+      routeRootRunId: actualRootRunId,
       status: 'CREATED',
       lifetime: definition.lifetime,
       createdAt: Date.now(),
@@ -121,7 +126,11 @@ function createAgentFactory(options = {}) {
       instanceId,
       adapterId,
       rootRunId,
+      routeRootRunId: actualRootRunId,
       modelAdapter: modelResolution.modelAdapter,
+      modelSelection: modelResolution.selection || null,
+      bindRouteDecisionToRun: options.bindRouteDecisionToRun || null,
+      parentRunId: context.parentRunId || null,
       getTool: context.getTool || options.getTool,
       parentPermissionEngine: context.parentPermissionEngine || null,
       runMainAgentFn,

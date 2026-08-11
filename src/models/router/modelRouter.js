@@ -52,7 +52,8 @@ function createModelRouter({ catalog, audit } = {}) {
       scoreBreakdown: winner.breakdown,
       reasons: [
         { code: mode === 'explicit' ? 'EXPLICIT_EXACT_MATCH' : 'HIGHEST_DETERMINISTIC_SCORE' },
-        { code: 'HARD_CONSTRAINTS_SATISFIED' }
+        { code: 'HARD_CONSTRAINTS_SATISFIED' },
+        ...(winner.reasons || [])
       ],
       rejected: filtered.rejected
     });

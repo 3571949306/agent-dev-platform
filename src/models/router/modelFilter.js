@@ -15,7 +15,9 @@ function filterCandidates(requirements, candidates) {
   for (const candidate of candidates) {
     const reasons = [];
     if (!candidate.enabled) reasons.push(reason('CONNECTION_DISABLED'));
-    if (!candidate.authenticated) reasons.push(reason('CONNECTION_UNAUTHENTICATED'));
+    if (candidate.connectionUsability && candidate.connectionUsability.value === false && candidate.connectionUsability.state === 'tested') {
+      reasons.push(reason('CONNECTION_UNUSABLE', { source: candidate.connectionUsability.source }));
+    }
     if (c.allowedConnectionIds.length && !c.allowedConnectionIds.includes(candidate.connectionId)) reasons.push(reason('CONNECTION_NOT_ALLOWED'));
     if (c.deniedConnectionIds.includes(candidate.connectionId)) reasons.push(reason('CONNECTION_DENIED'));
     if (c.allowedProviders.length && !c.allowedProviders.includes(candidate.provider)) reasons.push(reason('PROVIDER_NOT_ALLOWED'));
@@ -41,7 +43,12 @@ function filterCandidates(requirements, candidates) {
       const limit = c[constraintKey];
       if (limit === null) continue;
       const metric = candidate.pricing[priceKey];
-      if (!metric || metric.value === null) reasons.push(reason('PRICE_UNKNOWN_FOR_HARD_LIMIT', { metric: priceKey }));
+      if (!c.priceBasis) reasons.push(reason('PRICE_BASIS_REQUIRED', { metric: priceKey }));
+      else if (!metric || metric.value === null) reasons.push(reason('PRICE_UNKNOWN_FOR_HARD_LIMIT', { metric: priceKey }));
+      else if (candidate.pricing.unit === 'unknown') reasons.push(reason('PRICE_UNIT_UNKNOWN', { metric: priceKey }));
+      else if (!candidate.pricing.currency || candidate.pricing.currency !== c.priceBasis.currency) {
+        reasons.push(reason('PRICE_CURRENCY_MISMATCH', { metric: priceKey, expected: c.priceBasis.currency, actual: candidate.pricing.currency }));
+      }
       else if (metric.value > limit) reasons.push(reason('PRICE_EXCEEDS_LIMIT', { metric: priceKey, limit, actual: metric.value }));
     }
     if (c.maxLatencyMs !== null) {

@@ -27,13 +27,14 @@ function candidate(id, patch = {}) {
     modelId: id,
     displayName: id,
     enabled: patch.enabled !== false,
-    authenticated: patch.authenticated !== false,
+    connectionUsability: patch.connectionUsability || { value: true, state: 'tested', source: 'fixture' },
+    authEvidence: patch.authEvidence || { mode: 'api_key', configured: true },
     capabilities: {
       text: cap(true), vision: cap(false), nativeTools: cap(false), streaming: cap(true),
       ...(patch.capabilities || {})
     },
     contextWindow: patch.contextWindow === undefined ? metric(32000) : patch.contextWindow,
-    pricing: patch.pricing === undefined ? { input: metric(0.1), output: metric(0.2), currency: 'USD', source: 'fixture' } : patch.pricing,
+    pricing: patch.pricing === undefined ? { input: metric(0.1), output: metric(0.2), currency: 'USD', unit: 'per_1m_tokens', source: 'fixture' } : patch.pricing,
     latency: patch.latency === undefined ? { ms: 100, source: 'fixture', measuredAt: '2026-01-01T00:00:00.000Z' } : patch.latency,
     locality: patch.locality || 'remote',
     metadata: patch.metadata || {}
@@ -43,13 +44,13 @@ function candidate(id, patch = {}) {
 function dataset() {
   return [
     candidate('A'),
-    candidate('B', { capabilities: { vision: cap(true) }, contextWindow: metric(128000), pricing: { input: metric(2), output: metric(4), currency: 'USD', source: 'fixture' }, latency: { ms: 250, source: 'fixture' } }),
+    candidate('B', { capabilities: { vision: cap(true) }, contextWindow: metric(128000), pricing: { input: metric(2), output: metric(4), currency: 'USD', unit: 'per_1m_tokens', source: 'fixture' }, latency: { ms: 250, source: 'fixture' } }),
     candidate('C', { connectionId: 'conn-local', provider: 'local', locality: 'local', capabilities: { vision: cap(null, 'unknown') }, contextWindow: metric(64000), pricing: { input: null, output: null }, latency: { ms: 40, source: 'fixture' } }),
     candidate('D', { capabilities: { vision: cap(true, 'inferred') }, contextWindow: null, latency: { ms: null } }),
     candidate('E', { enabled: false, capabilities: { vision: cap(true) }, contextWindow: metric(1000000), latency: { ms: 1 } }),
     candidate('F', { capabilities: { text: cap(null, 'unknown') } }),
     candidate('G', { contextWindow: metric(16000), latency: { ms: 500 } }),
-    candidate('H', { authenticated: false })
+    candidate('H', { connectionUsability: { value: false, state: 'tested', source: 'connection-test' }, authEvidence: { mode: 'none', configured: false } })
   ];
 }
 
@@ -93,7 +94,33 @@ test('R2 production-shaped ModelCatalog discovers 4 connections/8 models, skips 
   assert.doesNotMatch(JSON.stringify(found), /must-not-leak|Bearer|Authorization|apiKey/i);
 });
 
-test('R3 hard constraints reject unproven vision, small/unknown context, unknown price, disabled/authless candidates', () => {
+test('R1 connection usability keeps credential configuration separate from tested usability', () => {
+  const connections = [
+    { id: 'key', name: 'Key Remote', provider: 'custom', base_url: 'https://key.invalid/v1', has_key: true, has_custom_headers: false, tested: 0, enabled: 1, models: [{ id: 'A' }] },
+    { id: 'header', name: 'Header Remote', provider: 'custom', base_url: 'https://header.invalid/v1', has_key: false, has_custom_headers: true, tested: 0, enabled: 1, models: [{ id: 'B' }], secretHeaderValue: 'must-not-cross-boundary' },
+    { id: 'tested', name: 'Tested No Auth', provider: 'custom', base_url: 'https://tested.invalid/v1', has_key: false, has_custom_headers: false, tested: 1, enabled: 1, models: [{ id: 'C' }] },
+    { id: 'unknown', name: 'Untested No Auth', provider: 'custom', base_url: 'https://unknown.invalid/v1', has_key: false, has_custom_headers: false, tested: 0, enabled: 1, models: [{ id: 'D' }] },
+    { id: 'off', name: 'Disabled', provider: 'custom', base_url: 'https://off.invalid/v1', has_key: true, tested: 1, enabled: 0, models: [{ id: 'E' }] },
+    { id: 'local', name: 'Local', provider: 'local', base_url: 'http://127.0.0.1:1234/v1', has_key: false, tested: 0, enabled: 1, models: [{ id: 'F' }] }
+  ];
+  const rows = Object.fromEntries(connections.map(connection => [connection.id, [{ model_id: connection.models[0].id, capabilities: { text: cap(true) } }]]));
+  const catalog = createModelCatalog({ store: {
+    connections: { listForModelRouting: () => connections },
+    models: { listByConnection: id => rows[id] }
+  } });
+  const candidates = catalog.listCandidates();
+  const filtered = filterCandidates(normalizeModelRequirements({}), candidates);
+  assert.deepStrictEqual(filtered.eligible.map(item => item.modelId), ['B', 'A', 'F', 'C', 'D']);
+  assert.strictEqual(candidates.find(item => item.modelId === 'A').authEvidence.mode, 'api_key');
+  assert.strictEqual(candidates.find(item => item.modelId === 'A').connectionUsability.value, null, 'a configured key is not proof of validity');
+  assert.strictEqual(candidates.find(item => item.modelId === 'B').authEvidence.mode, 'custom_headers');
+  assert.strictEqual(candidates.find(item => item.modelId === 'D').connectionUsability.state, 'unknown');
+  assert.ok(filtered.rejected.find(item => item.candidate.modelId === 'E').reasons.some(reason => reason.code === 'CONNECTION_DISABLED'));
+  assert.ok(filtered.rejected.every(item => item.reasons.every(reason => reason.code !== 'CONNECTION_UNAUTHENTICATED')));
+  assert.doesNotMatch(JSON.stringify(candidates), /must-not-cross-boundary|secretHeaderValue/i);
+});
+
+test('R3 hard constraints reject unproven vision, small/unknown context, unknown price, disabled/unusable candidates', () => {
   const data = dataset();
   let result = filterCandidates(normalizeModelRequirements({ required: { vision: true } }), data);
   assert.deepStrictEqual(result.eligible.map(item => item.modelId), ['B']);
@@ -102,9 +129,11 @@ test('R3 hard constraints reject unproven vision, small/unknown context, unknown
   assert.deepStrictEqual(result.eligible.map(item => item.modelId), ['B']);
   assert.ok(result.rejected.find(item => item.candidate.modelId === 'D').reasons.some(r => r.code === 'CONTEXT_WINDOW_UNKNOWN'));
   result = filterCandidates(normalizeModelRequirements({ constraints: { maxInputPrice: 1 } }), data);
+  assert.ok(result.rejected.every(item => item.reasons.some(r => r.code === 'PRICE_BASIS_REQUIRED')));
+  result = filterCandidates(normalizeModelRequirements({ constraints: { maxInputPrice: 1, priceBasis: { currency: 'USD', unit: 'per_1m_tokens' } } }), data);
   assert.ok(result.rejected.find(item => item.candidate.modelId === 'C').reasons.some(r => r.code === 'PRICE_UNKNOWN_FOR_HARD_LIMIT'));
   assert.ok(result.rejected.find(item => item.candidate.modelId === 'E').reasons.some(r => r.code === 'CONNECTION_DISABLED'));
-  assert.ok(result.rejected.find(item => item.candidate.modelId === 'H').reasons.some(r => r.code === 'CONNECTION_UNAUTHENTICATED'));
+  assert.ok(result.rejected.find(item => item.candidate.modelId === 'H').reasons.some(r => r.code === 'CONNECTION_UNUSABLE'));
 });
 
 test('R3 explicit exact selection never falls back and all-rejected routes fail closed', () => {
@@ -130,16 +159,48 @@ test('R4 deterministic metadata scoring chooses C for low latency and is stable 
   assert.ok(unknownCost.find(item => item.candidate.modelId === 'C').breakdown.cost < 0, 'unknown cost is penalized, never treated as free');
 });
 
+test('R3 pricing compares only compatible canonical bases and protects hard limits', () => {
+  const usd2 = candidate('USD-2', { pricing: { input: metric(2), output: metric(0), currency: 'USD', unit: 'per_1m_tokens' } });
+  const usd5 = candidate('USD-5', { pricing: { input: metric(5), output: metric(0), currency: 'USD', unit: 'per_1m_tokens' } });
+  let scored = scoreCandidates(normalizeModelRequirements({ preferences: { cost: 'low' } }), [usd5, usd2]);
+  assert.strictEqual(scored[0].candidate.modelId, 'USD-2');
+
+  const cny1 = candidate('A-CNY-1', { pricing: { input: metric(1), output: metric(0), currency: 'CNY', unit: 'per_1m_tokens' } });
+  const mixedUnknown = candidate('UNKNOWN-MIXED', { pricing: { currency: 'EUR', unit: 'per_1m_tokens' } });
+  scored = scoreCandidates(normalizeModelRequirements({ preferences: { cost: 'low' } }), [usd2, cny1, mixedUnknown]);
+  assert.strictEqual(scored.find(item => item.candidate.modelId === 'USD-2').breakdown.cost, 0);
+  assert.strictEqual(scored.find(item => item.candidate.modelId === 'A-CNY-1').breakdown.cost, 0);
+  assert.ok(scored.find(item => item.candidate.modelId === 'UNKNOWN-MIXED').breakdown.cost < 0, 'unknown price remains penalized when known bases are mixed');
+  assert.ok(scored.every(item => item.reasons.some(reason => reason.code === 'COST_COMPARISON_SKIPPED_MIXED_BASIS')));
+
+  const perThousand = candidate('PER-1K', { pricing: { input: metric(0.002), output: metric(0), currency: 'USD', unit: 'per_1k_tokens' } });
+  assert.strictEqual(perThousand.pricing.input.value, 2);
+  assert.strictEqual(perThousand.pricing.unit, 'per_1m_tokens');
+  assert.strictEqual(scoreCandidates(normalizeModelRequirements({ preferences: { cost: 'low' } }), [perThousand, candidate('USD-3', { pricing: { input: metric(3), output: metric(0), currency: 'USD', unit: 'per_1m_tokens' } })])[0].candidate.modelId, 'PER-1K');
+
+  const unknownUnit = candidate('UNKNOWN-UNIT', { pricing: { input: metric(1), output: metric(1), currency: 'USD', unit: 'per_request' } });
+  let filtered = filterCandidates(normalizeModelRequirements({ constraints: { maxInputPrice: 5, priceBasis: { currency: 'USD', unit: 'per_1m_tokens' } } }), [unknownUnit]);
+  assert.ok(filtered.rejected[0].reasons.some(reason => reason.code === 'PRICE_UNIT_UNKNOWN'));
+  filtered = filterCandidates(normalizeModelRequirements({ constraints: { maxInputPrice: 5, priceBasis: { currency: 'CNY', unit: 'per_1m_tokens' } } }), [usd2]);
+  assert.ok(filtered.rejected[0].reasons.some(reason => reason.code === 'PRICE_CURRENCY_MISMATCH'));
+  const unknown = candidate('UNKNOWN-PRICE', { pricing: {} });
+  scored = scoreCandidates(normalizeModelRequirements({ preferences: { cost: 'low' } }), [usd2, unknown]);
+  assert.ok(scored.find(item => item.candidate.modelId === 'UNKNOWN-PRICE').breakdown.cost < 0);
+});
+
 test('R5 selection and R7 successful/failed audit are explainable and secret-free', async () => {
   const records = [];
   const decisions = {
     record(value) { records.push(JSON.parse(JSON.stringify(value))); return `decision-${records.length}`; },
-    updateOutcome(id, value) { records.push({ id, outcome: value }); return true; }
+    updateOutcome(id, value) { records.push({ id, outcome: value }); return true; },
+    bindRunIdentity(id, value) { records.push({ id, binding: value }); return true; }
   };
   const router = routerFor([candidate('B', { capabilities: { vision: cap(true) }, metadata: { password: 'leak', nested: { Cookie: 'leak' } } })], decisions);
-  const selection = router.select({ requirements: { required: { vision: true } }, context: { runId: 'run-1', agentId: 'agent-1' } });
+  const selection = router.select({ requirements: { required: { vision: true } }, context: { runId: null, conversationId: 'conversation-1', rootRunId: 'root-1', parentRunId: 'parent-1', agentId: 'agent-1' } });
   assert.ok(selection.scoreBreakdown && selection.reasons.length);
   assert.strictEqual(selection.decisionId, 'decision-1');
+  assert.strictEqual(records[0].runId, null);
+  assert.strictEqual(records[0].conversationId, 'conversation-1');
   assert.doesNotMatch(JSON.stringify({ selection, records }), /leak|password|Cookie/i);
   assert.throws(() => router.select({ requirements: { constraints: { allowedModels: ['missing'] } }, context: { runId: 'run-2' } }), error => error.code === 'MODEL_ROUTE_NO_CANDIDATE' && error.decisionId === 'decision-2');
 });
@@ -174,7 +235,7 @@ test('R6 unified resolver preserves inherit_parent/explicit and auto no-candidat
 });
 
 test('R8 router candidates cannot become Agent Providers and secret-bearing public data is removed', () => {
-  const value = normalizeModelCandidate({ connectionId: 'x', provider: 'model-provider', modelId: 'm', authenticated: true, capabilities: {}, metadata: { Authorization: 'Bearer abcdefgh', providerObject: { secret: 'x' }, safe: 'yes' } });
+  const value = normalizeModelCandidate({ connectionId: 'x', provider: 'model-provider', modelId: 'm', connectionUsability: { value: null, state: 'unknown' }, authEvidence: { mode: 'custom_headers', configured: true }, capabilities: {}, metadata: { Authorization: 'Bearer abcdefgh', providerObject: { secret: 'x' }, safe: 'yes' } });
   assert.strictEqual(value.metadata.safe, 'yes');
   assert.strictEqual(value.metadata.Authorization, undefined);
   assert.strictEqual(value.metadata.providerObject, undefined);
@@ -191,8 +252,10 @@ test('R6 Main runtime shares the resolver: a manual Connection+Model remains exp
     agentId: 'main', conversationId: 'conv', resolveRuntimeModel,
     buildProvider: async () => ({}), resolveModelFor: () => ({ model: 'manual-model' })
   });
-  assert.strictEqual(explicit, adapter);
+  assert.strictEqual(explicit.modelAdapter, adapter);
   assert.strictEqual(calls[0].mode, 'explicit');
+  assert.strictEqual(calls[0].context.runId, null);
+  assert.strictEqual(calls[0].context.conversationId, 'conv');
   assert.deepStrictEqual(calls[0].explicit, { connectionId: 'conn-manual', modelId: 'manual-model' });
   resolveConfiguredMainModel({
     agent: { id: 'main-auto', workspace: { modelRoutingMode: 'auto', modelRequirements: { preferences: { latency: 'low' } } } },

@@ -2,6 +2,7 @@
 
 module.exports = {
   ...require('./modelRequirements'),
+  ...require('./pricing'),
   ...require('./modelCandidate'),
   ...require('./modelCatalog'),
   ...require('./modelFilter'),

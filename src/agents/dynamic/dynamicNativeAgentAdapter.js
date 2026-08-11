@@ -47,7 +47,11 @@ class DynamicNativeAgentAdapter extends NativeAgentAdapter {
     this.definition = definition;
     this.instanceId = options.instanceId;
     this.rootRunId = options.rootRunId;
+    this.routeRootRunId = options.routeRootRunId || null;
     this.modelAdapter = options.modelAdapter;
+    this.modelSelection = options.modelSelection || null;
+    this._bindRouteDecisionToRun = options.bindRouteDecisionToRun || null;
+    this.parentRunId = options.parentRunId || null;
     this._baseGetTool = options.getTool;
     this._parentPermissionEngine = options.parentPermissionEngine || null;
     this._onState = typeof options.onState === 'function' ? options.onState : () => {};
@@ -69,6 +73,15 @@ class DynamicNativeAgentAdapter extends NativeAgentAdapter {
 
   async startTask(task, context = {}) {
     const hubRunId = context.runId;
+    const decisionId = this.modelSelection && this.modelSelection.decisionId;
+    if (decisionId && typeof this._bindRouteDecisionToRun === 'function') {
+      this._bindRouteDecisionToRun(decisionId, {
+        runId: hubRunId,
+        conversationId: context.conversationId || task.conversationId || null,
+        rootRunId: this.routeRootRunId || (this.parentRunId ? null : hubRunId),
+        parentRunId: this.parentRunId || context.parentRunId || task.parentRunId || null
+      });
+    }
     const permissionEngine = new DynamicPermissionEngine({
       policy: this.definition.permissionPolicy,
       parent: this._parentPermissionEngine || context.permissionEngine || null

@@ -143,6 +143,7 @@ const dynamicAgentFactory = createAgentFactory({
   getTool,
   emit,
   resolveRuntimeModel: runtimeModelResolver.resolveRuntimeModel,
+  bindRouteDecisionToRun: routeAudit.bindRunIdentity,
   resolveExplicitModel(modelPolicy) {
     const agent = {
       id: `dynamic-model-${modelPolicy.connectionId}`,
@@ -579,6 +580,7 @@ function register(window) {
   mainAgentIpc.register({
     store, emit, runManager, getTool, buildProvider, resolveModelFor,
     resolveRuntimeModel: runtimeModelResolver.resolveRuntimeModel,
+    bindRouteDecisionToRun: routeAudit.bindRunIdentity,
     activeRuns, requestPermission,
     getCurrentProject: () => currentProjectId ? store.projects.get(currentProjectId) : null,
     getAgentFull, PermissionEngine

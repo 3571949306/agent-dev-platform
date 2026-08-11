@@ -89,6 +89,10 @@ function toolResultToText(r) {
   if (!r) return '';
   const status = r.ok ? '✓' : '✕';
   const tool = r.tool || r.action && r.action.type || '?';
+  if (!r.ok && r.error) {
+    const code = r.error.code ? `[${r.error.code}] ` : '';
+    return `- ${status} ${tool}: ${code}${r.error.message || 'failed'}`;
+  }
   if (r.command) {
     const errs = r.errors && r.errors.length ? `\n  错误: ${r.errors.slice(0, 3).join(' | ')}` : '';
     return `- ${status} ${tool}: \`${r.command}\` exit=${r.exitCode}${errs}`;

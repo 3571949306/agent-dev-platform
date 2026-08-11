@@ -27,6 +27,7 @@ const { createBlackboard } = require('./blackboard');
 const { buildSystemPrompt } = require('./prompts/mainCodingAgent');
 const { runAgentLoop } = require('./agentLoop');
 const { changedFilesSummary } = require('./checkpoint');
+const { dispatchRuntimeHook } = require('../../hooks/runtimeDispatch');
 
 /**
  * 启动 Main Agent Run（异步，立即返回 runId，状态通过事件推送）。
@@ -61,7 +62,13 @@ function runMainAgent(opts) {
   if (!projectRoot) throw new Error('projectRoot 必填');
 
   // 1. 创建 Run（status=preparing，立即返回 runId）
-  const run = runManager.createRun({ conversationId, agentId });
+  const run = runManager.createRun({
+    conversationId,
+    agentId,
+    parentRunId: opts.parentRunId || null,
+    rootRunId: opts.rootRunId || null,
+    depth: opts.parentRunId ? 1 : 0
+  });
   const runId = run.id;
   if (typeof opts.onRunCreated === 'function') {
     try { opts.onRunCreated({ runId, conversationId: conversationId || null, agentId: agentId || null }); }
@@ -79,6 +86,9 @@ function runMainAgent(opts) {
   // 2. 构建 runCtx
   const ac = new AbortController();
   const ctx = {
+    runId,
+    rootRunId: opts.rootRunId || run.rootRunId || runId,
+    parentRunId: opts.parentRunId || run.parentRunId || null,
     projectRoot, projectId, agentId, agentName,
     conversationId, taskId: null,
     store, emit, abortSignal: ac.signal,
@@ -91,7 +101,11 @@ function runMainAgent(opts) {
     // v2.9.0 §9 — MainAgentOrchestrator（delegate → AgentHub → Child Run → Blackboard）
     orchestrator: null,   // 下方注入（如 AgentHub 可用）
     canDelegate: opts.canDelegate !== false,
-    delegationPath: Array.isArray(opts.delegationPath) ? opts.delegationPath.slice() : []
+    delegationPath: Array.isArray(opts.delegationPath) ? opts.delegationPath.slice() : [],
+    agentType: 'native',
+    skillIds: Array.isArray(opts.skillIds) ? opts.skillIds.slice() : [],
+    hookIds: [],
+    hookEngine: opts.hookEngine || null
   };
 
   // v2.9.3 Skill Engine（R7）— 在启动前解析 Skill（fail fast）。
@@ -147,6 +161,30 @@ function runMainAgent(opts) {
   const skillInstructions = skillResolution
     ? skillResolution.instructions
     : (passthroughSkillInstructions || null);
+
+  // Hook definitions belong to this existing Run. Resolve the requested set
+  // before any provider/tool/delegate call; missing definitions, disabled
+  // required hooks, and unregistered trusted handlers fail closed.
+  const requestedHookIds = Array.isArray(opts.hookIds) ? opts.hookIds : [];
+  if (requestedHookIds.length) {
+    const { getHookRuntime } = require('../../hooks/runtimeRegistry');
+    const hookEngine = opts.hookEngine || getHookRuntime();
+    if (!hookEngine || !hookEngine.resolver) {
+      const error = new Error('HOOK_ENGINE_UNAVAILABLE: Hook Engine is not initialized');
+      error.code = 'HOOK_ENGINE_UNAVAILABLE';
+      try { runManager.finishRun(runId, 'failed', { error: error.message, source: 'hookResolution' }); } catch { /* terminal gate */ }
+      throw error;
+    }
+    const selection = hookEngine.resolver.resolveSelection({ hookIds: requestedHookIds });
+    if (!selection.ok) {
+      const error = new Error(`${selection.errorCode}: ${selection.error}`);
+      error.code = selection.errorCode;
+      try { runManager.finishRun(runId, 'failed', { error: error.message, source: 'hookResolution' }); } catch { /* terminal gate */ }
+      throw error;
+    }
+    ctx.hookEngine = hookEngine;
+    ctx.hookIds = selection.hookIds;
+  }
 
   // v2.9.0 §9 — 创建 Orchestrator 并注册（打通 delegate → AgentHub 闭环）
   //   executeDelegate 优先用 ctx.orchestrator.delegate 走完整编排链。
@@ -207,6 +245,12 @@ function runMainAgent(opts) {
   (async () => {
     let result;
     try {
+      const runStart = await dispatchRuntimeHook(ctx, 'run_start');
+      if (!runStart.ok) {
+        const error = new Error(runStart.error || runStart.errorCode);
+        error.code = runStart.errorCode;
+        throw error;
+      }
       // 创建 task 记录（store.tasks）
       if (store && store.tasks) {
         try {
@@ -221,6 +265,7 @@ function runMainAgent(opts) {
         dynamicRole: opts.dynamicRole,
         dynamicRolePrompt: opts.dynamicSystemPrompt,
         skillInstructions,
+        hookContextSlot: true,
         blackboardSummary: '',
         planSummary: ''
       });
@@ -264,9 +309,15 @@ function runMainAgent(opts) {
       const isAbort = ctx.abortSignal.aborted || /\babort/i.test(e.message || '');
       const status = isAbort ? 'cancelled' : (/超时|timed?out/i.test(e.message || '') ? 'timeout' : 'failed');
       try { runManager.finishRun(runId, mapToRunManagerTerminal(status), { source: 'mainAgentCatch', error: e.message }); } catch { /* Late Result Guard */ }
-      emitTerminalEvent(emit, runId, { status, error: e.message });
-      result = { status, error: e.message };
+      emitTerminalEvent(emit, runId, { status, error: e.message, errorCode: e.code });
+      result = { status, error: e.message, errorCode: e.code };
     } finally {
+      try {
+        const finalRun = runManager.getRun(runId);
+        await dispatchRuntimeHook(ctx, 'run_end', {
+          outcome: { status: finalRun ? finalRun.status : (result && result.status), errorCode: result && result.errorCode }
+        });
+      } catch { /* run_end observers cannot alter terminal truth */ }
       if (timeoutTimer) clearTimeout(timeoutTimer);
       if (opts.unregisterAbort) opts.unregisterAbort(conversationId);
       // §78-85: Orchestrator 生命周期收口 — dispose（清 child/timer/listener）+ unregister（避免 registry 泄漏）

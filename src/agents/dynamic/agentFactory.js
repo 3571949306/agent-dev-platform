@@ -6,6 +6,7 @@ const { restrictivePolicy } = require('./agentTemplate');
 const { DynamicNativeAgentAdapter } = require('./dynamicNativeAgentAdapter');
 const { getSkillRuntime } = require('../../skills/runtimeRegistry');
 const { normalizePlatform } = require('../../skills/skillResolver');
+const { getHookRuntime } = require('../../hooks/runtimeRegistry');
 
 const TERMINAL = new Set(['COMPLETED', 'FAILED', 'CANCELLED', 'TIMEOUT']);
 
@@ -61,11 +62,11 @@ function createAgentFactory(options = {}) {
   function applySkills(definition, context) {
     const required = definition.skills.required || [];
     const optional = definition.skills.optional || [];
-    if (!required.length && !optional.length) return { definition, skillInstructions: null };
+    if (!required.length && !optional.length) return { definition, skillInstructions: null, skillIds: [] };
     const resolver = options.skillResolver || getSkillRuntime().resolver;
     if (!resolver) {
       if (required.length) throw skillError('SKILL_ENGINE_UNAVAILABLE', 'SkillResolver 未注入');
-      return { definition, skillInstructions: null };
+      return { definition, skillInstructions: null, skillIds: [] };
     }
     const agentContext = {
       toolPolicy: definition.toolPolicy,
@@ -98,7 +99,21 @@ function createAgentFactory(options = {}) {
     const merged = JSON.parse(JSON.stringify(definition));
     merged.toolPolicy.deny = [...new Set([...merged.toolPolicy.deny, ...result.deniedTools])];
     if (result.modelRequirements) merged.modelPolicy.requirements = result.modelRequirements;
-    return { definition: merged, skillInstructions: result.instructions };
+    return { definition: merged, skillInstructions: result.instructions, skillIds: result.skills.map(skill => skill.id) };
+  }
+
+  function applyHooks(definition) {
+    const required = definition.hooks.required || [];
+    const optional = definition.hooks.optional || [];
+    if (!required.length && !optional.length) return { hookIds: [], skipped: [] };
+    const engine = options.hookEngine || getHookRuntime();
+    if (!engine || !engine.resolver) {
+      if (required.length) throw skillError('HOOK_ENGINE_UNAVAILABLE', 'required Dynamic Agent hooks cannot be resolved');
+      return { hookIds: [], skipped: optional.map(hookId => ({ hookId, reason: 'HOOK_ENGINE_UNAVAILABLE' })) };
+    }
+    const result = engine.resolver.resolveSelection({ requiredHookIds: required, optionalHookIds: optional });
+    if (!result.ok) throw skillError(result.errorCode, result.error);
+    return { hookIds: result.hookIds, skipped: result.skipped || [] };
   }
 
   function resolveModel(definition, context) {
@@ -161,6 +176,7 @@ function createAgentFactory(options = {}) {
     definition = applyCeilings(definition, context);
     const skillResult = applySkills(definition, context);
     definition = skillResult.definition;
+    const hookResult = applyHooks(definition);
     const rootRunId = context.rootRunId || context.parentRunId || `standalone-${crypto.randomUUID()}`;
     if (activeForRoot(rootRunId) >= maxPerRoot) throw limitError();
 
@@ -184,6 +200,8 @@ function createAgentFactory(options = {}) {
       lifecycleHistory: ['CREATED'],
       adapter: null,
       modelSelection: modelResolution.selection || null,
+      hookIds: hookResult.hookIds,
+      hookSkips: hookResult.skipped,
       definition
     };
     const onState = (status, detail = {}) => {
@@ -207,6 +225,8 @@ function createAgentFactory(options = {}) {
       runMainAgentFn,
       emit: context.emit || options.emit,
       skillInstructions: skillResult.skillInstructions,
+      skillIds: skillResult.skillIds,
+      hookIds: hookResult.hookIds,
       onState
     });
     instances.set(instanceId, instance);

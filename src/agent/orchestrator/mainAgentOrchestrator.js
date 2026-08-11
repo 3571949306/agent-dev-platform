@@ -113,6 +113,7 @@ function createMainAgentOrchestrator(opts) {
           parentPermissionEngine,
           parentPolicy,
           getTool,
+          projectContext: { projectRoot, projectId },
           emit: externalEmit
         });
         dynamicAgentFactory.registerInstance(dynamicInstance.instanceId, hub);

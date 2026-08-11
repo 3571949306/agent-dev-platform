@@ -114,6 +114,35 @@ CREATE TABLE IF NOT EXISTS skill_definitions (
   updated_at TEXT
 );
 
+-- v2.9.4: persisted HookDefinition only. Trusted handler functions remain in-memory.
+CREATE TABLE IF NOT EXISTS hook_definitions (
+  id TEXT PRIMARY KEY,
+  definition_json TEXT NOT NULL,
+  enabled INTEGER DEFAULT 1,
+  created_at TEXT,
+  updated_at TEXT
+);
+
+-- Hook invocations belong to an existing Run; they never create a HookRun.
+CREATE TABLE IF NOT EXISTS hook_invocations (
+  invocation_id TEXT PRIMARY KEY,
+  hook_id TEXT NOT NULL,
+  event TEXT NOT NULL,
+  run_id TEXT,
+  root_run_id TEXT,
+  parent_run_id TEXT,
+  agent_id TEXT,
+  outcome TEXT,
+  error_code TEXT,
+  duration_ms INTEGER DEFAULT 0,
+  tool_name TEXT,
+  action_type TEXT,
+  annotations_json TEXT DEFAULT '{}',
+  created_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_hook_invocations_run ON hook_invocations(run_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_hook_invocations_hook ON hook_invocations(hook_id, created_at);
+
 CREATE TABLE IF NOT EXISTS agent_templates (
   id TEXT PRIMARY KEY,
   template_json TEXT NOT NULL,

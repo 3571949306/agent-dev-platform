@@ -897,6 +897,70 @@ const skillDefinitions = {
   }
 };
 
+// ---------- v2.9.4 hook definitions + invocation audit ----------
+// Only normalized HookDefinition JSON and handlerId persist. Trusted functions
+// are registered in-memory by HookHandlerRegistry and intentionally disappear
+// across process restarts.
+const hookDefinitions = {
+  create(input) {
+    const { normalizeHookDefinition } = require('../hooks/hookDefinition');
+    const definition = normalizeHookDefinition(input);
+    const t = now();
+    db().prepare('INSERT INTO hook_definitions (id,definition_json,enabled,created_at,updated_at) VALUES (?,?,1,?,?)')
+      .run(definition.id, j(definition), t, t);
+    return hookDefinitions.get(definition.id);
+  },
+  get(id) {
+    const row = db().prepare('SELECT * FROM hook_definitions WHERE id=?').get(id);
+    return row ? { ...p(row.definition_json, null), enabled: row.enabled === 1 } : null;
+  },
+  list() {
+    return db().prepare('SELECT * FROM hook_definitions ORDER BY id').all()
+      .map(row => ({ ...p(row.definition_json, null), enabled: row.enabled === 1 })).filter(Boolean);
+  },
+  update(id, input) {
+    if (!hookDefinitions.get(id)) return null;
+    const { normalizeHookDefinition } = require('../hooks/hookDefinition');
+    const definition = normalizeHookDefinition({ ...(input || {}), id });
+    db().prepare('UPDATE hook_definitions SET definition_json=?,updated_at=? WHERE id=?')
+      .run(j(definition), now(), id);
+    return hookDefinitions.get(id);
+  },
+  remove(id) { return db().prepare('DELETE FROM hook_definitions WHERE id=?').run(id).changes > 0; },
+  setEnabled(id, enabled) {
+    if (!hookDefinitions.get(id)) return null;
+    db().prepare('UPDATE hook_definitions SET enabled=?,updated_at=? WHERE id=?')
+      .run(enabled ? 1 : 0, now(), id);
+    return hookDefinitions.get(id);
+  }
+};
+
+const hookInvocations = {
+  create(input) {
+    const t = input.createdAt || now();
+    db().prepare(`INSERT INTO hook_invocations
+      (invocation_id,hook_id,event,run_id,root_run_id,parent_run_id,agent_id,outcome,error_code,duration_ms,tool_name,action_type,annotations_json,created_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+      .run(input.invocationId, input.hookId, input.event, input.runId || null,
+        input.rootRunId || input.runId || null, input.parentRunId || null, input.agentId || null,
+        input.outcome || 'unknown', input.errorCode || null, input.durationMs || 0,
+        input.toolName || null, input.actionType || null, j(input.annotations || {}), t);
+    return hookInvocations.get(input.invocationId);
+  },
+  get(invocationId) {
+    const row = db().prepare('SELECT * FROM hook_invocations WHERE invocation_id=?').get(invocationId);
+    return row ? { ...row, annotations: p(row.annotations_json, {}) } : null;
+  },
+  list(limit = 100) {
+    return db().prepare('SELECT * FROM hook_invocations ORDER BY created_at DESC LIMIT ?').all(limit)
+      .map(row => ({ ...row, annotations: p(row.annotations_json, {}) }));
+  },
+  listByRun(runId) {
+    return db().prepare('SELECT * FROM hook_invocations WHERE run_id=? ORDER BY created_at,invocation_id').all(runId)
+      .map(row => ({ ...row, annotations: p(row.annotations_json, {}) }));
+  }
+};
+
 // ---------- v1 JSON migration ----------
 function migrateFromJson(jsonPath) {
   if (!jsonPath || !require('fs').existsSync(jsonPath)) return false;
@@ -955,6 +1019,6 @@ module.exports = {
   conversations, messages, events, tasks, runs, agentMessages, tools, mcpServers,
   memories, checkpoints, fileChanges, usage, modelCalls, permissionGrants, audit, permissionDecisions, settings, agentPrefs, extAgentConfigs,
   externalAgentSessions, externalAgentAuthStates, agentDefinitions, agentTemplates, modelRouteDecisions,
-  skillDefinitions,
+  skillDefinitions, hookDefinitions, hookInvocations,
   migrateFromJson
 };

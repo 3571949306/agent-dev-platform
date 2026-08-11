@@ -92,6 +92,16 @@ export const api = {
   skillDisable: (id) => call('skill:disable', id),
   skillResolve: (skillIds, agentContext, projectContext) => call('skill:resolve', { skillIds, agentContext, projectContext }),
 
+  // v2.9.4 — HookDefinition management (trusted handlers are never exposed)
+  hookList: () => call('hook:list'),
+  hookGet: (id) => call('hook:get', id),
+  hookCreate: (definition) => call('hook:create', definition),
+  hookUpdate: (id, patch) => call('hook:update', id, patch),
+  hookDelete: (id) => call('hook:delete', id),
+  hookEnable: (id) => call('hook:enable', id),
+  hookDisable: (id) => call('hook:disable', id),
+  hookAudit: (limit) => call('hook:audit:list', limit),
+
   // agents
   agents: () => call('agents:list'),
   agentGet: (id) => call('agents:get', id),

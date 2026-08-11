@@ -1,5 +1,13 @@
 # Changelog
 
+## v2.9.4 — Hook Engine
+
+- Added a strict, versioned, JSON-only `HookDefinition` contract and persistent registry with deterministic priority/ID resolution, required/optional selection, filters, enable/disable controls, and restart-safe definitions.
+- Added trusted in-memory Hook handlers and a bounded dispatcher for guard, context, and observer Hooks; guards and context fail closed, observers cannot control runtime flow, and all payloads/results are cloned, frozen, sanitized, and audited on the existing Run identity.
+- Integrated before/after model, tool, and delegate events plus run start/end into the real Main and Dynamic runtime paths without bypassing PermissionEngine, PathSecurity, Model Router, or the Runtime Safety Contract.
+- Added Hook CRUD/audit IPC and public API support, Dynamic Agent required/optional Hook references, and bounded Hook context composition below platform safety instructions.
+- Added deterministic/adversarial Hook unit proofs and a production-component smoke covering context observation, zero-call guard blocks, observer continuity, capability ceilings, malicious context, persistence, and the absence of an independent HookRun.
+
 ## v2.9.3 — Skill Engine
 
 - Added a strict, versioned, serializable `SkillDefinition` contract (`schemaVersion 1`) with credential/runtime-object rejection (`SKILL_DEFINITION_INVALID`), deterministic tool-name alias expansion, and Skill-level instructions that can never override the Runtime Safety Contract.

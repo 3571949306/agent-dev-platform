@@ -66,9 +66,9 @@ function bindMainRouteDecision({ selection, bindRouteDecisionToRun, runId, conve
  * }
  */
 function register(deps) {
-  const { store, emit, runManager, getTool, buildProvider, resolveModelFor, resolveRuntimeModel, bindRouteDecisionToRun, activeRuns, requestPermission, getCurrentProject, getAgentFull, PermissionEngine, skillRegistry, skillResolver, availableToolNames } = deps;
+  const { store, emit, runManager, getTool, buildProvider, resolveModelFor, resolveRuntimeModel, bindRouteDecisionToRun, activeRuns, requestPermission, getCurrentProject, getAgentFull, PermissionEngine, skillRegistry, skillResolver, hookEngine, availableToolNames } = deps;
 
-  reg('mainAgent:run', async ({ conversationId, agentId, goal, verification, requiredFiles, initialPlan, timeoutMs, useInjectedModel, skillIds } = {}) => {
+  reg('mainAgent:run', async ({ conversationId, agentId, goal, verification, requiredFiles, initialPlan, timeoutMs, useInjectedModel, skillIds, hookIds } = {}) => {
     if (!goal) throw new Error('goal 必填（用户目标）');
     const agent = getAgentFull ? getAgentFull(agentId) : null;
     const project = getCurrentProject ? getCurrentProject() : null;
@@ -117,6 +117,8 @@ function register(deps) {
       // v2.9.3 Skill Engine（R7）
       skillIds: Array.isArray(skillIds) ? skillIds : undefined,
       skillRegistry, skillResolver,
+      hookIds: Array.isArray(hookIds) ? hookIds : undefined,
+      hookEngine,
       availableToolNames,
       onRunCreated: ({ runId: actualRunId }) => {
         bindMainRouteDecision({ selection: modelSelection, bindRouteDecisionToRun, runId: actualRunId, conversationId });

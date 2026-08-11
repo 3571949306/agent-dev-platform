@@ -52,6 +52,7 @@ const { createAgentFactory } = require('../agents/dynamic/agentFactory');
 const { setDynamicAgentRuntime } = require('../agents/dynamic/runtimeRegistry');
 // v2.9.3 — Skill Engine（R1-R7）
 const { createSkillRegistry, createSkillResolver, BUILTIN_SKILLS, setSkillRuntime } = require('../skills');
+const { createHookEngine, setHookRuntime } = require('../hooks');
 const { createProviderModelAdapter } = require('../agent/runtime/providerModelAdapter');
 const {
   createModelCatalog,
@@ -173,6 +174,14 @@ setDynamicAgentRuntime(dynamicAgentFactory, store.agentDefinitions);
 const skillRegistry = createSkillRegistry({ store: store.skillDefinitions, builtins: BUILTIN_SKILLS });
 const skillResolver = createSkillResolver({ registry: skillRegistry });
 setSkillRuntime(skillRegistry, skillResolver);
+
+// v2.9.4 Hook Engine production wiring. Only definitions and sanitized audit
+// records persist; trusted handlers live in hookEngine.handlerRegistry.
+const hookEngine = createHookEngine({
+  definitionStore: store.hookDefinitions,
+  auditStore: store.hookInvocations
+});
+setHookRuntime(hookEngine);
 
 // Register built-in adapters
 // v2.8.0 — 外部 Agent 会话落库后端（spec §110/§111）。DB 未就绪（隔离单测）时为 null → 纯内存。
@@ -603,6 +612,7 @@ function register(window) {
     getAgentFull, PermissionEngine,
     // v2.9.3 Skill Engine（R7）— Main Agent 支持 requestedSkillIds
     skillRegistry, skillResolver,
+    hookEngine,
     availableToolNames: platformToolNames()
   });
 
@@ -1294,6 +1304,33 @@ function register(window) {
   });
   ipcMain.handle('skill:resolveModelMerge', (e, { skillIds, agentModelRequirements } = {}) =>
     skillResolver.resolveModelMerge(skillIds || [], agentModelRequirements || {}));
+
+  // v2.9.4 Hook Engine management surface. Trusted handler registration is
+  // deliberately absent from IPC; only trusted main-process code can register
+  // executable handlers.
+  const hookPublic = record => record ? ({
+    schemaVersion: record.schemaVersion,
+    id: record.id,
+    name: record.name,
+    description: record.description || '',
+    event: record.event,
+    kind: record.kind,
+    handlerId: record.handlerId,
+    priority: record.priority,
+    filters: record.filters || {},
+    timeoutMs: record.timeoutMs,
+    config: record.config || {},
+    metadata: record.metadata || {},
+    enabled: record.enabled !== false
+  }) : null;
+  ipcMain.handle('hook:list', () => hookEngine.registry.list().map(hookPublic));
+  ipcMain.handle('hook:get', (e, id) => hookPublic(hookEngine.registry.get(id)));
+  ipcMain.handle('hook:create', (e, definition) => hookPublic(hookEngine.registry.create(definition)));
+  ipcMain.handle('hook:update', (e, id, patch) => hookPublic(hookEngine.registry.update(id, patch)));
+  ipcMain.handle('hook:delete', (e, id) => hookEngine.registry.remove(id));
+  ipcMain.handle('hook:enable', (e, id) => hookPublic(hookEngine.registry.enable(id)));
+  ipcMain.handle('hook:disable', (e, id) => hookPublic(hookEngine.registry.disable(id)));
+  ipcMain.handle('hook:audit:list', (e, limit) => hookEngine.audit.list(limit));
 
   // v2.7.1 — Project Mutation Lock IPC
   ipcMain.handle('lock:isBusy', (e, projectRoot) => projectLock.isBusy(projectRoot));

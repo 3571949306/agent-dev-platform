@@ -29,6 +29,8 @@ const { evaluate } = require('./completionPolicy');
 const { buildContext, compact, runSummary } = require('./contextBuilder');
 const { createCheckpoint, trackFileChange, listChangedFiles, changedFilesSummary } = require('./checkpoint');
 const { addFact, addProblem, resolveProblemsMatching, addImportantFile, update: bbUpdate } = require('./blackboard');
+const { composeSystemPromptWithHookContext } = require('./prompts/mainCodingAgent');
+const { dispatchRuntimeHook } = require('../../hooks/runtimeDispatch');
 
 /**
  * 运行 Main Agent Loop。
@@ -123,11 +125,27 @@ async function runAgentLoop(deps) {
       // 3. 调用模型决策
       let decision;
       try {
+        const beforeModel = await dispatchRuntimeHook(ctx, 'before_model', {
+          iteration: counters.iteration,
+          actionType: 'model_decision'
+        });
+        if (!beforeModel.ok) {
+          return finish('failed', {
+            errorCode: beforeModel.errorCode,
+            error: beforeModel.error,
+            summary: beforeModel.error
+          });
+        }
         decision = await model.decide({
-          system: systemPrompt,
+          system: composeSystemPromptWithHookContext(systemPrompt, beforeModel.context),
           context: contextText,
           iteration: counters.iteration,
           abortSignal: ctx.abortSignal
+        });
+        await dispatchRuntimeHook(ctx, 'after_model', {
+          iteration: counters.iteration,
+          actionType: decision && decision.action ? decision.action.type : 'model_response',
+          outcome: { hasAction: !!(decision && decision.action) }
         });
       } catch (e) {
         if (ctx.abortSignal && ctx.abortSignal.aborted) return finish('cancelled', { summary: '用户已停止' });

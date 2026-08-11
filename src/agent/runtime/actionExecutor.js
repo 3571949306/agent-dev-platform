@@ -13,6 +13,7 @@
 const { isDangerous } = require('../../tools/terminal');
 const { gitDestructive } = require('../../tools/git');
 const { getAgentHub } = require('../../agents/hub/agentHub');
+const { dispatchRuntimeHook } = require('../../hooks/runtimeDispatch');
 
 const MAX_OUTPUT = 20000;   // 单条 stdout/stderr 摘要上限
 const MAX_ERRORS = 20;      // errors 列表上限
@@ -116,6 +117,30 @@ async function executeAction(ctx, action, getTool) {
  * @returns {Promise<object>} Tool Result
  */
 async function executeDelegate(ctx, action, args) {
+  const before = await dispatchRuntimeHook(ctx, 'before_delegate', {
+    toolName: 'delegate',
+    actionType: 'delegate',
+    toolArgs: args || {}
+  });
+  if (!before.ok) {
+    return {
+      ok: false,
+      tool: 'delegate',
+      action,
+      error: { code: before.errorCode, message: before.error || before.errorCode, retryable: true },
+      hookId: before.hookId || null
+    };
+  }
+  const result = await executeDelegateCore(ctx, action, args);
+  await dispatchRuntimeHook(ctx, 'after_delegate', {
+    toolName: 'delegate',
+    actionType: 'delegate',
+    outcome: { ok: result.ok, status: result.data && result.data.status }
+  });
+  return result;
+}
+
+async function executeDelegateCore(ctx, action, args) {
   if (ctx && ctx.canDelegate === false) {
     return {
       ok: false,
@@ -233,6 +258,20 @@ async function executeReadFiles(ctx, args, getTool) {
 }
 
 async function runTool(ctx, toolName, args, getTool, action, meta = {}) {
+  const before = await dispatchRuntimeHook(ctx, 'before_tool', {
+    toolName,
+    actionType: action && action.type,
+    toolArgs: args || {}
+  });
+  if (!before.ok) {
+    return {
+      ok: false,
+      tool: toolName,
+      action,
+      error: { code: before.errorCode, message: before.error || before.errorCode, retryable: true },
+      hookId: before.hookId || null
+    };
+  }
   const tool = typeof getTool === 'function' ? getTool(toolName) : null;
   if (!tool) {
     return { ok: false, tool: toolName, error: { code: 'TOOL_NOT_FOUND', message: `工具 ${toolName} 不可用` } };
@@ -269,7 +308,13 @@ async function runTool(ctx, toolName, args, getTool, action, meta = {}) {
       error: { code: 'TOOL_ERROR', message: e.message, retryable: true }
     };
   }
-  return shapeResult(toolName, action, raw, meta);
+  const result = shapeResult(toolName, action, raw, meta);
+  await dispatchRuntimeHook(ctx, 'after_tool', {
+    toolName,
+    actionType: action && action.type,
+    outcome: { ok: result.ok, errorCode: result.error && result.error.code }
+  });
+  return result;
 }
 
 /**

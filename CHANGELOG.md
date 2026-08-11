@@ -8,6 +8,8 @@
 - Added a serial scheduler with approval suspension, bounded retry, non-retryable authority failures, cancellation propagation, pending-step cancellation, and late-result guards.
 - Reused the existing AgentHub/MainAgentRuntime, Dynamic AgentFactory, Tool Registry, PermissionEngine, PathSecurity, ProjectMutationLock, SkillResolver, HookEngine, Model Router, and ProviderModelAdapter; Workflow creates no provider, tool, permission, model, hook, or agent runtime of its own.
 - Added minimal Workflow IPC/API/GUI management plus deterministic/adversarial and production-component suites covering Main, Dynamic, Tool, Condition, Approval, permission/path/hook/skill failures, retry, cancellation, audit, and zero paid calls.
+- Closed approval waiter ownership on step timeout, workflow timeout, cancellation, and terminal transitions so late approve/reject calls fail without reviving execution; approval timeout is explicitly non-retryable.
+- Corrected Hook audit attribution for standalone Workflow Tool steps: Agent run identities remain null while durable workflow run/step identities are recorded, and Agent-owned tools retain their actual Agent Run ID.
 
 ## v2.9.4 — Hook Engine
 

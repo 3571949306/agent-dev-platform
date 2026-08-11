@@ -18,6 +18,7 @@ const {
   MAX_STEP_OUTPUT_BYTES,
   MAX_CONTEXT_BYTES
 } = require('../src/workflows');
+const { createHookEngine } = require('../src/hooks');
 
 const ref = pathValue => '$' + '{' + pathValue + '}';
 
@@ -206,6 +207,85 @@ test('R4/R7 WorkflowExecution, StepExecution, and sanitized audit persist indepe
   assert.doesNotMatch(json, /Bearer fixture-value|private source|sk-123456789/);
 });
 
+test('closure R2 standalone Workflow Tool hooks use Workflow identity and never borrow prior Agent run IDs', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'adp-workflow-hook-identity-'));
+  try {
+    store.init(root);
+    const hookEngine = createHookEngine({
+      definitionStore: store.hookDefinitions,
+      auditStore: store.hookInvocations
+    });
+    hookEngine.handlerRegistry.register('workflow-tool-observer', () => ({ decision: 'continue' }));
+    hookEngine.registry.create({
+      schemaVersion: 1,
+      id: 'workflow-tool-observer',
+      name: 'Workflow Tool Observer',
+      description: 'identity fixture',
+      event: 'before_tool',
+      kind: 'guard',
+      handlerId: 'workflow-tool-observer',
+      priority: 100,
+      filters: { agentTypes: [], agentIds: [], toolNames: ['fixture'], actionTypes: [], skillIds: [] },
+      timeoutMs: 1000,
+      config: {},
+      metadata: {}
+    });
+    let agentNumber = 0;
+    const engine = createWorkflowEngine({
+      hookEngine,
+      getTool: name => name === 'fixture' ? {
+        name: 'fixture',
+        async exec() { return { ok: true, data: { ok: true } }; }
+      } : null,
+      executors: {
+        agent: async () => ({ runId: 'actual-agent-' + (++agentNumber), output: { status: 'completed' } })
+      }
+    });
+    engine.registry.create(definition({
+      id: 'agent-agent-tool',
+      steps: [
+        { id: 'agent-a', type: 'agent', config: { goal: 'A', target: { mode: 'main' } } },
+        { id: 'agent-b', type: 'agent', dependsOn: ['agent-a'], config: { goal: 'B', target: { mode: 'main' } } },
+        {
+          id: 'tool-c',
+          type: 'tool',
+          dependsOn: ['agent-b'],
+          config: { toolName: 'fixture', args: {}, hookIds: ['workflow-tool-observer'] }
+        }
+      ],
+      outputs: {}
+    }));
+    const afterAgentsStart = await engine.runtime.run('agent-agent-tool');
+    const afterAgents = await engine.runtime.wait(afterAgentsStart.workflowRunId);
+    assert.strictEqual(afterAgents.status, 'COMPLETED');
+    const afterAgentsAudit = store.hookInvocations.list(20)
+      .find(row => row.workflow_run_id === afterAgentsStart.workflowRunId && row.workflow_step_id === 'tool-c');
+    assert.ok(afterAgentsAudit);
+    assert.strictEqual(afterAgentsAudit.run_id, null);
+    assert.notStrictEqual(afterAgentsAudit.run_id, 'actual-agent-1');
+    assert.notStrictEqual(afterAgentsAudit.run_id, 'actual-agent-2');
+
+    engine.registry.create(definition({
+      id: 'standalone-tool-first',
+      steps: [{
+        id: 'tool-first',
+        type: 'tool',
+        config: { toolName: 'fixture', args: {}, hookIds: ['workflow-tool-observer'] }
+      }],
+      outputs: {}
+    }));
+    const firstStart = await engine.runtime.run('standalone-tool-first');
+    assert.strictEqual((await engine.runtime.wait(firstStart.workflowRunId)).status, 'COMPLETED');
+    const firstAudit = store.hookInvocations.list(20)
+      .find(row => row.workflow_run_id === firstStart.workflowRunId && row.workflow_step_id === 'tool-first');
+    assert.ok(firstAudit);
+    assert.strictEqual(firstAudit.run_id, null);
+  } finally {
+    try { store.getDb().close(); } catch { /* best effort */ }
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('R3/R5 serial runtime executes agent, tool, condition, and approval without starting the next step early', async () => {
   const calls = [];
   const engine = createWorkflowEngine({
@@ -245,6 +325,90 @@ test('R3/R5 serial runtime executes agent, tool, condition, and approval without
   assert.strictEqual(completed.status, 'COMPLETED');
   assert.deepStrictEqual(completed.output, { approved: true, final: 9 });
   assert.deepStrictEqual(calls, ['agent', 'tool', 'condition', 'tool']);
+});
+
+test('closure R1 approval timeout clears ownership, never retries, and rejects late decisions', async () => {
+  let nextStarts = 0;
+  const engine = createWorkflowEngine({
+    executors: { tool: async () => { nextStarts++; return { output: {} }; } }
+  });
+  engine.registry.create(definition({
+    steps: [
+      {
+        id: 'approval',
+        type: 'approval',
+        config: { message: 'Approve before timeout?' },
+        timeoutMs: 20,
+        retry: { maxAttempts: 3 }
+      },
+      { id: 'never', type: 'tool', dependsOn: ['approval'], config: { toolName: 'fixture', args: {} } }
+    ],
+    outputs: {}
+  }));
+  const started = await engine.runtime.run('workflow-a');
+  await waitFor(engine.runtime, started.workflowRunId, 'WAITING_APPROVAL');
+  const control = engine.runtime.active.get(started.workflowRunId);
+  const failed = await engine.runtime.wait(started.workflowRunId);
+  assert.strictEqual(failed.status, 'FAILED');
+  assert.strictEqual(failed.errorCode, 'APPROVAL_TIMEOUT');
+  assert.strictEqual(failed.steps.find(step => step.stepId === 'approval').status, 'FAILED');
+  assert.strictEqual(failed.steps.find(step => step.stepId === 'approval').attempt, 1);
+  assert.strictEqual(control.approval, null);
+  assert.strictEqual(nextStarts, 0);
+  await assert.rejects(engine.runtime.approve(started.workflowRunId), error => error.code === 'WORKFLOW_NOT_WAITING_APPROVAL');
+  await assert.rejects(engine.runtime.reject(started.workflowRunId), error => error.code === 'WORKFLOW_NOT_WAITING_APPROVAL');
+  assert.strictEqual(engine.runtime.getRun(started.workflowRunId).status, 'FAILED');
+  assert.strictEqual(nextStarts, 0);
+});
+
+test('closure R1 cancellation while waiting clears approval and late approve/reject cannot revive terminal state', async () => {
+  let nextStarts = 0;
+  const engine = createWorkflowEngine({
+    executors: { tool: async () => { nextStarts++; return { output: {} }; } }
+  });
+  engine.registry.create(definition({
+    steps: [
+      { id: 'approval', type: 'approval', config: { message: 'Approve?' }, timeoutMs: 1000 },
+      { id: 'never', type: 'tool', dependsOn: ['approval'], config: { toolName: 'fixture', args: {} } }
+    ],
+    outputs: {}
+  }));
+  const started = await engine.runtime.run('workflow-a');
+  await waitFor(engine.runtime, started.workflowRunId, 'WAITING_APPROVAL');
+  const control = engine.runtime.active.get(started.workflowRunId);
+  await engine.runtime.cancel(started.workflowRunId);
+  await engine.runtime.wait(started.workflowRunId);
+  assert.strictEqual(control.approval, null);
+  assert.strictEqual(engine.runtime.getRun(started.workflowRunId).status, 'CANCELLED');
+  await assert.rejects(engine.runtime.approve(started.workflowRunId), error => error.code === 'WORKFLOW_NOT_WAITING_APPROVAL');
+  await assert.rejects(engine.runtime.reject(started.workflowRunId), error => error.code === 'WORKFLOW_NOT_WAITING_APPROVAL');
+  assert.strictEqual(engine.runtime.getRun(started.workflowRunId).status, 'CANCELLED');
+  assert.strictEqual(nextStarts, 0);
+});
+
+test('closure R1 global workflow timeout during approval clears the waiter and starts no later step', async () => {
+  let nextStarts = 0;
+  const engine = createWorkflowEngine({
+    executors: { tool: async () => { nextStarts++; return { output: {} }; } }
+  });
+  engine.registry.create(definition({
+    steps: [
+      { id: 'approval', type: 'approval', config: { message: 'Approve?' }, timeoutMs: 1000 },
+      { id: 'never', type: 'tool', dependsOn: ['approval'], config: { toolName: 'fixture', args: {} } }
+    ],
+    outputs: {},
+    limits: { maxSteps: 32, maxRuntimeMs: 20 }
+  }));
+  const started = await engine.runtime.run('workflow-a');
+  await waitFor(engine.runtime, started.workflowRunId, 'WAITING_APPROVAL');
+  const control = engine.runtime.active.get(started.workflowRunId);
+  const failed = await engine.runtime.wait(started.workflowRunId);
+  assert.strictEqual(failed.status, 'FAILED');
+  assert.strictEqual(failed.errorCode, 'WORKFLOW_TIMEOUT');
+  assert.strictEqual(control.approval, null);
+  assert.strictEqual(nextStarts, 0);
+  await assert.rejects(engine.runtime.approve(started.workflowRunId), error => error.code === 'WORKFLOW_NOT_WAITING_APPROVAL');
+  assert.strictEqual(engine.runtime.getRun(started.workflowRunId).status, 'FAILED');
 });
 
 test('R7 transient errors retry within maxAttempts while permission denial never retries', async () => {

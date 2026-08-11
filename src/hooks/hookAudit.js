@@ -35,6 +35,8 @@ function createHookAudit({ store } = {}) {
       runId: input.runId || null,
       rootRunId: input.rootRunId || input.runId || null,
       parentRunId: input.parentRunId || null,
+      workflowRunId: input.workflowRunId || null,
+      workflowStepId: input.workflowStepId || null,
       agentId: input.agentId || null,
       outcome: input.outcome || 'unknown',
       errorCode: input.errorCode || null,

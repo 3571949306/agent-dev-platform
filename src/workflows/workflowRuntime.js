@@ -18,7 +18,8 @@ const NO_RETRY = new Set([
   'HOOK_BLOCKED',
   'WORKFLOW_DEFINITION_INVALID',
   'WORKFLOW_REFERENCE_NOT_FOUND',
-  'USER_REJECTED'
+  'USER_REJECTED',
+  'APPROVAL_TIMEOUT'
 ]);
 const RETRYABLE = new Set(['TOOL_ERROR', 'MODEL_TIMEOUT', 'AGENT_TIMEOUT']);
 
@@ -100,6 +101,34 @@ function createWorkflowRuntime(options = {}) {
     try { if (typeof options.emit === 'function') options.emit(type, payload); } catch { /* audit UI cannot break runtime */ }
   }
 
+  function settleApproval(control, decision) {
+    const approval = control && control.approval;
+    if (!approval || approval.settled) return false;
+    approval.settled = true;
+    control.approval = null;
+    approval.resolve(decision);
+    return true;
+  }
+
+  function isCurrentApproval(control) {
+    const approval = control && control.approval;
+    const execution = control && executionStore.get(control.workflowRunId);
+    return !!(approval && !approval.settled && !control.cancelled && execution &&
+      execution.status === 'WAITING_APPROVAL' &&
+      execution.currentStepId === approval.stepId);
+  }
+
+  function setWorkflowRunning(control, patch = {}, expectedStatus = null) {
+    const current = executionStore.get(control.workflowRunId);
+    if (!current || WORKFLOW_TERMINAL.has(current.status)) return null;
+    if (expectedStatus && current.status !== expectedStatus) return null;
+    return executionStore.update(control.workflowRunId, {
+      ...patch,
+      status: 'RUNNING',
+      updatedAt: now()
+    });
+  }
+
   function audit(control, step, status, patch = {}) {
     if (!options.audit || typeof options.audit.record !== 'function') return;
     options.audit.record({
@@ -143,6 +172,12 @@ function createWorkflowRuntime(options = {}) {
   function terminalWorkflow(control, status, patch = {}) {
     const current = executionStore.get(control.workflowRunId);
     if (!current || WORKFLOW_TERMINAL.has(current.status)) return current;
+    settleApproval(control, {
+      approved: false,
+      cancelled: status === 'CANCELLED',
+      terminal: true,
+      errorCode: patch.errorCode || null
+    });
     const result = executionStore.update(control.workflowRunId, {
       ...patch,
       status,
@@ -234,11 +269,10 @@ function createWorkflowRuntime(options = {}) {
       for (const step of control.compiled.steps) {
         if (control.cancelled || WORKFLOW_TERMINAL.has(executionStore.get(control.workflowRunId).status)) break;
         transition(control, step, 'READY');
-        executionStore.update(control.workflowRunId, {
+        const running = setWorkflowRunning(control, {
           currentStepId: step.id,
-          status: 'RUNNING',
-          updatedAt: now()
         });
+        if (!running) break;
         const outcome = await runStepWithRetry(control, step);
         if (control.cancelled) break;
         if (!outcome.ok && step.onFailure === 'fail') {
@@ -353,6 +387,11 @@ function createWorkflowRuntime(options = {}) {
         promise,
         new Promise((_resolve, reject) => {
           timer = setTimeout(async () => {
+            if (step.type === 'approval') {
+              settleApproval(control, { approved: false, timedOut: true });
+              reject(workflowError('APPROVAL_TIMEOUT', 'approval step timeout'));
+              return;
+            }
             if (control.activeAgentRunId && options.agentHub) {
               try { await options.agentHub.cancel(control.activeAgentRunId); } catch { /* best effort */ }
             }
@@ -481,15 +520,6 @@ function createWorkflowRuntime(options = {}) {
     }
   }
 
-  function latestAgentRunId(control) {
-    let linked = control.runOptions.parentRunId || null;
-    for (const step of control.compiled.steps) {
-      const record = stepStore.get(control.workflowRunId, step.id);
-      if (record && (record.runId || record.childRunId)) linked = record.runId || record.childRunId;
-    }
-    return linked;
-  }
-
   async function executeToolStep(control, step) {
     const config = resolveTemplates(step.config, control.context);
     const { executeTool } = require('../agent/runtime/actionExecutor');
@@ -503,10 +533,9 @@ function createWorkflowRuntime(options = {}) {
       if (!selection.ok) throw workflowError(selection.errorCode, selection.error);
       hookIds = selection.hookIds;
     }
-    const runId = latestAgentRunId(control);
     const ctx = {
-      runId,
-      rootRunId: runId,
+      runId: null,
+      rootRunId: null,
       parentRunId: null,
       workflowRunId: control.workflowRunId,
       workflowStepId: step.id,
@@ -582,27 +611,37 @@ function createWorkflowRuntime(options = {}) {
       message: config.message
     });
     const decision = await new Promise(resolve => {
-      control.approval = { stepId: step.id, resolve };
+      control.approval = { stepId: step.id, settled: false, resolve };
     });
-    control.approval = null;
+    if (decision.timedOut) throw workflowError('APPROVAL_TIMEOUT', 'approval step timeout');
     if (decision.cancelled) throw workflowError('WORKFLOW_CANCELLED', 'workflow cancelled');
+    if (decision.terminal) throw workflowError('WORKFLOW_NOT_WAITING_APPROVAL', 'workflow is already terminal');
     if (!decision.approved) throw workflowError('USER_REJECTED', 'workflow approval rejected');
+    const execution = executionStore.get(control.workflowRunId);
+    if (control.cancelled || !execution || execution.status !== 'WAITING_APPROVAL' ||
+        execution.currentStepId !== step.id) {
+      throw workflowError('WORKFLOW_NOT_WAITING_APPROVAL', 'stale approval result discarded');
+    }
     transition(control, step, 'RUNNING');
-    executionStore.update(control.workflowRunId, { status: 'RUNNING', updatedAt: now() });
+    if (!setWorkflowRunning(control, {}, 'WAITING_APPROVAL')) {
+      throw workflowError('WORKFLOW_NOT_WAITING_APPROVAL', 'stale approval result discarded');
+    }
     return { output: { approved: true } };
   }
 
   async function approve(workflowRunId) {
     const control = active.get(workflowRunId);
-    if (!control || !control.approval) throw workflowError('WORKFLOW_NOT_WAITING_APPROVAL', workflowRunId);
-    control.approval.resolve({ approved: true });
+    if (!isCurrentApproval(control) || !settleApproval(control, { approved: true })) {
+      throw workflowError('WORKFLOW_NOT_WAITING_APPROVAL', workflowRunId);
+    }
     return getRun(workflowRunId);
   }
 
   async function reject(workflowRunId) {
     const control = active.get(workflowRunId);
-    if (!control || !control.approval) throw workflowError('WORKFLOW_NOT_WAITING_APPROVAL', workflowRunId);
-    control.approval.resolve({ approved: false });
+    if (!isCurrentApproval(control) || !settleApproval(control, { approved: false })) {
+      throw workflowError('WORKFLOW_NOT_WAITING_APPROVAL', workflowRunId);
+    }
     return getRun(workflowRunId);
   }
 
@@ -617,7 +656,7 @@ function createWorkflowRuntime(options = {}) {
       if (control.activeAgentRunId && options.agentHub) {
         try { await options.agentHub.cancel(control.activeAgentRunId); } catch { /* best effort */ }
       }
-      if (control.approval) control.approval.resolve({ approved: false, cancelled: true });
+      settleApproval(control, { approved: false, cancelled: true });
       markRemaining(control, 'CANCELLED');
       terminalWorkflow(control, override.status || 'CANCELLED', {
         errorCode: override.errorCode || null,

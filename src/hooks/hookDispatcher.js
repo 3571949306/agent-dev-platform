@@ -47,6 +47,8 @@ function makePayload(hook, event, context) {
     runId: context.runId || null,
     rootRunId: context.rootRunId || context.runId || null,
     parentRunId: context.parentRunId || null,
+    workflowRunId: context.workflowRunId || null,
+    workflowStepId: context.workflowStepId || null,
     agentId: context.agentId || null,
     agentType: context.agentType || null,
     toolName: context.toolName || null,
@@ -73,12 +75,14 @@ function createHookDispatcher({ resolver, handlerRegistry, audit } = {}) {
         invocationId: payload.invocationId,
         hookId: hook.id,
         event,
-        runId: context.runId,
-        rootRunId: context.rootRunId,
-        parentRunId: context.parentRunId,
-        agentId: context.agentId,
-        toolName: context.toolName,
-        actionType: context.actionType
+        runId: payload.runId,
+        rootRunId: payload.rootRunId,
+        parentRunId: payload.parentRunId,
+        workflowRunId: payload.workflowRunId,
+        workflowStepId: payload.workflowStepId,
+        agentId: payload.agentId,
+        toolName: payload.toolName,
+        actionType: payload.actionType
       };
       const handler = handlerRegistry.get(hook.handlerId);
       if (!handler) {

@@ -122,15 +122,30 @@ test('R8 production Workflow scenarios A-F traverse real runtimes with zero paid
     kind: 'guard',
     filters: { agentTypes: [], agentIds: [], toolNames: ['read_file'], actionTypes: [], skillIds: [] }
   }), () => ({ decision: 'block', reason: 'workflow tool blocked' }));
+  registerHook(hook({
+    id: 'workflow-agent-tool',
+    event: 'before_tool',
+    kind: 'guard',
+    filters: { agentTypes: ['native'], agentIds: [], toolNames: ['read_file'], actionTypes: [], skillIds: [] }
+  }), () => ({ decision: 'continue' }));
 
   let activeProvider;
   const providerCaptures = [];
   const providerCounter = { calls: 0 };
+  let agentToolProviderCalls = 0;
   activeProvider = {
     async streamResponse(input) {
       providerCounter.calls++;
       providerCaptures.push({ system: input.system, model: input.model });
-      const text = JSON.stringify({ action: { type: 'complete', args: { summary: 'workflow agent complete' } } });
+      const context = (input.messages || []).map(message => String(message.content || '')).join('\n');
+      let action = { type: 'complete', args: { summary: 'workflow agent complete' } };
+      if (context.includes('Exercise agent-owned tool hook')) {
+        agentToolProviderCalls++;
+        action = agentToolProviderCalls === 1
+          ? { type: 'read_file', args: { path: 'safe.txt' } }
+          : { type: 'complete', args: { summary: 'agent-owned tool hook complete' } };
+      }
+      const text = JSON.stringify({ action });
       input.onChunk(text);
       return { content: text };
     }
@@ -224,7 +239,8 @@ test('R8 production Workflow scenarios A-F traverse real runtimes with zero paid
     projectLock,
     contextFactory
   });
-  hub.register(new NativeAgentAdapter({ manifest: NATIVE_MAIN, runMainAgentFn: runMainAgent }));
+  const nativeAdapter = new NativeAgentAdapter({ manifest: NATIVE_MAIN, runMainAgentFn: runMainAgent });
+  hub.register(nativeAdapter);
   const factory = createAgentFactory({
     getTool: getBuiltin,
     resolveRuntimeModel: runtimeResolver.resolveRuntimeModel,
@@ -453,6 +469,37 @@ test('R8 production Workflow scenarios A-F traverse real runtimes with zero paid
     assert.strictEqual(toolBlock.status, 'FAILED');
     assert.strictEqual(toolBlock.errorCode, 'HOOK_BLOCKED');
     assert.strictEqual(readExec, readBeforeBlock);
+    const blockedHookAudit = store.hookInvocations.list(100)
+      .find(row => row.hook_id === 'workflow-block-tool' &&
+        row.workflow_run_id === toolBlockStart.workflowRunId && row.workflow_step_id === 'blocked-read');
+    assert.ok(blockedHookAudit);
+    assert.strictEqual(blockedHookAudit.run_id, null);
+    assert.strictEqual(blockedHookAudit.root_run_id, null);
+    assert.strictEqual(blockedHookAudit.parent_run_id, null);
+    assert.notStrictEqual(blockedHookAudit.run_id, toolBlock.steps.find(step => step.stepId === 'main').runId);
+
+    // A tool genuinely selected by an AgentLoop keeps the actual Agent Run identity.
+    workflowEngine.registry.create(workflow('agent-tool-hook-identity', [{
+      id: 'agent-owned-tool',
+      type: 'agent',
+      config: {
+        goal: 'Exercise agent-owned tool hook',
+        target: { mode: 'main' },
+        hookIds: ['workflow-agent-tool'],
+        readOnly: true
+      }
+    }]));
+    const agentToolStart = await workflowEngine.runtime.run('agent-tool-hook-identity', { projectRoot, projectId });
+    const agentToolRun = await workflowEngine.runtime.wait(agentToolStart.workflowRunId);
+    assert.strictEqual(agentToolRun.status, 'COMPLETED');
+    const agentToolStep = agentToolRun.steps.find(step => step.stepId === 'agent-owned-tool');
+    assert.ok(agentToolStep.runId && runManager.getRun(agentToolStep.runId));
+    const agentToolHookAudit = store.hookInvocations.list(100)
+      .find(row => row.hook_id === 'workflow-agent-tool' && row.event === 'before_tool');
+    assert.ok(agentToolHookAudit);
+    const actualInnerRunId = nativeAdapter._hubRuns.get(agentToolStep.runId) || agentToolStep.runId;
+    assert.ok(runManager.getRun(actualInnerRunId));
+    assert.strictEqual(agentToolHookAudit.run_id, actualInnerRunId);
 
     // Scenario D: approval suspends; following tool starts only after approval.
     workflowEngine.registry.create(workflow('scenario-d', [
@@ -467,6 +514,44 @@ test('R8 production Workflow scenarios A-F traverse real runtimes with zero paid
     const d = await workflowEngine.runtime.wait(dStart.workflowRunId);
     assert.strictEqual(d.status, 'COMPLETED');
     assert.strictEqual(readExec, readsWhileWaiting + 1);
+
+    // Approval timeout owns and clears its waiter; late decisions cannot revive the terminal Workflow.
+    workflowEngine.registry.create(workflow('approval-timeout', [
+      {
+        id: 'approval-timeout',
+        type: 'approval',
+        config: { message: 'This approval intentionally times out.' },
+        timeoutMs: 25,
+        retry: { maxAttempts: 3 }
+      },
+      {
+        id: 'never-after-timeout',
+        type: 'tool',
+        dependsOn: ['approval-timeout'],
+        config: { toolName: 'read_file', args: { path: 'safe.txt' } }
+      }
+    ]));
+    const timeoutReadsBefore = readExec;
+    const approvalTimeoutStart = await workflowEngine.runtime.run('approval-timeout', { projectRoot, projectId });
+    await waitStatus(workflowEngine.runtime, approvalTimeoutStart.workflowRunId, 'WAITING_APPROVAL');
+    const approvalTimeoutControl = workflowEngine.runtime.active.get(approvalTimeoutStart.workflowRunId);
+    const approvalTimedOut = await workflowEngine.runtime.wait(approvalTimeoutStart.workflowRunId);
+    assert.strictEqual(approvalTimedOut.status, 'FAILED');
+    assert.strictEqual(approvalTimedOut.errorCode, 'APPROVAL_TIMEOUT');
+    assert.strictEqual(approvalTimedOut.steps.find(step => step.stepId === 'approval-timeout').status, 'FAILED');
+    assert.strictEqual(approvalTimedOut.steps.find(step => step.stepId === 'approval-timeout').attempt, 1);
+    assert.strictEqual(approvalTimeoutControl.approval, null);
+    assert.strictEqual(readExec, timeoutReadsBefore);
+    await assert.rejects(
+      workflowEngine.runtime.approve(approvalTimeoutStart.workflowRunId),
+      error => error.code === 'WORKFLOW_NOT_WAITING_APPROVAL'
+    );
+    await assert.rejects(
+      workflowEngine.runtime.reject(approvalTimeoutStart.workflowRunId),
+      error => error.code === 'WORKFLOW_NOT_WAITING_APPROVAL'
+    );
+    assert.strictEqual(workflowEngine.runtime.getRun(approvalTimeoutStart.workflowRunId).status, 'FAILED');
+    assert.strictEqual(readExec, timeoutReadsBefore);
 
     // Scenario E: cancel reaches the active AgentHub adapter; pending stays at zero,
     // and a late completion cannot overwrite the workflow terminal.
@@ -511,6 +596,8 @@ test('R8 production Workflow scenarios A-F traverse real runtimes with zero paid
     assert.strictEqual(runManager.list().some(run => run.agentId === 'workflow'), false);
     const hookRows = store.hookInvocations.list(100);
     assert.ok(hookRows.filter(row => row.hook_id === 'workflow-block-tool')
+      .every(row => row.run_id === null && row.workflow_run_id && row.workflow_step_id === 'blocked-read'));
+    assert.ok(hookRows.filter(row => row.hook_id === 'workflow-agent-tool')
       .every(row => row.run_id && runManager.getRun(row.run_id)));
     assert.strictEqual(factory.listInstances().length, 0);
     console.log(

@@ -16,6 +16,8 @@ async function dispatchRuntimeHook(ctx, event, extra = {}) {
       runId: ctx.runId || null,
       rootRunId: ctx.rootRunId || ctx.runId || null,
       parentRunId: ctx.parentRunId || null,
+      workflowRunId: ctx.workflowRunId || null,
+      workflowStepId: ctx.workflowStepId || null,
       agentId: ctx.agentId || null,
       agentType: ctx.agentType || 'native',
       skillIds: ctx.skillIds || [],

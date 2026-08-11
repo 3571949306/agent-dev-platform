@@ -939,10 +939,11 @@ const hookInvocations = {
   create(input) {
     const t = input.createdAt || now();
     db().prepare(`INSERT INTO hook_invocations
-      (invocation_id,hook_id,event,run_id,root_run_id,parent_run_id,agent_id,outcome,error_code,duration_ms,tool_name,action_type,annotations_json,created_at)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+      (invocation_id,hook_id,event,run_id,root_run_id,parent_run_id,workflow_run_id,workflow_step_id,agent_id,outcome,error_code,duration_ms,tool_name,action_type,annotations_json,created_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
       .run(input.invocationId, input.hookId, input.event, input.runId || null,
-        input.rootRunId || input.runId || null, input.parentRunId || null, input.agentId || null,
+        input.rootRunId || input.runId || null, input.parentRunId || null,
+        input.workflowRunId || null, input.workflowStepId || null, input.agentId || null,
         input.outcome || 'unknown', input.errorCode || null, input.durationMs || 0,
         input.toolName || null, input.actionType || null, j(input.annotations || {}), t);
     return hookInvocations.get(input.invocationId);

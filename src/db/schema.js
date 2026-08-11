@@ -131,6 +131,8 @@ CREATE TABLE IF NOT EXISTS hook_invocations (
   run_id TEXT,
   root_run_id TEXT,
   parent_run_id TEXT,
+  workflow_run_id TEXT,
+  workflow_step_id TEXT,
   agent_id TEXT,
   outcome TEXT,
   error_code TEXT,
@@ -547,7 +549,10 @@ const COLUMN_MIGRATIONS = [
   // v2.9.2 closure: route decisions are created pre-run, then bound to real runtime identity.
   ['model_route_decisions', 'conversation_id', 'TEXT'],
   ['model_route_decisions', 'root_run_id', 'TEXT'],
-  ['model_route_decisions', 'parent_run_id', 'TEXT']
+  ['model_route_decisions', 'parent_run_id', 'TEXT'],
+  // v2.9.5 closure: standalone Workflow Tool hooks retain Workflow identity without impersonating an Agent Run.
+  ['hook_invocations', 'workflow_run_id', 'TEXT'],
+  ['hook_invocations', 'workflow_step_id', 'TEXT']
 ];
 
 function ensureColumns(db) {

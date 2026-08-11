@@ -5,6 +5,7 @@ const assert = require('node:assert');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const Database = require('better-sqlite3');
 
 const store = require('../src/db/store');
 const {
@@ -109,6 +110,51 @@ test('R2 HookRegistry CRUD persists definitions while trusted functions never pe
     assert.strictEqual(restartedRegistry.get('hook-a').priority, 7);
     assert.strictEqual(restartedHandlers.get('trusted-a'), null, 'runtime handler must not persist');
     assert.strictEqual(restartedRegistry.remove('hook-a'), true);
+  } finally {
+    try { store.getDb().close(); } catch { /* best effort */ }
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('closure R2 hook audit migration adds durable Workflow identity columns on restart', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'adp-hook-workflow-migration-'));
+  const dbPath = path.join(root, 'agent.db');
+  try {
+    const legacy = new Database(dbPath);
+    legacy.exec(`CREATE TABLE hook_invocations (
+      invocation_id TEXT PRIMARY KEY,
+      hook_id TEXT NOT NULL,
+      event TEXT NOT NULL,
+      run_id TEXT,
+      root_run_id TEXT,
+      parent_run_id TEXT,
+      agent_id TEXT,
+      outcome TEXT,
+      error_code TEXT,
+      duration_ms INTEGER DEFAULT 0,
+      tool_name TEXT,
+      action_type TEXT,
+      annotations_json TEXT DEFAULT '{}',
+      created_at TEXT
+    )`);
+    legacy.close();
+
+    store.init(root);
+    const columns = store.getDb().prepare('PRAGMA table_info(hook_invocations)').all().map(column => column.name);
+    assert.ok(columns.includes('workflow_run_id'));
+    assert.ok(columns.includes('workflow_step_id'));
+    const row = store.hookInvocations.create({
+      invocationId: 'workflow-hook-migration-proof',
+      hookId: 'hook-a',
+      event: 'before_tool',
+      runId: null,
+      workflowRunId: 'workflow-run-a',
+      workflowStepId: 'tool-a',
+      outcome: 'continued'
+    });
+    assert.strictEqual(row.run_id, null);
+    assert.strictEqual(row.workflow_run_id, 'workflow-run-a');
+    assert.strictEqual(row.workflow_step_id, 'tool-a');
   } finally {
     try { store.getDb().close(); } catch { /* best effort */ }
     fs.rmSync(root, { recursive: true, force: true });

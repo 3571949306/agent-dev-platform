@@ -102,6 +102,21 @@ export const api = {
   hookDisable: (id) => call('hook:disable', id),
   hookAudit: (limit) => call('hook:audit:list', limit),
 
+  // v2.9.5 Workflow Engine
+  workflowList: () => call('workflow:list'),
+  workflowGet: (id) => call('workflow:get', id),
+  workflowCreate: (definition) => call('workflow:create', definition),
+  workflowUpdate: (id, patch) => call('workflow:update', id, patch),
+  workflowDelete: (id) => call('workflow:delete', id),
+  workflowEnable: (id) => call('workflow:enable', id),
+  workflowDisable: (id) => call('workflow:disable', id),
+  workflowRun: (id, input, runtime) => call('workflow:run', id, input, runtime),
+  workflowGetRun: (workflowRunId) => call('workflow:getRun', workflowRunId),
+  workflowListRuns: (limit) => call('workflow:listRuns', limit),
+  workflowCancel: (workflowRunId) => call('workflow:cancel', workflowRunId),
+  workflowApprove: (workflowRunId) => call('workflow:approve', workflowRunId),
+  workflowReject: (workflowRunId) => call('workflow:reject', workflowRunId),
+
   // agents
   agents: () => call('agents:list'),
   agentGet: (id) => call('agents:get', id),

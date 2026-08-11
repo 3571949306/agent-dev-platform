@@ -412,7 +412,17 @@ function extractErrors(stdout, stderr) {
   return errors;
 }
 
+// Workflow Engine entry for an already-resolved tool name. This deliberately
+// reuses the same Hook, Tool Registry, PermissionEngine, PathSecurity, and tool
+// execution gate as Main Agent actions; it is not a second tool runtime.
+async function executeTool(ctx, toolName, args, getTool) {
+  if (typeof toolName !== 'string' || !toolName) {
+    return { ok: false, tool: toolName, error: { code: 'TOOL_NOT_FOUND', message: 'toolName is required' } };
+  }
+  return runTool(ctx, toolName, args || {}, getTool, { type: toolName, args: args || {} });
+}
+
 module.exports = {
-  executeAction, isTestAction, isMutatingAction, isTestCommand,
+  executeAction, executeTool, isTestAction, isMutatingAction, isTestCommand,
   ACTION_TO_TOOL, MAX_OUTPUT
 };

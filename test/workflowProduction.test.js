@@ -1,0 +1,530 @@
+'use strict';
+
+const { test } = require('node:test');
+const assert = require('node:assert');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+
+const store = require('../src/db/store');
+const { RunManager } = require('../src/agent/runManager');
+const { runMainAgent } = require('../src/agent/runtime/mainAgentRuntime');
+const { createProviderModelAdapter } = require('../src/agent/runtime/providerModelAdapter');
+const { NativeAgentAdapter } = require('../src/agents/adapters/nativeAgentAdapter');
+const { createAgentFactory } = require('../src/agents/dynamic/agentFactory');
+const { createExecutionContextFactory } = require('../src/agent/orchestrator/executionContextFactory');
+const { createAgentRegistry } = require('../src/agents/hub/agentRegistry');
+const { createAgentRouter } = require('../src/agents/hub/agentRouter');
+const { createHealthManager } = require('../src/agents/hub/healthManager');
+const { createLifecycleManager } = require('../src/agents/hub/lifecycleManager');
+const { createRunBridge } = require('../src/agents/hub/runBridge');
+const { createAgentHub, setAgentHub, getAgentHub } = require('../src/agents/hub/agentHub');
+const { NATIVE_MAIN } = require('../src/agents/manifests/builtinAgents');
+const { setDynamicAgentRuntime, getDynamicAgentRuntime } = require('../src/agents/dynamic/runtimeRegistry');
+const { getBuiltin } = require('../src/tools/registry');
+const { PermissionEngine } = require('../src/security/permissions');
+const { createPathSecurity } = require('../src/security/pathSecurity');
+const { createProjectMutationLock } = require('../src/security/projectMutationLock');
+const { createModelCatalog, createModelRouter, createRuntimeModelResolver, createRouteAudit } = require('../src/models/router');
+const { createSkillRegistry, createSkillResolver, BUILTIN_SKILLS, setSkillRuntime, getSkillRuntime } = require('../src/skills');
+const { createHookEngine, setHookRuntime, getHookRuntime } = require('../src/hooks');
+const { createWorkflowEngine } = require('../src/workflows');
+
+const HOOK_MARKER = 'WORKFLOW_HOOK_MARKER_8427';
+const cap = value => ({ value, state: 'tested', source: 'workflow-production-fixture' });
+const metric = value => ({ value, state: 'declared', source: 'workflow-production-fixture' });
+
+function hook(overrides) {
+  return {
+    schemaVersion: 1,
+    id: overrides.id,
+    name: overrides.id,
+    description: 'workflow production fixture',
+    event: overrides.event,
+    kind: overrides.kind,
+    handlerId: overrides.id,
+    priority: 100,
+    filters: overrides.filters || { agentTypes: [], agentIds: [], toolNames: [], actionTypes: [], skillIds: [] },
+    timeoutMs: 1000,
+    config: overrides.config || {},
+    metadata: {}
+  };
+}
+
+function workflow(id, steps, outputs = {}) {
+  return {
+    schemaVersion: 1,
+    id,
+    name: id,
+    description: 'workflow production fixture',
+    inputs: {},
+    steps,
+    outputs,
+    limits: { maxSteps: 32, maxRuntimeMs: 10000 },
+    metadata: {}
+  };
+}
+
+async function waitStatus(runtime, workflowRunId, status) {
+  for (let i = 0; i < 500; i++) {
+    const run = runtime.getRun(workflowRunId);
+    if (run && run.status === status) return run;
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+  return runtime.getRun(workflowRunId);
+}
+
+test('R8 production Workflow scenarios A-F traverse real runtimes with zero paid calls', async () => {
+  const previousHub = getAgentHub();
+  const previousDynamic = getDynamicAgentRuntime();
+  const previousHook = getHookRuntime();
+  const previousSkill = getSkillRuntime();
+  const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'adp-workflow-production-db-'));
+  const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'adp-workflow-production-fixture-'));
+  const projectRoot = path.join(fixtureRoot, 'project');
+  fs.mkdirSync(projectRoot, { recursive: true });
+  fs.writeFileSync(path.join(projectRoot, 'safe.txt'), 'WORKFLOW_SAFE_CONTENT', 'utf8');
+  fs.writeFileSync(path.join(fixtureRoot, 'outside.txt'), 'WORKFLOW_OUTSIDE_SENTINEL', 'utf8');
+  store.init(dataRoot);
+
+  const skillRegistry = createSkillRegistry({ store: store.skillDefinitions, builtins: BUILTIN_SKILLS });
+  const skillResolver = createSkillResolver({ registry: skillRegistry });
+  setSkillRuntime(skillRegistry, skillResolver);
+  skillRegistry.create({
+    id: 'workflow-unavailable-tool',
+    name: 'Unavailable Tool Requirement',
+    description: 'production fail-closed fixture',
+    instructions: 'Require a tool that the Dynamic Agent runtime does not expose.',
+    tags: ['fixture'],
+    toolRequirements: { required: ['terminal_run'], optional: [], denied: [] },
+    permissionRequirements: { required: ['terminal.write'] },
+    modelRequirements: {},
+    compatibility: { agentTypes: ['native'], platforms: ['windows'], projectSignals: [] },
+    metadata: {}
+  });
+
+  const hookEngine = createHookEngine({
+    definitionStore: store.hookDefinitions,
+    auditStore: store.hookInvocations
+  });
+  setHookRuntime(hookEngine);
+  const registerHook = (definition, handler) => {
+    hookEngine.handlerRegistry.register(definition.handlerId, handler);
+    hookEngine.registry.create(definition);
+  };
+  registerHook(hook({ id: 'workflow-context', event: 'before_model', kind: 'context', config: { marker: HOOK_MARKER } }),
+    payload => ({ context: payload.config.marker }));
+  registerHook(hook({ id: 'workflow-block-model', event: 'before_model', kind: 'guard' }),
+    () => ({ decision: 'block', reason: 'workflow model blocked' }));
+  registerHook(hook({
+    id: 'workflow-block-tool',
+    event: 'before_tool',
+    kind: 'guard',
+    filters: { agentTypes: [], agentIds: [], toolNames: ['read_file'], actionTypes: [], skillIds: [] }
+  }), () => ({ decision: 'block', reason: 'workflow tool blocked' }));
+
+  let activeProvider;
+  const providerCaptures = [];
+  const providerCounter = { calls: 0 };
+  activeProvider = {
+    async streamResponse(input) {
+      providerCounter.calls++;
+      providerCaptures.push({ system: input.system, model: input.model });
+      const text = JSON.stringify({ action: { type: 'complete', args: { summary: 'workflow agent complete' } } });
+      input.onChunk(text);
+      return { content: text };
+    }
+  };
+
+  const connection = store.connections.create({
+    name: 'Workflow Fake Network',
+    provider: 'custom',
+    base_url: 'https://workflow.invalid/v1',
+    api_key: 'fixture-placeholder-key',
+    models: ['workflow-model'],
+    enabled: true
+  });
+  store.models.upsert(connection.id, 'workflow-model', {
+    text: cap(true),
+    vision: cap(false),
+    contextWindow: metric(32000),
+    pricing: {
+      input: metric(0),
+      output: metric(0),
+      currency: 'USD',
+      unit: 'per_1m_tokens'
+    },
+    latencyMs: 1
+  });
+  const routeAudit = createRouteAudit(store.modelRouteDecisions);
+  const modelRouter = createModelRouter({ catalog: createModelCatalog({ store }), audit: routeAudit });
+  const selectedModels = [];
+  const runtimeResolver = createRuntimeModelResolver({
+    router: modelRouter,
+    audit: routeAudit,
+    createModelAdapter(selection) {
+      selectedModels.push(selection.selected.modelId);
+      return createProviderModelAdapter({
+        buildProvider: async () => activeProvider,
+        agent: {
+          id: 'workflow-production-agent',
+          api_connection_id: selection.selected.connectionId,
+          model: selection.selected.modelId,
+          max_tokens: 256
+        },
+        resolveModel: configured => ({
+          model: configured.model,
+          connectionId: configured.api_connection_id
+        })
+      });
+    }
+  });
+
+  const projectId = 'workflow-production-project';
+  const permissions = new PermissionEngine({ projectId });
+  permissions.grant('filesystem.read', 'always', { persist: false });
+  permissions.grant('filesystem.write', 'deny', { persist: false });
+  const pathSecurity = createPathSecurity({ cacheRoots: true });
+  const projectLock = createProjectMutationLock();
+  const runManager = new RunManager({ store });
+  const agentRegistry = createAgentRegistry();
+  const lifecycle = createLifecycleManager();
+  const nativeResolver = {
+    resolveNativeModelContext(agent) {
+      const resolved = runtimeResolver.resolveRuntimeModel({
+        mode: 'auto',
+        requirements: { required: { text: true } },
+        context: { agentId: agent.id }
+      });
+      return {
+        providerModelAdapter: resolved.modelAdapter,
+        modelInfo: {
+          model: resolved.selection.selected.modelId,
+          connectionId: resolved.selection.selected.connectionId
+        },
+        connection: { id: resolved.selection.selected.connectionId }
+      };
+    }
+  };
+  const contextFactory = createExecutionContextFactory({
+    runManager,
+    getTool: getBuiltin,
+    store,
+    permissionEngine: permissions,
+    pathSecurity,
+    projectMutationLock: projectLock,
+    nativeModelContextResolver: nativeResolver
+  });
+  const hub = createAgentHub({
+    registry: agentRegistry,
+    router: createAgentRouter({ registry: agentRegistry }),
+    healthManager: createHealthManager({ registry: agentRegistry }),
+    lifecycleManager: lifecycle,
+    runBridge: createRunBridge({ runManager, lifecycleManager: lifecycle }),
+    projectLock,
+    contextFactory
+  });
+  hub.register(new NativeAgentAdapter({ manifest: NATIVE_MAIN, runMainAgentFn: runMainAgent }));
+  const factory = createAgentFactory({
+    getTool: getBuiltin,
+    resolveRuntimeModel: runtimeResolver.resolveRuntimeModel,
+    bindRouteDecisionToRun: routeAudit.bindRunIdentity,
+    availableToolNames: () => ['read_file', 'search', 'git_diff', 'write_file'],
+    hookEngine,
+    skillResolver
+  });
+  setAgentHub(hub);
+  setDynamicAgentRuntime(factory, store.agentDefinitions);
+
+  const dynamicDefinition = store.agentDefinitions.create({
+    id: 'workflow-reviewer',
+    name: 'Workflow Reviewer',
+    role: 'reviewer',
+    systemPrompt: 'Review the supplied workflow context.',
+    runtime: { kind: 'native' },
+    capabilities: ['review'],
+    toolPolicy: { allow: ['read_file', 'search', 'git_diff'], deny: [] },
+    permissionPolicy: { readOnly: true, allow: ['filesystem.read'], deny: [] },
+    modelPolicy: { mode: 'auto', requirements: { required: { text: true } } },
+    skills: { required: [], optional: [] },
+    hooks: { required: [], optional: [] },
+    lifetime: 'run',
+    budgets: { maxIterations: 3, maxToolCalls: 2, maxRuntimeMs: 3000 },
+    canDelegate: false
+  });
+
+  let readExec = 0;
+  let writeExec = 0;
+  let flakyAttempts = 0;
+  const workflowGetTool = name => {
+    if (name === 'read_file') {
+      const base = getBuiltin(name);
+      return { ...base, exec: async (...args) => { readExec++; return base.exec(...args); } };
+    }
+    if (name === 'write_file') {
+      const base = getBuiltin(name);
+      return { ...base, exec: async (...args) => { writeExec++; return base.exec(...args); } };
+    }
+    if (name === 'workflow_flaky') {
+      return {
+        name,
+        permission: 'filesystem.read',
+        async exec() {
+          flakyAttempts++;
+          if (flakyAttempts === 1) throw new Error('transient fixture error');
+          return { ok: true, data: { attempts: flakyAttempts } };
+        }
+      };
+    }
+    return getBuiltin(name);
+  };
+  const workflowEngine = createWorkflowEngine({
+    definitionStore: store.workflowDefinitions,
+    executionStore: store.workflowExecutions,
+    stepStore: store.workflowStepExecutions,
+    auditStore: store.workflowAudit,
+    agentHub: hub,
+    dynamicAgentFactory: factory,
+    agentDefinitionStore: store.agentDefinitions,
+    getTool: workflowGetTool,
+    hookEngine,
+    pathSecurity,
+    projectLock,
+    store,
+    createPermissionEngine: () => permissions
+  });
+
+  class LongAgent {
+    constructor() {
+      this.id = 'workflow-long-agent';
+      this.available = true;
+      this.disabled = false;
+      this.adapterType = 'fixture';
+      this.transport = 'fixture';
+      this.capabilities = ['review'];
+      this.manifest = {
+        id: this.id,
+        displayName: 'Long Agent',
+        transport: 'fixture',
+        capabilities: { review: true },
+        availability: true,
+        maxConcurrency: 1
+      };
+      this.contexts = new Map();
+      this.cancelCount = 0;
+    }
+    async detect() { return { available: true }; }
+    async healthCheck() { return { status: 'healthy', latencyMs: 0 }; }
+    async startTask(_task, context) {
+      this.contexts.set(context.runId, context);
+      return { runId: context.runId };
+    }
+    async cancel() { this.cancelCount++; return { ok: true }; }
+  }
+  const longAgent = new LongAgent();
+  hub.register(longAgent);
+
+  try {
+    // Scenario A: Main -> real Tool -> Dynamic reviewer + Skill + Hook -> condition.
+    workflowEngine.registry.create(workflow('scenario-a', [
+      {
+        id: 'main',
+        type: 'agent',
+        config: { goal: 'Inspect project', target: { mode: 'main' }, readOnly: true }
+      },
+      {
+        id: 'read',
+        type: 'tool',
+        dependsOn: ['main'],
+        config: { toolName: 'read_file', args: { path: 'safe.txt' } }
+      },
+      {
+        id: 'review',
+        type: 'agent',
+        dependsOn: ['read'],
+        config: {
+          goal: 'Review the inspected file',
+          target: { mode: 'dynamic', agentDefinitionId: dynamicDefinition.id },
+          skillIds: ['readonly-code-review'],
+          hookIds: ['workflow-context'],
+          readOnly: true
+        }
+      },
+      {
+        id: 'condition',
+        type: 'condition',
+        dependsOn: ['review'],
+        config: { source: 'steps.review.status', operator: 'eq', value: 'completed' }
+      }
+    ], { reviewed: '$' + '{steps.condition.output.result}' }));
+    const aStart = await workflowEngine.runtime.run('scenario-a', { projectRoot, projectId });
+    const a = await workflowEngine.runtime.wait(aStart.workflowRunId);
+    assert.strictEqual(a.status, 'COMPLETED');
+    assert.strictEqual(readExec, 1);
+    const mainStep = a.steps.find(step => step.stepId === 'main');
+    const reviewStep = a.steps.find(step => step.stepId === 'review');
+    assert.ok(mainStep.runId && runManager.getRun(mainStep.runId));
+    assert.ok(reviewStep.childRunId && runManager.getRun(reviewStep.childRunId));
+    assert.notStrictEqual(mainStep.runId, 'main');
+    assert.notStrictEqual(reviewStep.childRunId, 'review');
+    assert.ok(providerCaptures.some(capture => capture.system.includes('Act as a strict read-only code reviewer.')));
+    assert.ok(providerCaptures.some(capture => capture.system.includes(HOOK_MARKER)));
+    assert.ok(selectedModels.every(model => model === 'workflow-model'));
+    assert.ok(providerCaptures.every(capture => capture.model === 'workflow-model'));
+    assert.strictEqual(a.output.reviewed, true);
+
+    // A Workflow declaration cannot make an unavailable Skill capability appear.
+    const beforeUnavailableSkill = providerCounter.calls;
+    workflowEngine.registry.create(workflow('unavailable-skill', [{
+      id: 'review',
+      type: 'agent',
+      config: {
+        goal: 'Must fail before starting',
+        target: { mode: 'dynamic', agentDefinitionId: dynamicDefinition.id },
+        skillIds: ['workflow-unavailable-tool'],
+        readOnly: true
+      }
+    }]));
+    const unavailableStart = await workflowEngine.runtime.run('unavailable-skill', { projectRoot, projectId });
+    const unavailable = await workflowEngine.runtime.wait(unavailableStart.workflowRunId);
+    assert.strictEqual(unavailable.status, 'FAILED');
+    assert.strictEqual(providerCounter.calls, beforeUnavailableSkill);
+    assert.match(unavailable.errorCode, /^SKILL_/);
+
+    // Scenario B: denied write fails before the tool implementation and is not retried.
+    workflowEngine.registry.create(workflow('scenario-b', [{
+      id: 'write',
+      type: 'tool',
+      config: { toolName: 'write_file', args: { path: 'denied.txt', content: 'no' } },
+      retry: { maxAttempts: 3 }
+    }]));
+    const bStart = await workflowEngine.runtime.run('scenario-b', { projectRoot, projectId });
+    const b = await workflowEngine.runtime.wait(bStart.workflowRunId);
+    assert.strictEqual(b.status, 'FAILED');
+    assert.strictEqual(b.errorCode, 'PERMISSION_DENIED');
+    assert.strictEqual(writeExec, 0);
+    assert.strictEqual(b.steps[0].attempt, 1);
+
+    // Outside-workspace paths still fail in the existing PathSecurity gate.
+    workflowEngine.registry.create(workflow('outside-path', [{
+      id: 'outside',
+      type: 'tool',
+      config: { toolName: 'read_file', args: { path: '../outside.txt' } }
+    }]));
+    const outsideStart = await workflowEngine.runtime.run('outside-path', { projectRoot, projectId });
+    const outside = await workflowEngine.runtime.wait(outsideStart.workflowRunId);
+    assert.strictEqual(outside.status, 'FAILED');
+    assert.strictEqual(outside.errorCode, 'PATH_OUTSIDE_WORKSPACE');
+
+    // Scenario C: before_model blocks the real Main runtime before provider wire.
+    const beforeBlockCalls = providerCounter.calls;
+    workflowEngine.registry.create(workflow('scenario-c', [{
+      id: 'blocked',
+      type: 'agent',
+      config: {
+        goal: 'Must be blocked',
+        target: { mode: 'main' },
+        hookIds: ['workflow-block-model'],
+        readOnly: true
+      }
+    }]));
+    const cStart = await workflowEngine.runtime.run('scenario-c', { projectRoot, projectId });
+    const c = await workflowEngine.runtime.wait(cStart.workflowRunId);
+    assert.strictEqual(c.status, 'FAILED');
+    assert.strictEqual(providerCounter.calls, beforeBlockCalls);
+
+    // before_tool uses the same Hook Engine and leaves the implementation count unchanged.
+    workflowEngine.registry.create(workflow('tool-hook-block', [
+      {
+        id: 'main',
+        type: 'agent',
+        config: { goal: 'Create a real run identity', target: { mode: 'main' }, readOnly: true }
+      },
+      {
+        id: 'blocked-read',
+        type: 'tool',
+        dependsOn: ['main'],
+        config: { toolName: 'read_file', args: { path: 'safe.txt' }, hookIds: ['workflow-block-tool'] }
+      }
+    ]));
+    const readBeforeBlock = readExec;
+    const toolBlockStart = await workflowEngine.runtime.run('tool-hook-block', { projectRoot, projectId });
+    const toolBlock = await workflowEngine.runtime.wait(toolBlockStart.workflowRunId);
+    assert.strictEqual(toolBlock.status, 'FAILED');
+    assert.strictEqual(toolBlock.errorCode, 'HOOK_BLOCKED');
+    assert.strictEqual(readExec, readBeforeBlock);
+
+    // Scenario D: approval suspends; following tool starts only after approval.
+    workflowEngine.registry.create(workflow('scenario-d', [
+      { id: 'approval', type: 'approval', config: { message: 'Approve production continuation?' } },
+      { id: 'after', type: 'tool', dependsOn: ['approval'], config: { toolName: 'read_file', args: { path: 'safe.txt' } } }
+    ]));
+    const dStart = await workflowEngine.runtime.run('scenario-d', { projectRoot, projectId });
+    const waiting = await waitStatus(workflowEngine.runtime, dStart.workflowRunId, 'WAITING_APPROVAL');
+    const readsWhileWaiting = readExec;
+    assert.strictEqual(waiting.steps.find(step => step.stepId === 'after').status, 'PENDING');
+    await workflowEngine.runtime.approve(dStart.workflowRunId);
+    const d = await workflowEngine.runtime.wait(dStart.workflowRunId);
+    assert.strictEqual(d.status, 'COMPLETED');
+    assert.strictEqual(readExec, readsWhileWaiting + 1);
+
+    // Scenario E: cancel reaches the active AgentHub adapter; pending stays at zero,
+    // and a late completion cannot overwrite the workflow terminal.
+    workflowEngine.registry.create(workflow('scenario-e', [
+      {
+        id: 'long',
+        type: 'agent',
+        config: { goal: 'Long running', target: { mode: 'hub', agentId: longAgent.id }, readOnly: true }
+      },
+      { id: 'never', type: 'tool', dependsOn: ['long'], config: { toolName: 'read_file', args: { path: 'safe.txt' } } }
+    ]));
+    const readsBeforeCancel = readExec;
+    const eStart = await workflowEngine.runtime.run('scenario-e', { projectRoot, projectId });
+    await new Promise(resolve => setTimeout(resolve, 30));
+    const activeContext = [...longAgent.contexts.values()][0];
+    await workflowEngine.runtime.cancel(eStart.workflowRunId);
+    assert.strictEqual(longAgent.cancelCount, 1);
+    activeContext.finishRun('completed', { summary: 'late result' });
+    await new Promise(resolve => setTimeout(resolve, 20));
+    const e = workflowEngine.runtime.getRun(eStart.workflowRunId);
+    assert.strictEqual(e.status, 'CANCELLED');
+    assert.strictEqual(readExec, readsBeforeCancel);
+    assert.strictEqual(e.steps.find(step => step.stepId === 'never').status, 'CANCELLED');
+
+    // Scenario F: transient tool error retries exactly once and completes.
+    workflowEngine.registry.create(workflow('scenario-f', [{
+      id: 'flaky',
+      type: 'tool',
+      config: { toolName: 'workflow_flaky', args: {} },
+      retry: { maxAttempts: 2 }
+    }]));
+    const fStart = await workflowEngine.runtime.run('scenario-f', { projectRoot, projectId });
+    const f = await workflowEngine.runtime.wait(fStart.workflowRunId);
+    assert.strictEqual(f.status, 'COMPLETED');
+    assert.strictEqual(flakyAttempts, 2);
+    assert.strictEqual(f.steps[0].attempt, 2);
+
+    const audits = store.workflowAudit.list(500);
+    assert.ok(audits.length > 0);
+    assert.ok(audits.every(row => row.workflow_run_id));
+    assert.doesNotMatch(JSON.stringify(audits), /fixture-placeholder-key|WORKFLOW_OUTSIDE_SENTINEL|Authorization|Cookie/i);
+    assert.strictEqual(runManager.list().some(run => run.agentId === 'workflow'), false);
+    const hookRows = store.hookInvocations.list(100);
+    assert.ok(hookRows.filter(row => row.hook_id === 'workflow-block-tool')
+      .every(row => row.run_id && runManager.getRun(row.run_id)));
+    assert.strictEqual(factory.listInstances().length, 0);
+    console.log(
+      'WORKFLOW_PRODUCTION fakeProviderCalls=' + providerCounter.calls +
+      ' paidProviderCalls=0 selectedModel=workflow-model wireModel=workflow-model'
+    );
+  } finally {
+    setAgentHub(previousHub);
+    setDynamicAgentRuntime(previousDynamic.factory, previousDynamic.definitionStore);
+    setHookRuntime(previousHook);
+    setSkillRuntime(previousSkill.registry, previousSkill.resolver);
+    try { pathSecurity.clearRootCache(); } catch { /* best effort */ }
+    try { store.getDb().close(); } catch { /* best effort */ }
+    fs.rmSync(dataRoot, { recursive: true, force: true });
+    fs.rmSync(fixtureRoot, { recursive: true, force: true });
+  }
+});

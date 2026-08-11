@@ -234,7 +234,7 @@ export async function open(page) {
   const body = $('#page-body');
   if (body) body.scrollTop = 0;
   $$('.topnav button').forEach(b => b.classList.toggle('active', b.dataset.page === page));
-  const title = { dashboard: '总览', connections: 'API 连接', agents: '智能体', mcp: 'MCP 服务器', skills: 'Skills', diagnostics: '能力诊断', settings: '设置' }[page] || page;
+  const title = { dashboard: '总览', connections: 'API 连接', agents: '智能体', mcp: 'MCP 服务器', skills: 'Skills', workflows: 'Workflows', diagnostics: '能力诊断', settings: '设置' }[page] || page;
   $('#page-title').textContent = title;
   body.innerHTML = '<div class="muted">加载中…</div>';
   try {
@@ -243,6 +243,7 @@ export async function open(page) {
     else if (page === 'agents') await renderAgents(body);
     else if (page === 'mcp') await renderMcp(body);
     else if (page === 'skills') await renderSkills(body);
+    else if (page === 'workflows') await renderWorkflows(body);
     else if (page === 'diagnostics') await renderDiagnostics(body);
     else if (page === 'settings') await renderSettings(body);
   } catch (e) { body.innerHTML = `<div class="err">${esc(e.message)}</div>`; }
@@ -1846,6 +1847,82 @@ function mcpForm() {
       url: $('#m-url').value.trim()
     };
     try { await api.mcpCreate(payload); closeModal(); open('mcp'); } catch (e) { toast(e.message, 'error'); }
+  });
+}
+
+/* ------------------------------------------------------------------ */
+/* Workflows (v2.9.5 serial Workflow Engine)                           */
+/* ------------------------------------------------------------------ */
+async function renderWorkflows(body) {
+  const [definitions, runs] = await Promise.all([api.workflowList(), api.workflowListRuns(30)]);
+  const definitionRows = definitions.map(w => {
+    const stateText = w.enabled ? 'enabled' : 'disabled';
+    const toggleText = w.enabled ? 'Disable' : 'Enable';
+    return '<tr><td><b>' + esc(w.name) + '</b><div class="muted small mono">' + esc(w.id) +
+      '</div></td><td>' + w.steps.length + '</td><td><span class="chip ' +
+      (w.enabled ? 'ok' : '') + '">' + stateText + '</span></td><td class="right">' +
+      '<button class="btn tiny" data-wf-view="' + esc(w.id) + '">View</button>' +
+      '<button class="btn tiny" data-wf-toggle="' + esc(w.id) + '">' + toggleText + '</button>' +
+      '<button class="btn tiny primary" data-wf-run="' + esc(w.id) + '"' +
+      (w.enabled ? '' : ' disabled') + '>Run</button></td></tr>';
+  }).join('');
+  const runRows = runs.map(run => {
+    const steps = (run.steps || []).map(step =>
+      '<span class="tag">' + esc(step.stepId) + ': ' + esc(step.status) + '</span>'
+    ).join('');
+    const actions = ['RUNNING', 'WAITING_APPROVAL'].includes(run.status)
+      ? '<button class="btn tiny danger" data-wr-cancel="' + esc(run.workflowRunId) + '">Cancel</button>'
+      : '';
+    const approval = run.status === 'WAITING_APPROVAL'
+      ? '<button class="btn tiny primary" data-wr-approve="' + esc(run.workflowRunId) + '">Approve</button>' +
+        '<button class="btn tiny" data-wr-reject="' + esc(run.workflowRunId) + '">Reject</button>'
+      : '';
+    return '<tr><td class="mono small">' + esc(run.workflowRunId) + '</td><td>' +
+      esc(run.status) + '<div class="taglist">' + steps + '</div></td><td class="right">' +
+      approval + actions + '</td></tr>';
+  }).join('');
+  body.innerHTML =
+    '<div class="page-actions"><button class="btn" id="workflow-refresh">Refresh</button></div>' +
+    '<section class="panel"><h3>Workflow Definitions</h3>' +
+    (definitionRows ? '<table class="tbl"><thead><tr><th>Workflow</th><th>Steps</th><th>Status</th><th></th></tr></thead><tbody>' +
+      definitionRows + '</tbody></table>' : '<div class="muted">No workflows defined.</div>') +
+    '</section><section class="panel"><h3>Recent Runs</h3>' +
+    (runRows ? '<table class="tbl"><thead><tr><th>Run</th><th>State / Steps</th><th></th></tr></thead><tbody>' +
+      runRows + '</tbody></table>' : '<div class="muted">No workflow runs.</div>') + '</section>';
+  $('#workflow-refresh').onclick = () => open('workflows');
+  body.querySelectorAll('[data-wf-view]').forEach(button => {
+    button.onclick = async () => {
+      const value = await api.workflowGet(button.dataset.wfView);
+      openModal('Workflow: ' + esc(value.id), '<pre class="skill-pre">' + esc(JSON.stringify(value, null, 2)) + '</pre>');
+    };
+  });
+  body.querySelectorAll('[data-wf-toggle]').forEach(button => {
+    button.onclick = async () => {
+      const value = definitions.find(item => item.id === button.dataset.wfToggle);
+      if (value.enabled) await api.workflowDisable(value.id);
+      else await api.workflowEnable(value.id);
+      open('workflows');
+    };
+  });
+  body.querySelectorAll('[data-wf-run]').forEach(button => {
+    button.onclick = async () => {
+      if (!state.project) return toast('Open a project before running a Workflow.', 'warn');
+      await api.workflowRun(button.dataset.wfRun, {}, {
+        projectId: state.project.id,
+        projectRoot: state.project.root_path
+      });
+      toast('Workflow started', 'ok');
+      open('workflows');
+    };
+  });
+  body.querySelectorAll('[data-wr-cancel]').forEach(button => {
+    button.onclick = async () => { await api.workflowCancel(button.dataset.wrCancel); open('workflows'); };
+  });
+  body.querySelectorAll('[data-wr-approve]').forEach(button => {
+    button.onclick = async () => { await api.workflowApprove(button.dataset.wrApprove); open('workflows'); };
+  });
+  body.querySelectorAll('[data-wr-reject]').forEach(button => {
+    button.onclick = async () => { await api.workflowReject(button.dataset.wrReject); open('workflows'); };
   });
 }
 

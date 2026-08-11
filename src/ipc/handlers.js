@@ -53,6 +53,7 @@ const { setDynamicAgentRuntime } = require('../agents/dynamic/runtimeRegistry');
 // v2.9.3 — Skill Engine（R1-R7）
 const { createSkillRegistry, createSkillResolver, BUILTIN_SKILLS, setSkillRuntime } = require('../skills');
 const { createHookEngine, setHookRuntime } = require('../hooks');
+const { createWorkflowEngine } = require('../workflows');
 const { createProviderModelAdapter } = require('../agent/runtime/providerModelAdapter');
 const {
   createModelCatalog,
@@ -183,6 +184,25 @@ const hookEngine = createHookEngine({
 });
 setHookRuntime(hookEngine);
 
+// v2.9.5 Workflow Engine: durable orchestration over the existing AgentHub,
+// Tool gate, PermissionEngine, Skill, Hook, and Model Router infrastructure.
+const workflowEngine = createWorkflowEngine({
+  definitionStore: store.workflowDefinitions,
+  executionStore: store.workflowExecutions,
+  stepStore: store.workflowStepExecutions,
+  auditStore: store.workflowAudit,
+  agentHub,
+  dynamicAgentFactory,
+  agentDefinitionStore: store.agentDefinitions,
+  getTool,
+  hookEngine,
+  pathSecurity: _pathSecurity,
+  projectLock,
+  store,
+  emit,
+  createPermissionEngine: ({ projectId }) => new PermissionEngine({ store, projectId })
+});
+
 // Register built-in adapters
 // v2.8.0 — 外部 Agent 会话落库后端（spec §110/§111）。DB 未就绪（隔离单测）时为 null → 纯内存。
 const sessionPersistence = (() => { try { return createDbSessionPersistence(store.externalAgentSessions); } catch { return null; } })();
@@ -237,7 +257,10 @@ async function shutdownServices() {
       clineAdapter.dispose(),
       openCodeAdapter.dispose(),
       openHandsAdapter.dispose(),
-      ...dynamicAgentFactory.listInstances().map(instance => dynamicAgentFactory.disposeInstance(instance.instanceId))
+      ...dynamicAgentFactory.listInstances().map(instance => dynamicAgentFactory.disposeInstance(instance.instanceId)),
+      ...workflowEngine.runtime.listRuns()
+        .filter(run => !['COMPLETED', 'FAILED', 'CANCELLED'].includes(run.status))
+        .map(run => workflowEngine.runtime.cancel(run.workflowRunId))
     ]);
   })();
   return shutdownPromise;
@@ -1331,6 +1354,33 @@ function register(window) {
   ipcMain.handle('hook:enable', (e, id) => hookPublic(hookEngine.registry.enable(id)));
   ipcMain.handle('hook:disable', (e, id) => hookPublic(hookEngine.registry.disable(id)));
   ipcMain.handle('hook:audit:list', (e, limit) => hookEngine.audit.list(limit));
+
+  // v2.9.5 Workflow Engine IPC. Definitions are data only; runtime calls keep
+  // all authority in the existing AgentHub and Tool execution paths.
+  const workflowPublic = value => value && JSON.parse(JSON.stringify(value));
+  ipcMain.handle('workflow:list', () => workflowEngine.registry.list().map(workflowPublic));
+  ipcMain.handle('workflow:get', (e, id) => workflowPublic(workflowEngine.registry.get(id)));
+  ipcMain.handle('workflow:create', (e, definition) => workflowPublic(workflowEngine.registry.create(definition)));
+  ipcMain.handle('workflow:update', (e, id, patch) => workflowPublic(workflowEngine.registry.update(id, patch)));
+  ipcMain.handle('workflow:delete', (e, id) => workflowEngine.registry.remove(id));
+  ipcMain.handle('workflow:enable', (e, id) => workflowPublic(workflowEngine.registry.enable(id)));
+  ipcMain.handle('workflow:disable', (e, id) => workflowPublic(workflowEngine.registry.disable(id)));
+  ipcMain.handle('workflow:run', async (e, id, input = {}, runtime = {}) => {
+    const projectId = runtime.projectId || currentProjectId || null;
+    const project = projectId ? store.projects.get(projectId) : null;
+    return workflowEngine.runtime.run(id, {
+      input,
+      projectId,
+      projectRoot: runtime.projectRoot || (project && project.root_path) || null,
+      conversationId: runtime.conversationId || null,
+      parentRunId: runtime.parentRunId || null
+    });
+  });
+  ipcMain.handle('workflow:getRun', (e, workflowRunId) => workflowEngine.runtime.getRun(workflowRunId));
+  ipcMain.handle('workflow:listRuns', (e, limit) => workflowEngine.runtime.listRuns(limit));
+  ipcMain.handle('workflow:cancel', (e, workflowRunId) => workflowEngine.runtime.cancel(workflowRunId));
+  ipcMain.handle('workflow:approve', (e, workflowRunId) => workflowEngine.runtime.approve(workflowRunId));
+  ipcMain.handle('workflow:reject', (e, workflowRunId) => workflowEngine.runtime.reject(workflowRunId));
 
   // v2.7.1 — Project Mutation Lock IPC
   ipcMain.handle('lock:isBusy', (e, projectRoot) => projectLock.isBusy(projectRoot));

@@ -961,6 +961,179 @@ const hookInvocations = {
   }
 };
 
+// ---------- v2.9.5 workflow definitions, executions, steps, and audit ----------
+const workflowDefinitions = {
+  create(input) {
+    const { normalizeWorkflowDefinition } = require('../workflows/workflowDefinition');
+    const definition = normalizeWorkflowDefinition(input);
+    const t = now();
+    db().prepare('INSERT INTO workflow_definitions (id,definition_json,enabled,created_at,updated_at) VALUES (?,?,1,?,?)')
+      .run(definition.id, j(definition), t, t);
+    return workflowDefinitions.get(definition.id);
+  },
+  get(id) {
+    const row = db().prepare('SELECT * FROM workflow_definitions WHERE id=?').get(id);
+    return row ? { ...p(row.definition_json, null), enabled: row.enabled === 1 } : null;
+  },
+  list() {
+    return db().prepare('SELECT * FROM workflow_definitions ORDER BY id').all()
+      .map(row => ({ ...p(row.definition_json, null), enabled: row.enabled === 1 })).filter(Boolean);
+  },
+  update(id, input) {
+    if (!workflowDefinitions.get(id)) return null;
+    const { normalizeWorkflowDefinition } = require('../workflows/workflowDefinition');
+    const definition = normalizeWorkflowDefinition({ ...(input || {}), id });
+    db().prepare('UPDATE workflow_definitions SET definition_json=?,updated_at=? WHERE id=?')
+      .run(j(definition), now(), id);
+    return workflowDefinitions.get(id);
+  },
+  remove(id) {
+    return db().prepare('DELETE FROM workflow_definitions WHERE id=?').run(id).changes > 0;
+  },
+  setEnabled(id, enabled) {
+    if (!workflowDefinitions.get(id)) return null;
+    db().prepare('UPDATE workflow_definitions SET enabled=?,updated_at=? WHERE id=?')
+      .run(enabled ? 1 : 0, now(), id);
+    return workflowDefinitions.get(id);
+  }
+};
+
+function workflowExecutionFromRow(row) {
+  return row ? {
+    workflowRunId: row.workflow_run_id,
+    workflowId: row.workflow_id,
+    status: row.status,
+    projectId: row.project_id,
+    projectRoot: row.project_root,
+    conversationId: row.conversation_id,
+    currentStepId: row.current_step_id,
+    input: p(row.input_json, {}),
+    output: p(row.output_json, {}),
+    errorCode: row.error_code,
+    error: row.error,
+    startedAt: row.started_at,
+    updatedAt: row.updated_at,
+    terminalAt: row.terminal_at
+  } : null;
+}
+
+const workflowExecutions = {
+  create(input) {
+    const t = input.startedAt || now();
+    db().prepare(
+      'INSERT INTO workflow_executions ' +
+      '(workflow_run_id,workflow_id,status,project_id,project_root,conversation_id,current_step_id,input_json,output_json,error_code,error,started_at,updated_at,terminal_at) ' +
+      'VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)'
+    ).run(input.workflowRunId, input.workflowId, input.status, input.projectId || null,
+      input.projectRoot || null, input.conversationId || null, input.currentStepId || null,
+      j(input.input || {}), j(input.output || {}), input.errorCode || null, input.error || null,
+      t, input.updatedAt || t, input.terminalAt || null);
+    return workflowExecutions.get(input.workflowRunId);
+  },
+  get(workflowRunId) {
+    return workflowExecutionFromRow(
+      db().prepare('SELECT * FROM workflow_executions WHERE workflow_run_id=?').get(workflowRunId)
+    );
+  },
+  list(limit = 100) {
+    return db().prepare('SELECT * FROM workflow_executions ORDER BY started_at DESC LIMIT ?').all(limit)
+      .map(workflowExecutionFromRow);
+  },
+  update(workflowRunId, patch) {
+    const current = workflowExecutions.get(workflowRunId);
+    if (!current) return null;
+    const next = { ...current, ...(patch || {}), updatedAt: (patch && patch.updatedAt) || now() };
+    db().prepare(
+      'UPDATE workflow_executions SET status=?,project_id=?,project_root=?,conversation_id=?,' +
+      'current_step_id=?,input_json=?,output_json=?,error_code=?,error=?,updated_at=?,terminal_at=? ' +
+      'WHERE workflow_run_id=?'
+    ).run(next.status, next.projectId || null, next.projectRoot || null, next.conversationId || null,
+      next.currentStepId || null, j(next.input || {}), j(next.output || {}), next.errorCode || null,
+      next.error || null, next.updatedAt, next.terminalAt || null, workflowRunId);
+    return workflowExecutions.get(workflowRunId);
+  }
+};
+
+function workflowStepFromRow(row) {
+  return row ? {
+    workflowRunId: row.workflow_run_id,
+    stepId: row.step_id,
+    stepType: row.step_type,
+    status: row.status,
+    attempt: row.attempt,
+    runId: row.run_id,
+    childRunId: row.child_run_id,
+    startedAt: row.started_at,
+    updatedAt: row.updated_at,
+    terminalAt: row.terminal_at,
+    result: p(row.result_json, {}),
+    errorCode: row.error_code,
+    error: row.error
+  } : null;
+}
+
+const workflowStepExecutions = {
+  create(input) {
+    const t = input.updatedAt || now();
+    db().prepare(
+      'INSERT INTO workflow_step_executions ' +
+      '(workflow_run_id,step_id,step_type,status,attempt,run_id,child_run_id,started_at,updated_at,terminal_at,result_json,error_code,error) ' +
+      'VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)'
+    ).run(input.workflowRunId, input.stepId, input.stepType, input.status, input.attempt || 0,
+      input.runId || null, input.childRunId || null, input.startedAt || null, t,
+      input.terminalAt || null, j(input.result || {}), input.errorCode || null, input.error || null);
+    return workflowStepExecutions.get(input.workflowRunId, input.stepId);
+  },
+  get(workflowRunId, stepId) {
+    return workflowStepFromRow(db().prepare(
+      'SELECT * FROM workflow_step_executions WHERE workflow_run_id=? AND step_id=?'
+    ).get(workflowRunId, stepId));
+  },
+  listByRun(workflowRunId) {
+    return db().prepare('SELECT * FROM workflow_step_executions WHERE workflow_run_id=? ORDER BY step_id')
+      .all(workflowRunId).map(workflowStepFromRow);
+  },
+  update(workflowRunId, stepId, patch) {
+    const current = workflowStepExecutions.get(workflowRunId, stepId);
+    if (!current) return null;
+    const next = { ...current, ...(patch || {}), updatedAt: (patch && patch.updatedAt) || now() };
+    db().prepare(
+      'UPDATE workflow_step_executions SET status=?,attempt=?,run_id=?,child_run_id=?,' +
+      'started_at=?,updated_at=?,terminal_at=?,result_json=?,error_code=?,error=? ' +
+      'WHERE workflow_run_id=? AND step_id=?'
+    ).run(next.status, next.attempt || 0, next.runId || null, next.childRunId || null,
+      next.startedAt || null, next.updatedAt, next.terminalAt || null, j(next.result || {}),
+      next.errorCode || null, next.error || null, workflowRunId, stepId);
+    return workflowStepExecutions.get(workflowRunId, stepId);
+  }
+};
+
+const workflowAudit = {
+  create(input) {
+    db().prepare(
+      'INSERT INTO workflow_audit ' +
+      '(audit_id,workflow_run_id,workflow_id,step_id,step_type,status,attempt,run_id,child_run_id,error_code,duration_ms,detail_json,created_at) ' +
+      'VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)'
+    ).run(input.auditId, input.workflowRunId, input.workflowId, input.stepId || null,
+      input.stepType || null, input.status, input.attempt || 0, input.runId || null,
+      input.childRunId || null, input.errorCode || null, input.durationMs || 0,
+      j(input.detail || {}), input.createdAt || now());
+    return workflowAudit.get(input.auditId);
+  },
+  get(auditId) {
+    const row = db().prepare('SELECT * FROM workflow_audit WHERE audit_id=?').get(auditId);
+    return row ? { ...row, detail: p(row.detail_json, {}) } : null;
+  },
+  list(limit = 100) {
+    return db().prepare('SELECT * FROM workflow_audit ORDER BY created_at DESC LIMIT ?').all(limit)
+      .map(row => ({ ...row, detail: p(row.detail_json, {}) }));
+  },
+  listByRun(workflowRunId) {
+    return db().prepare('SELECT * FROM workflow_audit WHERE workflow_run_id=? ORDER BY created_at,audit_id')
+      .all(workflowRunId).map(row => ({ ...row, detail: p(row.detail_json, {}) }));
+  }
+};
+
 // ---------- v1 JSON migration ----------
 function migrateFromJson(jsonPath) {
   if (!jsonPath || !require('fs').existsSync(jsonPath)) return false;
@@ -1020,5 +1193,6 @@ module.exports = {
   memories, checkpoints, fileChanges, usage, modelCalls, permissionGrants, audit, permissionDecisions, settings, agentPrefs, extAgentConfigs,
   externalAgentSessions, externalAgentAuthStates, agentDefinitions, agentTemplates, modelRouteDecisions,
   skillDefinitions, hookDefinitions, hookInvocations,
+  workflowDefinitions, workflowExecutions, workflowStepExecutions, workflowAudit,
   migrateFromJson
 };

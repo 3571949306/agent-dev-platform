@@ -67,6 +67,11 @@ class NativeAgentAdapter extends BaseAgentAdapter {
     this._abortControllers = new Map();
     // runId -> { conversationId, task, context, startedAt }
     this._runs = new Map();
+    // AgentHub runId -> MainAgentRuntime runId. AgentHub owns the public Run
+    // identity; the adapter monitors the existing inner runtime and reports its
+    // terminal truth through context.finishRun.
+    this._hubRuns = new Map();
+    this._hubMonitors = new Map();
   }
 
   /** 主智能体永远存在；maxConcurrency 由 manifest 给出（默认 3）。 */
@@ -169,6 +174,31 @@ class NativeAgentAdapter extends BaseAgentAdapter {
       startedAt: Date.now()
     });
 
+    if (!this.dynamicAgent && context.runId && context.runId !== runId) {
+      const hubRunId = context.runId;
+      this._hubRuns.set(hubRunId, runId);
+      const poll = async () => {
+        const current = context.runManager && context.runManager.getRun(runId);
+        if (!current || !['completed', 'failed', 'cancelled', 'timeout', 'interrupted'].includes(current.status)) return;
+        const timer = this._hubMonitors.get(hubRunId);
+        if (timer) clearInterval(timer);
+        this._hubMonitors.delete(hubRunId);
+        const status = current.status === 'interrupted' ? 'failed' : current.status;
+        if (typeof context.finishRun === 'function') {
+          context.finishRun(status, {
+            status,
+            summary: current.message || '',
+            error: current.error || null,
+            innerRunId: runId
+          });
+        }
+      };
+      const timer = setInterval(() => { void poll(); }, 10);
+      if (timer.unref) timer.unref();
+      this._hubMonitors.set(hubRunId, timer);
+      void poll();
+    }
+
     return { runId };
   }
 
@@ -182,7 +212,8 @@ class NativeAgentAdapter extends BaseAgentAdapter {
    * 并把 RunManager 标记为 cancelled（runMainAgent 的 catch 也会处理）。
    */
   async cancel(runId) {
-    const run = this._runs.get(runId);
+    const actualRunId = this._hubRuns.get(runId) || runId;
+    const run = this._runs.get(actualRunId);
     if (!run) return { ok: false, error: 'unknown runId' };
     let aborted = false;
     if (run.conversationId) {
@@ -202,11 +233,12 @@ class NativeAgentAdapter extends BaseAgentAdapter {
 
   /** 查询 Run 状态：直接反查 RunManager（runId 即 RunManager 的 run id）。 */
   async getStatus(runId) {
-    const run = this._runs.get(runId);
+    const actualRunId = this._hubRuns.get(runId) || runId;
+    const run = this._runs.get(actualRunId);
     if (!run) return { status: LIFECYCLE.IDLE, detail: 'unknown runId' };
     const rm = run.context && run.context.runManager;
     if (!rm) return { status: LIFECYCLE.RUNNING };
-    const r = rm.getRun(runId);
+    const r = rm.getRun(actualRunId);
     if (!r) return { status: LIFECYCLE.IDLE, detail: 'run not found in RunManager' };
     return {
       status: mapRunManagerStatus(r.status),
@@ -219,11 +251,12 @@ class NativeAgentAdapter extends BaseAgentAdapter {
 
   /** 取终态结果：从 RunManager 拉 status/error/message。 */
   async getResult(runId) {
-    const run = this._runs.get(runId);
+    const actualRunId = this._hubRuns.get(runId) || runId;
+    const run = this._runs.get(actualRunId);
     if (!run) return null;
     const rm = run.context && run.context.runManager;
     if (!rm) return null;
-    const r = rm.getRun(runId);
+    const r = rm.getRun(actualRunId);
     if (!r) return null;
     return {
       status: mapRunManagerStatus(r.status),
@@ -241,6 +274,9 @@ class NativeAgentAdapter extends BaseAgentAdapter {
     }
     this._runs.clear();
     this._abortControllers.clear();
+    for (const timer of this._hubMonitors.values()) clearInterval(timer);
+    this._hubMonitors.clear();
+    this._hubRuns.clear();
   }
 }
 

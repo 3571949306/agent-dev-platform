@@ -1,5 +1,14 @@
 # Changelog
 
+## v2.9.5 — Workflow Engine
+
+- Added strict, versioned, JSON-only Workflow definitions for serial agent, tool, deterministic condition, and explicit approval steps; cycles, unknown dependencies/types, runtime objects, executable fields, and credential-bearing data fail closed.
+- Added persistent Workflow definitions, executions, step executions, and recursively sanitized audit records, with stable topological-level/step-ID compilation and centralized lifecycle transitions.
+- Added a bounded Workflow context with fail-closed template references, 64 KB step outputs, and a 256 KB total context ceiling.
+- Added a serial scheduler with approval suspension, bounded retry, non-retryable authority failures, cancellation propagation, pending-step cancellation, and late-result guards.
+- Reused the existing AgentHub/MainAgentRuntime, Dynamic AgentFactory, Tool Registry, PermissionEngine, PathSecurity, ProjectMutationLock, SkillResolver, HookEngine, Model Router, and ProviderModelAdapter; Workflow creates no provider, tool, permission, model, hook, or agent runtime of its own.
+- Added minimal Workflow IPC/API/GUI management plus deterministic/adversarial and production-component suites covering Main, Dynamic, Tool, Condition, Approval, permission/path/hook/skill failures, retry, cancellation, audit, and zero paid calls.
+
 ## v2.9.4 — Hook Engine
 
 - Added a strict, versioned, JSON-only `HookDefinition` contract and persistent registry with deterministic priority/ID resolution, required/optional selection, filters, enable/disable controls, and restart-safe definitions.

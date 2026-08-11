@@ -143,6 +143,68 @@ CREATE TABLE IF NOT EXISTS hook_invocations (
 CREATE INDEX IF NOT EXISTS idx_hook_invocations_run ON hook_invocations(run_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_hook_invocations_hook ON hook_invocations(hook_id, created_at);
 
+-- v2.9.5: Workflow definitions are separate from durable execution truth.
+CREATE TABLE IF NOT EXISTS workflow_definitions (
+  id TEXT PRIMARY KEY,
+  definition_json TEXT NOT NULL,
+  enabled INTEGER DEFAULT 1,
+  created_at TEXT,
+  updated_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS workflow_executions (
+  workflow_run_id TEXT PRIMARY KEY,
+  workflow_id TEXT NOT NULL,
+  status TEXT NOT NULL,
+  project_id TEXT,
+  project_root TEXT,
+  conversation_id TEXT,
+  current_step_id TEXT,
+  input_json TEXT NOT NULL DEFAULT '{}',
+  output_json TEXT NOT NULL DEFAULT '{}',
+  error_code TEXT,
+  error TEXT,
+  started_at TEXT,
+  updated_at TEXT,
+  terminal_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_workflow_executions_workflow ON workflow_executions(workflow_id, started_at);
+
+CREATE TABLE IF NOT EXISTS workflow_step_executions (
+  workflow_run_id TEXT NOT NULL,
+  step_id TEXT NOT NULL,
+  step_type TEXT NOT NULL,
+  status TEXT NOT NULL,
+  attempt INTEGER DEFAULT 0,
+  run_id TEXT,
+  child_run_id TEXT,
+  started_at TEXT,
+  updated_at TEXT,
+  terminal_at TEXT,
+  result_json TEXT NOT NULL DEFAULT '{}',
+  error_code TEXT,
+  error TEXT,
+  PRIMARY KEY (workflow_run_id, step_id)
+);
+CREATE INDEX IF NOT EXISTS idx_workflow_steps_run ON workflow_step_executions(workflow_run_id, step_id);
+
+CREATE TABLE IF NOT EXISTS workflow_audit (
+  audit_id TEXT PRIMARY KEY,
+  workflow_run_id TEXT NOT NULL,
+  workflow_id TEXT NOT NULL,
+  step_id TEXT,
+  step_type TEXT,
+  status TEXT NOT NULL,
+  attempt INTEGER DEFAULT 0,
+  run_id TEXT,
+  child_run_id TEXT,
+  error_code TEXT,
+  duration_ms INTEGER DEFAULT 0,
+  detail_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_workflow_audit_run ON workflow_audit(workflow_run_id, created_at);
+
 CREATE TABLE IF NOT EXISTS agent_templates (
   id TEXT PRIMARY KEY,
   template_json TEXT NOT NULL,

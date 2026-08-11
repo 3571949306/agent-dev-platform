@@ -23,7 +23,7 @@ This release does not implement an AI Agent Generator, Model Router, Skill Engin
 
 ### v2.9.2 model policy integration
 
-The shared `resolveRuntimeModel()` entry supports `inherit_parent`, `explicit`, and `auto`. Inheritance returns the exact Parent adapter without routing; explicit requires the exact configured connection/model; auto submits `modelPolicy.requirements` to ModelRouter and allows only `fallback = fail`. A no-candidate auto route never continues on the Parent model. ModelRouter chooses model providers only and remains separate from AgentRouter. A Dynamic route created before its Child Run has `runId = null`; after AgentHub creates the child, the adapter binds the decision to that exact Child Run (with separate root/parent IDs) before its first model decision. See `docs/MODEL_ROUTER_FRAMEWORK.md`.
+The shared `resolveRuntimeModel()` entry supports `inherit_parent`, `explicit`, and `auto`. Inheritance returns the exact Parent adapter without routing; explicit requires the exact configured connection/model; auto submits ``modelPolicy.requirements`` to ModelRouter and allows only `fallback = fail`. A no-candidate auto route never continues on the Parent model. ModelRouter chooses model providers only and remains separate from AgentRouter. A Dynamic route created before its Child Run has `runId = null`; after AgentHub creates the child, the adapter binds the decision to that exact Child Run (with separate root/parent IDs) before its first model decision. See `docs/MODEL_ROUTER_FRAMEWORK.md`.
 
 ## 2. Identity and persistence boundaries
 
@@ -59,8 +59,8 @@ Effective access remains:
 
 ```text
 Platform policy
-  ∩ Parent authorization
-  ∩ AgentDefinition policy
+  �?Parent authorization
+  �?AgentDefinition policy
 ```
 
 ## 5. Runtime behavior
@@ -132,3 +132,7 @@ dynamicAgent:instance:list/dispose
 Run `npm run test:dynamic-agent` for all Dynamic tests, or `npm run test:dynamic-agent:production` for the production-stack smoke alone. The latter replaces only the model with a deterministic adapter and uses production MainAgentRuntime, AgentLoop, MainAgentOrchestrator, AgentFactory, Dynamic Native Adapter, AgentHub, RunBridge, Built-in Tool Registry, PermissionEngine, PathSecurity, lifecycle, and tool resolution.
 
 It executes production `read_file` against an isolated TEMP project and proves its content reaches the child model. It also proves the custom marker and Dynamic Base reach model system context without Main Coding Agent identity, mutation and terminal tools are absent, direct mutation is permission-denied, Parent deny cannot be widened, production PathSecurity rejects `../outside.txt`, a Child Run returns a finding, Main Agent consumes the finding on its next iteration, the source hash is unchanged, and Registry/instance/timer counts return to zero.
+
+## 10. Skill integration (v2.9.3)
+
+AgentDefinition gains a `skills` field: `{ required: [], optional: [] }`. Required skill resolution failure rejects instance creation (fail closed); optional failures skip the skill set. The SkillResolver validates the agent tool/permission ceiling at factory time; skill denied tools merge into `definition.toolPolicy.deny` so the single `DynamicNativeAgentAdapter.getTool` gate stays the only enforcement point. Skill ModelRequirements merge strictly into `modelPolicy.requirements` before routing, and resolved Skill Instructions are carried via `scopedTask.skillInstructions` into prompt composition below the Dynamic Agent Role. inlineAgentDefinition may reference Skill IDs instead of copying prompts. See docs/SKILL_ENGINE.md.

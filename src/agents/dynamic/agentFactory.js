@@ -4,8 +4,23 @@ const crypto = require('crypto');
 const { normalizeAgentDefinition } = require('./agentDefinition');
 const { restrictivePolicy } = require('./agentTemplate');
 const { DynamicNativeAgentAdapter } = require('./dynamicNativeAgentAdapter');
+const { getSkillRuntime } = require('../../skills/runtimeRegistry');
 
 const TERMINAL = new Set(['COMPLETED', 'FAILED', 'CANCELLED', 'TIMEOUT']);
+
+function skillError(code, message) {
+  const error = new Error(`${code}: ${message}`);
+  error.code = code;
+  return error;
+}
+
+function platformToolNames(options) {
+  const provided = typeof options.availableToolNames === 'function'
+    ? options.availableToolNames()
+    : options.availableToolNames;
+  if (Array.isArray(provided) && provided.length) return provided;
+  return require('../../tools/registry').listBuiltinDefs().map(def => def.name);
+}
 
 function limitError() {
   const error = new Error('DYNAMIC_AGENT_LIMIT_EXCEEDED: maximum dynamic instances for root run reached');
@@ -30,6 +45,47 @@ function createAgentFactory(options = {}) {
       merged.permissionPolicy = restrictivePolicy(merged.permissionPolicy, ceiling.permissionPolicy, true);
     }
     return normalizeAgentDefinition(merged, { id: definition.id, templateId: definition.templateId });
+  }
+
+  // v2.9.3 Skill Engine（R7）— 在实例创建时解析 Skill 并应用能力边界。
+  // 规则：
+  //   - required Skills 解析失败（SKILL_*）→ 拒绝创建实例（fail closed）
+  //   - optional Skills 解析失败 → 跳过，不影响实例
+  //   - Skill deniedTools 合并进定义 toolPolicy.deny（唯一强制点：adapter.getTool）
+  //   - Skill ModelRequirements 严格合并进 modelPolicy.requirements（R6）
+  //   - Skill Instructions 经 scopedTask.skillInstructions 进入 Prompt 组合（R5）
+  function applySkills(definition, context) {
+    const required = definition.skills.required || [];
+    const optional = definition.skills.optional || [];
+    if (!required.length && !optional.length) return { definition, skillInstructions: null };
+    const resolver = options.skillResolver || getSkillRuntime().resolver;
+    if (!resolver) {
+      if (required.length) throw skillError('SKILL_ENGINE_UNAVAILABLE', 'SkillResolver 未注入');
+      return { definition, skillInstructions: null };
+    }
+    const agentContext = {
+      toolPolicy: definition.toolPolicy,
+      permissionPolicy: definition.permissionPolicy,
+      availableTools: platformToolNames(options),
+      modelRequirements: definition.modelPolicy.requirements
+    };
+    const projectContext = context.projectContext || null;
+    const resolveSet = ids => resolver.resolve({ requestedSkillIds: ids, agentContext, projectContext });
+    const requiredResult = required.length ? resolveSet(required) : null;
+    if (requiredResult && !requiredResult.ok) {
+      throw skillError(requiredResult.errorCode, requiredResult.error);
+    }
+    const optionalResult = optional.length ? resolveSet(optional) : null;
+    if (!requiredResult && optionalResult && !optionalResult.ok) {
+      return { definition, skillInstructions: null };   // optional-only failure → skip
+    }
+    // required ok + optional failed → 只应用 required（错误技能绝不部分应用）
+    const applied = requiredResult && requiredResult.ok ? requiredResult : (optionalResult && optionalResult.ok ? optionalResult : null);
+    if (!applied) return { definition, skillInstructions: null };
+    const merged = JSON.parse(JSON.stringify(definition));
+    merged.toolPolicy.deny = [...new Set([...merged.toolPolicy.deny, ...applied.deniedTools])];
+    if (applied.modelRequirements) merged.modelPolicy.requirements = applied.modelRequirements;
+    return { definition: merged, skillInstructions: applied.instructions };
   }
 
   function resolveModel(definition, context) {
@@ -90,6 +146,8 @@ function createAgentFactory(options = {}) {
   function createInstance(input, context = {}) {
     let definition = normalizeAgentDefinition(input);
     definition = applyCeilings(definition, context);
+    const skillResult = applySkills(definition, context);
+    definition = skillResult.definition;
     const rootRunId = context.rootRunId || context.parentRunId || `standalone-${crypto.randomUUID()}`;
     if (activeForRoot(rootRunId) >= maxPerRoot) throw limitError();
 
@@ -135,6 +193,7 @@ function createAgentFactory(options = {}) {
       parentPermissionEngine: context.parentPermissionEngine || null,
       runMainAgentFn,
       emit: context.emit || options.emit,
+      skillInstructions: skillResult.skillInstructions,
       onState
     });
     instances.set(instanceId, instance);

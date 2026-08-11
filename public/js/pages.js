@@ -234,7 +234,7 @@ export async function open(page) {
   const body = $('#page-body');
   if (body) body.scrollTop = 0;
   $$('.topnav button').forEach(b => b.classList.toggle('active', b.dataset.page === page));
-  const title = { dashboard: '总览', connections: 'API 连接', agents: '智能体', mcp: 'MCP 服务器', diagnostics: '能力诊断', settings: '设置' }[page] || page;
+  const title = { dashboard: '总览', connections: 'API 连接', agents: '智能体', mcp: 'MCP 服务器', skills: 'Skills', diagnostics: '能力诊断', settings: '设置' }[page] || page;
   $('#page-title').textContent = title;
   body.innerHTML = '<div class="muted">加载中…</div>';
   try {
@@ -242,6 +242,7 @@ export async function open(page) {
     else if (page === 'connections') await renderConnections(body);
     else if (page === 'agents') await renderAgents(body);
     else if (page === 'mcp') await renderMcp(body);
+    else if (page === 'skills') await renderSkills(body);
     else if (page === 'diagnostics') await renderDiagnostics(body);
     else if (page === 'settings') await renderSettings(body);
   } catch (e) { body.innerHTML = `<div class="err">${esc(e.message)}</div>`; }
@@ -1845,6 +1846,96 @@ function mcpForm() {
       url: $('#m-url').value.trim()
     };
     try { await api.mcpCreate(payload); closeModal(); open('mcp'); } catch (e) { toast(e.message, 'error'); }
+  });
+}
+
+/* ------------------------------------------------------------------ */
+/* Skills (v2.9.3 Skill Engine — R2/R3/R6)                             */
+/* ------------------------------------------------------------------ */
+async function renderSkills(body) {
+  const list = await api.skillList();
+  body.innerHTML = `
+    <div class="page-actions"><button class="btn primary" id="skill-add">+ 新建 Skill</button>
+      <span class="muted">Skill 是可复用的能力包：只能要求工具/权限/模型能力，不能授予任何能力。启用/禁用与内容查看均实时生效。</span></div>
+    ${list.length ? `<table class="tbl"><thead><tr><th>ID</th><th>名称</th><th>描述</th><th>要求</th><th>状态</th><th></th></tr></thead><tbody>
+      ${list.map(s => `<tr>
+        <td class="mono small">${esc(s.id)}</td>
+        <td><b>${esc(s.name)}</b>${s.source === 'builtin' ? ' <span class="chip small">内置</span>' : ''}</td>
+        <td class="small">${esc(truncate(s.description || '', 80))}</td>
+        <td class="small">${[...(s.toolRequirements.required || []), ...(s.permissionRequirements.required || []).map(p => 'perm:' + p)].map(t => `<span class="tag">${esc(t)}</span>`).join('') || '<span class="muted">无硬要求</span>'}</td>
+        <td>${s.enabled ? '<span class="chip ok">启用</span>' : '<span class="chip">禁用</span>'}</td>
+        <td class="right">
+          <button class="btn tiny" data-view="${esc(s.id)}">查看</button>
+          ${s.enabled ? `<button class="btn tiny" data-disable="${esc(s.id)}">禁用</button>` : `<button class="btn tiny" data-enable="${esc(s.id)}">启用</button>`}
+          ${s.source === 'builtin' ? '' : `<button class="btn tiny danger" data-del="${esc(s.id)}">删除</button>`}
+        </td></tr>`).join('')}
+    </tbody></table>` : '<div class="empty">还没有 Skill，点击「+ 新建 Skill」创建。</div>'}`;
+
+  $('#skill-add').onclick = () => skillForm();
+  body.querySelectorAll('[data-view]').forEach(b => b.onclick = () => skillView(b.dataset.view));
+  body.querySelectorAll('[data-enable]').forEach(b => b.onclick = async () => { await api.skillEnable(b.dataset.enable); open('skills'); });
+  body.querySelectorAll('[data-disable]').forEach(b => b.onclick = async () => { await api.skillDisable(b.dataset.disable); open('skills'); });
+  body.querySelectorAll('[data-del]').forEach(b => b.onclick = async () => {
+    if (!await confirmBox('删除 Skill', `确定删除 Skill「${b.dataset.del}」？已引用的 Agent 将解析失败（fail closed）。`)) return;
+    try { await api.skillDelete(b.dataset.del); toast('已删除', 'ok'); open('skills'); } catch (e) { toast(e.message, 'error'); }
+  });
+}
+
+async function skillView(id) {
+  const s = await api.skillGet(id);
+  if (!s) { toast('Skill 不存在', 'error'); return; }
+  const req = s.toolRequirements || {};
+  const perm = s.permissionRequirements || {};
+  const model = s.modelRequirements || {};
+  const vision = model.required && model.required.vision;
+  openModal(`Skill: ${esc(s.id)}` + (s.enabled ? '' : '（已禁用）'), `
+    <div class="muted small">${esc(s.description || '')}</div>
+    <h4>Instructions</h4>
+    <pre class="skill-pre">${esc(s.instructions || '')}</pre>
+    <h4>工具要求</h4>
+    <div class="taglist">
+      ${(req.required || []).map(t => `<span class="tag">需 ${esc(t)}</span>`).join('')}
+      ${(req.optional || []).map(t => `<span class="tag muted">可选 ${esc(t)}</span>`).join('')}
+      ${(req.denied || []).map(t => `<span class="tag bad">禁 ${esc(t)}</span>`).join('')}
+    </div>
+    <h4>权限要求</h4>
+    <div class="taglist">${(perm.required || []).map(p => `<span class="tag">需 ${esc(p)}</span>`).join('') || '<span class="muted small">无</span>'}</div>
+    <h4>模型要求</h4>
+    <div class="muted small">${JSON.stringify(model) || '无'}</div>
+    ${vision ? '<div class="muted small">⚠ 要求 vision 模型：路由时强制淘汰纯文本模型（R6）。</div>' : ''}
+    <div class="muted small">依赖：${(s.requiresSkills || []).map(esc).join(', ') || '无'}</div>
+  `);
+}
+
+function skillForm() {
+  openModal('新建 Skill', `
+    <label>ID<input id="s-id" placeholder="my-skill"></label>
+    <label>名称<input id="s-name" placeholder="My Skill"></label>
+    <label>描述<input id="s-desc" placeholder="简短描述"></label>
+    <label>Instructions<textarea id="s-ins" rows="6" placeholder="专家指导文本，将注入 Agent 的 system prompt（位于 Safety Contract 之下）"></textarea></label>
+    <label>必需工具（逗号分隔）<input id="s-req" placeholder="read_file, search"></label>
+    <label>禁用工具（逗号分隔）<input id="s-den" placeholder="write_file, apply_patch"></label>
+    <label>必需权限（逗号分隔）<input id="s-perm" placeholder="filesystem.read"></label>
+  `, { okText: '创建' });
+  onModalOk(async () => {
+    const definition = {
+      id: $('#s-id').value.trim(),
+      name: $('#s-name').value.trim(),
+      description: $('#s-desc').value.trim(),
+      instructions: $('#s-ins').value,
+      tags: [],
+      toolRequirements: {
+        required: $('#s-req').value.trim() ? $('#s-req').value.trim().split(/\s*,\s*/) : [],
+        optional: [],
+        denied: $('#s-den').value.trim() ? $('#s-den').value.trim().split(/\s*,\s*/) : []
+      },
+      permissionRequirements: { required: $('#s-perm').value.trim() ? $('#s-perm').value.trim().split(/\s*,\s*/) : [] },
+      modelRequirements: {},
+      compatibility: { agentTypes: ['native'], platforms: ['windows'], projectSignals: [] },
+      metadata: {}
+    };
+    try { await api.skillCreate(definition); toast('已创建', 'ok'); closeModal(); open('skills'); }
+    catch (e) { toast(e.message, 'error'); }
   });
 }
 

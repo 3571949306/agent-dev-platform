@@ -104,6 +104,16 @@ CREATE TABLE IF NOT EXISTS agent_definitions (
   updated_at TEXT
 );
 
+-- v2.9.3: persistent SkillDefinition only. Runtime Skill Context stays in-memory.
+-- Legacy skills table (v2.0 prompt templates) is intentionally left untouched.
+CREATE TABLE IF NOT EXISTS skill_definitions (
+  id TEXT PRIMARY KEY,
+  definition_json TEXT NOT NULL,
+  enabled INTEGER DEFAULT 1,
+  created_at TEXT,
+  updated_at TEXT
+);
+
 CREATE TABLE IF NOT EXISTS agent_templates (
   id TEXT PRIMARY KEY,
   template_json TEXT NOT NULL,

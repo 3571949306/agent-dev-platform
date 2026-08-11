@@ -22,6 +22,9 @@ const DEFAULTS = Object.freeze({
   toolPolicy: Object.freeze({ allow: Object.freeze([]), deny: Object.freeze([]) }),
   permissionPolicy: Object.freeze({ readOnly: false, allow: Object.freeze([]), deny: Object.freeze([]) }),
   modelPolicy: Object.freeze({ mode: 'inherit_parent', connectionId: null, model: null, requirements: Object.freeze({}), fallback: 'fail' }),
+  // v2.9.3 Skill Engine（R7）— 引用可复用能力包。required 解析失败即拒绝创建；
+  // optional 失败仅跳过。Skill 不能授予 Agent 没有的能力（由 SkillResolver 强制）。
+  skills: Object.freeze({ required: Object.freeze([]), optional: Object.freeze([]) }),
   lifetime: 'run',
   budgets: Object.freeze({ maxIterations: 10, maxToolCalls: 30, maxRuntimeMs: 300000 }),
   canDelegate: false,
@@ -125,8 +128,10 @@ function normalizeAgentDefinition(input, options = {}) {
 
   const toolPolicy = Object.assign({}, DEFAULTS.toolPolicy, input.toolPolicy || {});
   const permissionPolicy = Object.assign({}, DEFAULTS.permissionPolicy, input.permissionPolicy || {});
+  const skillsInput = Object.assign({}, DEFAULTS.skills, input.skills || {});
   if (!isPlainObject(input.toolPolicy || {})) throw invalid('must be an object', 'definition.toolPolicy');
   if (!isPlainObject(input.permissionPolicy || {})) throw invalid('must be an object', 'definition.permissionPolicy');
+  if (!isPlainObject(input.skills || {})) throw invalid('must be an object', 'definition.skills');
   if (typeof permissionPolicy.readOnly !== 'boolean') throw invalid('must be boolean', 'definition.permissionPolicy.readOnly');
 
   const budgets = Object.assign({}, DEFAULTS.budgets, input.budgets || {});
@@ -150,6 +155,10 @@ function normalizeAgentDefinition(input, options = {}) {
       readOnly: permissionPolicy.readOnly,
       allow: stringArray(permissionPolicy.allow || [], 'definition.permissionPolicy.allow'),
       deny: stringArray(permissionPolicy.deny || [], 'definition.permissionPolicy.deny')
+    },
+    skills: {
+      required: stringArray(skillsInput.required || [], 'definition.skills.required'),
+      optional: stringArray(skillsInput.optional || [], 'definition.skills.optional')
     },
     modelPolicy: {
       mode: model.mode,

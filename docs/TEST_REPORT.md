@@ -1,4 +1,54 @@
-# Test Report — Agent Dev Platform（v2.9.2）
+# Test Report — Agent Dev Platform（v2.9.3）
+
+## v2.9.3 — Skill Engine（2026-08-11）
+
+Starting HEAD: `3eac6ba7e80b461b7618b76253bab0be4338ee9d` (v2.9.2 FROZEN). The starting worktree was clean; no pre-existing or unrelated local changes were present. All new/modified files belong to this release.
+
+| Requirement | Deterministic proof | Status |
+| --- | --- | --- |
+| R1 SkillDefinition Contract | Invalid schema, empty name, non-string instructions, invalid tool/permission/model requirements, self-contradictory require+deny, and secret-bearing definitions (apiKey/Authorization/Bearer/Cookie/password/accessToken/refreshToken/api_key) all rejected with `SKILL_DEFINITION_INVALID`; JSON round-trip serializable; alias expansion deterministic | VERIFIED |
+| R2 Registry / Persistence | CRUD + enable/disable over the real store; restart keeps definitions and enabled state; runtime objects (`activeSkillRuntime`/ModelAdapter/PermissionEngine) never persisted; built-ins seeded, immutable (`SKILL_BUILTIN`), toggleable | VERIFIED |
+| R3 SkillResolver | resolve ×100 identical; shuffled input ×100 identical; stable skillId order; transitive `requiresSkills` with cycle detection (`SKILL_DEPENDENCY_CYCLE`); unknown → `SKILL_UNKNOWN`; disabled → `SKILL_DISABLED` | VERIFIED |
+| R4 Tool / Permission Ceiling | Required tool unavailable / outside agent allow-list / in agent deny-list → `SKILL_REQUIRED_TOOL_UNAVAILABLE`; readOnly + mutation → `SKILL_REQUIRED_PERMISSION_UNAVAILABLE`; permission deny/allow-list/permissionCheck → same; Skill A deny + Skill B require → `SKILL_CONFLICT`; malicious instructions never bypass (contract order + PathSecurity/PermissionEngine still block in production) | VERIFIED |
+| R5 Prompt Composition | `SKILL_SECURITY_MARKER_7319` + `SKILL_SPRING_MARKER_4821` observed in real model `system`, stable order, Runtime Safety Contract preserved above skill section; Main and Dynamic variants | VERIFIED |
+| R6 Model Router Integration | OR booleans (vision), max context, allowed intersection, denied union, min price, price-basis conflict → `SKILL_MODEL_REQUIREMENTS_CONFLICT`; order-independent merge; skill can never loosen agent deny (openai stays denied) | VERIFIED |
+| R7 Runtime Integration | Main `skillIds`: markers observed, denied `write_file` filtered before reaching `getTool`, run completes; resolution failure fails the run fast with `SKILL_UNKNOWN`; Dynamic definition `skills` field: factory merges denied tools into the single `getTool` gate, merges vision into `modelPolicy.requirements`, required failure rejects creation | VERIFIED |
+| R8 Production Proof | Full chain below: registry → resolver → prompt → router → provider wire → child result; selected model == wire model; no independent Skill Run | VERIFIED |
+
+### R8 production chain
+
+```text
+Fake Main Model (production ModelRouter + ProviderModelAdapter + fake network provider)
+  → delegate Dynamic Reviewer
+  → inlineAgentDefinition references Skills [prod-security-review, prod-vision-review]
+  → production SkillRegistry (real store) → SkillResolver
+  → Tool/Permission validation
+  → Prompt Composition
+  → Model Requirements Merge (vision=true)
+  → production ModelRouter
+  → Vision model B
+  → production ProviderModelAdapter
+  → fake network provider
+  → Child complete → Parent consumes result
+```
+
+| Proof | Result |
+| --- | --- |
+| SkillDefinition loaded | YES |
+| Skill instructions observed by model (both markers) | YES |
+| Runtime Safety Contract still present | YES |
+| Skill denied write_file → write_file unavailable | YES |
+| Permission escalation blocked (read-only child, parent deny) | YES |
+| Skill model requirement vision merged | YES |
+| Router selected vision model B (text-only A/C/D/G eliminated) | YES |
+| Provider wire model == selected model (wire=B,B,B,B,B) | YES |
+| Child result consumed by parent context | YES |
+| Independent Skill Run created | NO (only parent + hub child + inner child runs) |
+| Paid provider calls | 0 (5 fake provider calls) |
+
+Serialized final gates: unit 1554/1554 pass/0 fail/1 skip (includes Skill 18/18); Dynamic 9/9; Dynamic production 1/1; Model Router 11/11; Model Router production 1/1; Skill 18/18; Skill production 1/1; E2E 65/65; Windows NSIS + portable dist PASS. Secret gate: skill definitions, IPC, route audit and tests never carry apiKey/Authorization/Bearer/Cookie/password values.
+
+Baseline at `3eac6ba7e80b461b7618b76253bab0be4338ee9d`, version `2.9.2`: unit 1536/1535 pass/0 fail/1 skip; Dynamic 9/9; Dynamic production 1/1; Model Router 11/11; Model Router production 1/1; E2E 65/65. Paid provider calls: 0.
 
 ## v2.9.2 — Model Router Framework（2026-08-11）
 

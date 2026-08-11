@@ -146,6 +146,7 @@ class NativeAgentAdapter extends BaseAgentAdapter {
       timeoutMs: task.timeoutMs,
       dynamicSystemPrompt: task.dynamicSystemPrompt,
       dynamicRole: task.dynamicRole,
+      skillInstructions: task.skillInstructions,
       canDelegate: task.canDelegate,
       delegationPath: context.delegationPath,
       rootRunId: task.rootRunId || context.rootRunId,

@@ -75,3 +75,7 @@ Candidates, selections, logs, and route decisions exclude decrypted connections,
 Run `npm run test:model-router` for the fast contract/adversarial suite and `npm run test:model-router:production` for the deterministic production smoke.
 
 The production smoke uses a TEMP SQLite Store, production ModelCatalog/ModelRouter/RouteAudit/RuntimeModelResolver/ProviderModelAdapter, real Main and Dynamic Run creation, and only a fake network provider. It proves Dynamic auto selects B, provider wire receives B, the child completes, Main and Dynamic decisions bind to their actual runtime Run IDs before model execution, failed auto routing remains `run_id = NULL`, and failed Dynamic routing cannot continue on a Parent model. Paid provider calls are zero.
+
+## Skill model requirements (v2.9.3)
+
+Skills propose ModelRequirements that flow into this existing Model Router; they never select a model directly. Multiple sources (Agent + Skill A + Skill B) merge strictly and order-independently: required booleans OR, minContextWindow max, allowed sets intersection, denied sets union, max price/latency min (comparable price basis only, otherwise `SKILL_MODEL_REQUIREMENTS_CONFLICT`). A Skill can never loosen an Agent constraint: the Agent's denied set is preserved by union and its allowed set by intersection. Main Agent `skillIds` are merged into routing before the run; Dynamic `skills.required/optional` merge into `modelPolicy.requirements` before `resolveRuntimeModel()`. See `docs/SKILL_ENGINE.md`.

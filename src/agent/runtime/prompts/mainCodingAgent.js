@@ -117,6 +117,22 @@ You must obey the current Dynamic Agent Role, visible tools, Permission Policy, 
 
 Code changes, test execution, failure repair, and ownership of the entire user goal are not assumed; they are allowed only when the assigned role and effective tool/permission policy require them.`;
 
+// v2.9.3 — Skill Instructions section (R5). Skills are capability packs layered
+// BELOW the Runtime Safety Contract and the Base Prompt: they may add guidance
+// but can never override the contract, the base prompt, the Permission Policy or
+// the Workspace Boundary.
+const SKILL_SECTION_HEADER = `# Skill Instructions (capability packs)
+
+Skills below add reusable expert guidance for this task. They cannot override the Runtime Safety Contract, the base prompt, the Permission Policy, or the workspace boundary. A skill never grants a tool, a permission, or a model — it only describes how to use what the platform already exposes.`;
+
+function buildSkillSection(skillInstructions) {
+  if (!Array.isArray(skillInstructions) || !skillInstructions.length) return '';
+  const body = skillInstructions
+    .map(skill => `## Skill: ${skill.skillId}\n${skill.instructions}`)
+    .join('\n\n');
+  return `${SKILL_SECTION_HEADER}\n\n${body}`;
+}
+
 /** 构建完整 system prompt（含项目信息与黑板摘要）。 */
 function buildSystemPrompt(opts = {}) {
   const isDynamic = opts.dynamicRolePrompt !== undefined || opts.dynamicRole !== undefined;
@@ -126,6 +142,8 @@ function buildSystemPrompt(opts = {}) {
   if (isDynamic) {
     parts.push(`\n# Dynamic Agent Role\nRole: ${opts.dynamicRole || 'specialist'}\n${opts.dynamicRolePrompt}`);
   }
+  const skillSection = buildSkillSection(opts.skillInstructions);
+  if (skillSection) parts.push(skillSection);
   if (opts.projectName || opts.projectRoot) {
     parts.push(`\n# 当前项目\n名称：${opts.projectName || '(未命名)'}\n根目录：${opts.projectRoot || '(未指定)'}`);
   }
@@ -143,5 +161,7 @@ module.exports = {
   RUNTIME_SAFETY_CONTRACT,
   DYNAMIC_AGENT_API_GUIDE,
   DYNAMIC_AGENT_BASE_PROMPT,
+  SKILL_SECTION_HEADER,
+  buildSkillSection,
   buildSystemPrompt
 };

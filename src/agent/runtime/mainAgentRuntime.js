@@ -94,6 +94,60 @@ function runMainAgent(opts) {
     delegationPath: Array.isArray(opts.delegationPath) ? opts.delegationPath.slice() : []
   };
 
+  // v2.9.3 Skill Engine（R7）— 在启动前解析 Skill（fail fast）。
+  // Skill 只能要求能力，不能授予能力：解析失败（SKILL_*）直接终止 Run，
+  // 而不是静默降级继续执行。deniedTools 通过包装 getTool 强制生效。
+  const { skillIds, skillInstructions: passthroughSkillInstructions } = opts;
+  const wantSkills = Array.isArray(skillIds) && skillIds.length > 0;
+  let skillResolution = null;
+  let effectiveGetTool = getTool;
+  if (wantSkills) {
+    try {
+      const { getSkillRuntime } = require('../../skills/runtimeRegistry');
+      const skillRegistry = opts.skillRegistry || getSkillRuntime().registry;
+      const skillResolver = opts.skillResolver || getSkillRuntime().resolver;
+      if (!skillRegistry || !skillResolver) {
+        const error = new Error('SKILL_ENGINE_UNAVAILABLE: SkillRegistry/SkillResolver 未注入');
+        error.code = 'SKILL_ENGINE_UNAVAILABLE';
+        throw error;
+      }
+      const availableToolNames = opts.availableToolNames || require('../../tools/registry').listBuiltinDefs().map(def => def.name);
+      const resolution = skillResolver.resolve({
+        requestedSkillIds: skillIds,
+        agentContext: {
+          toolPolicy: { allow: [], deny: [] },
+          permissionPolicy: { readOnly: false, allow: [], deny: [] },
+          permissionCheck: opts.permissionEngine
+            ? scope => opts.permissionEngine.evaluate(scope, {}) === 'allow'
+            : null,
+          availableTools: availableToolNames,
+          modelRequirements: opts.modelRequirements || {}
+        },
+        projectContext: { projectRoot, projectId }
+      });
+      if (!resolution.ok) {
+        const error = new Error(`${resolution.errorCode}: ${resolution.error}`);
+        error.code = resolution.errorCode;
+        throw error;
+      }
+      skillResolution = resolution;
+      const denied = new Set(resolution.deniedTools);
+      if (denied.size) {
+        effectiveGetTool = name => (denied.has(name) ? null : getTool(name));
+      }
+    } catch (error) {
+      // fail-closed：Skill 解析失败 → Run 直接失败，绝不静默继续
+      try { runManager.finishRun(runId, 'failed', { error: error.message, source: 'skillResolution' }); } catch { /* Late Result Guard */ }
+      emitTerminalEvent(emit, runId, { status: 'failed', error: error.message, errorCode: error.code });
+      throw error;
+    }
+  }
+
+  // 动态子 Agent 携带已解析的 Skill Instructions（agentFactory 在创建实例时解析并传入）
+  const skillInstructions = skillResolution
+    ? skillResolution.instructions
+    : (passthroughSkillInstructions || null);
+
   // v2.9.0 §9 — 创建 Orchestrator 并注册（打通 delegate → AgentHub 闭环）
   //   executeDelegate 优先用 ctx.orchestrator.delegate 走完整编排链。
   //   AgentHub 不可用（隔离单测）时 orchestrator=null，delegate 回退现有逻辑。
@@ -115,7 +169,7 @@ function runMainAgent(opts) {
         parentPermissionEngine: opts.permissionEngine || null,
         parentCanDelegate: opts.canDelegate !== false,
         parentPolicy: opts.parentPolicy || null,
-        getTool
+        getTool: effectiveGetTool
       });
       _orch.start(goal);
       register(runId, _orch);
@@ -166,6 +220,7 @@ function runMainAgent(opts) {
         projectRoot,
         dynamicRole: opts.dynamicRole,
         dynamicRolePrompt: opts.dynamicSystemPrompt,
+        skillInstructions,
         blackboardSummary: '',
         planSummary: ''
       });
@@ -176,7 +231,7 @@ function runMainAgent(opts) {
       }
 
       result = await runAgentLoop({
-        model, getTool, ctx, limits: lim, plan, blackboard,
+        model, getTool: effectiveGetTool, ctx, limits: lim, plan, blackboard,
         verification: verifyList, requiredFiles: requiredFiles || [],
         emit, runManager, runId, setState, systemPrompt,
         projectSummary: opts.projectSummary || '',

@@ -858,6 +858,45 @@ const agentTemplates = {
   remove(id) { return db().prepare('DELETE FROM agent_templates WHERE id=?').run(id).changes > 0; }
 };
 
+// ---------- v2.9.3 skill definitions (persistent SkillDefinition only) ----------
+// Runtime Skill Context (instructions/tool/permission/model requirements) is derived
+// at resolve time and never persisted; the stored record is the normalized definition.
+const skillDefinitions = {
+  create(input) {
+    const { normalizeSkillDefinition } = require('../skills/skillDefinition');
+    const definition = normalizeSkillDefinition(input);
+    const t = now();
+    db().prepare('INSERT INTO skill_definitions (id,definition_json,enabled,created_at,updated_at) VALUES (?,?,1,?,?)')
+      .run(definition.id, j(definition), t, t);
+    return skillDefinitions.get(definition.id);
+  },
+  get(id) {
+    const row = db().prepare('SELECT * FROM skill_definitions WHERE id=?').get(id);
+    return row ? { ...p(row.definition_json, null), enabled: row.enabled === 1, source: 'user' } : null;
+  },
+  list() {
+    return db().prepare('SELECT * FROM skill_definitions ORDER BY id').all()
+      .map(row => ({ ...p(row.definition_json, null), enabled: row.enabled === 1, source: 'user' })).filter(Boolean);
+  },
+  update(id, patch) {
+    const current = skillDefinitions.get(id);
+    if (!current) return null;
+    const { normalizeSkillDefinition } = require('../skills/skillDefinition');
+    const definition = normalizeSkillDefinition(Object.assign({}, current, patch || {}, { id }));
+    db().prepare('UPDATE skill_definitions SET definition_json=?,updated_at=? WHERE id=?')
+      .run(j(definition), now(), id);
+    return skillDefinitions.get(id);
+  },
+  remove(id) { return db().prepare('DELETE FROM skill_definitions WHERE id=?').run(id).changes > 0; },
+  setEnabled(id, enabled) {
+    const row = db().prepare('SELECT id FROM skill_definitions WHERE id=?').get(id);
+    if (!row) return null;
+    db().prepare('UPDATE skill_definitions SET enabled=?,updated_at=? WHERE id=?')
+      .run(enabled ? 1 : 0, now(), id);
+    return skillDefinitions.get(id);
+  }
+};
+
 // ---------- v1 JSON migration ----------
 function migrateFromJson(jsonPath) {
   if (!jsonPath || !require('fs').existsSync(jsonPath)) return false;
@@ -916,5 +955,6 @@ module.exports = {
   conversations, messages, events, tasks, runs, agentMessages, tools, mcpServers,
   memories, checkpoints, fileChanges, usage, modelCalls, permissionGrants, audit, permissionDecisions, settings, agentPrefs, extAgentConfigs,
   externalAgentSessions, externalAgentAuthStates, agentDefinitions, agentTemplates, modelRouteDecisions,
+  skillDefinitions,
   migrateFromJson
 };

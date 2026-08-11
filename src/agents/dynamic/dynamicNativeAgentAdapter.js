@@ -59,6 +59,8 @@ class DynamicNativeAgentAdapter extends NativeAgentAdapter {
     this._monitors = new Map();
     this._allowedTools = actualToolNames(definition.toolPolicy.allow);
     this._deniedTools = actualToolNames(definition.toolPolicy.deny);
+    // v2.9.3 Skill Engine（R7）— 已解析的 Skill Instructions（factory 注入，只读传递）
+    this.skillInstructions = options.skillInstructions || null;
   }
 
   getTool(name) {
@@ -102,6 +104,7 @@ class DynamicNativeAgentAdapter extends NativeAgentAdapter {
       dynamicSystemPrompt: this.definition.systemPrompt,
       dynamicRole: this.definition.role,
       canDelegate: this.definition.canDelegate === true,
+      skillInstructions: this.skillInstructions,
       rootRunId: this.rootRunId
     });
     this._onState('RUNNING');

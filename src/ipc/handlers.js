@@ -50,6 +50,8 @@ const { createDbSessionPersistence } = require('../agents/session/externalAgentS
 const { createProjectMutationLock } = require('../security/projectMutationLock');
 const { createAgentFactory } = require('../agents/dynamic/agentFactory');
 const { setDynamicAgentRuntime } = require('../agents/dynamic/runtimeRegistry');
+// v2.9.3 — Skill Engine（R1-R7）
+const { createSkillRegistry, createSkillResolver, BUILTIN_SKILLS, setSkillRuntime } = require('../skills');
 const { createProviderModelAdapter } = require('../agent/runtime/providerModelAdapter');
 const {
   createModelCatalog,
@@ -66,6 +68,14 @@ const dynamicTools = new Map();
 
 for (const [n, fn] of Object.entries(browser.execs)) dynamicTools.set(n, { def: browser.defs.find(d => d.name === n), exec: fn, permission: 'computer', source: 'browser' });
 for (const [n, fn] of Object.entries(computer.execs)) dynamicTools.set(n, { def: computer.defs.find(d => d.name === n), exec: fn, permission: 'computer', source: 'computer' });
+
+// v2.9.3 — 平台可用工具名（builtin + MCP + dynamic）。Skill 解析用它做 R4 可用性校验；
+// 必须是函数：mcpToolMap 在 register(window) 时才重建，调用时再求值。
+const platformToolNames = () => [
+  ...registry.listBuiltinDefs().map(def => def.name),
+  ...[...mcpToolMap.values()].map(m => m.def.name),
+  ...[...dynamicTools.values()].map(d => d.def.name)
+];
 
 let mainWindow = null;
 let currentProjectId = null;
@@ -144,6 +154,7 @@ const dynamicAgentFactory = createAgentFactory({
   emit,
   resolveRuntimeModel: runtimeModelResolver.resolveRuntimeModel,
   bindRouteDecisionToRun: routeAudit.bindRunIdentity,
+  availableToolNames: platformToolNames,
   resolveExplicitModel(modelPolicy) {
     const agent = {
       id: `dynamic-model-${modelPolicy.connectionId}`,
@@ -156,6 +167,12 @@ const dynamicAgentFactory = createAgentFactory({
   }
 });
 setDynamicAgentRuntime(dynamicAgentFactory, store.agentDefinitions);
+
+// v2.9.3 — Skill Engine 生产接线：持久化 Registry + 确定性 Resolver（0 provider calls）。
+// 与 Model Router 一样，Router 只看到公开元数据；Skill 永远不能授予能力。
+const skillRegistry = createSkillRegistry({ store: store.skillDefinitions, builtins: BUILTIN_SKILLS });
+const skillResolver = createSkillResolver({ registry: skillRegistry });
+setSkillRuntime(skillRegistry, skillResolver);
 
 // Register built-in adapters
 // v2.8.0 — 外部 Agent 会话落库后端（spec §110/§111）。DB 未就绪（隔离单测）时为 null → 纯内存。
@@ -583,7 +600,10 @@ function register(window) {
     bindRouteDecisionToRun: routeAudit.bindRunIdentity,
     activeRuns, requestPermission,
     getCurrentProject: () => currentProjectId ? store.projects.get(currentProjectId) : null,
-    getAgentFull, PermissionEngine
+    getAgentFull, PermissionEngine,
+    // v2.9.3 Skill Engine（R7）— Main Agent 支持 requestedSkillIds
+    skillRegistry, skillResolver,
+    availableToolNames: platformToolNames()
   });
 
   // projects
@@ -1231,6 +1251,49 @@ function register(window) {
     terminalAt: instance.terminalAt
   })));
   ipcMain.handle('dynamicAgent:instance:dispose', (e, instanceId) => dynamicAgentFactory.disposeInstance(instanceId));
+
+  // v2.9.3 — Skill Engine IPC（§5）。skill:resolve 是纯解析：0 provider calls。
+  // 只暴露公开元数据，绝不含 apiKey/Authorization/Bearer/Cookie/password/Provider/ModelAdapter。
+  const skillPublic = record => record ? ({
+    id: record.id,
+    name: record.name,
+    description: record.description,
+    instructions: record.instructions || '',
+    tags: record.tags || [],
+    enabled: record.enabled === true,
+    source: record.source || (record.metadata && record.metadata.source) || 'user',
+    toolRequirements: record.toolRequirements || { required: [], optional: [], denied: [] },
+    permissionRequirements: record.permissionRequirements || { required: [] },
+    modelRequirements: record.modelRequirements || {},
+    compatibility: record.compatibility || {},
+    requiresSkills: record.requiresSkills || [],
+    metadata: record.metadata || {},
+    updated_at: record.updated_at || null
+  }) : null;
+  ipcMain.handle('skill:list', () => skillRegistry.list().map(skillPublic));
+  ipcMain.handle('skill:get', (e, id) => skillPublic(skillRegistry.get(id)));
+  ipcMain.handle('skill:create', (e, definition) => skillPublic(skillRegistry.create(definition)));
+  ipcMain.handle('skill:update', (e, id, patch) => skillPublic(skillRegistry.update(id, patch)));
+  ipcMain.handle('skill:delete', (e, id) => skillRegistry.remove(id));
+  ipcMain.handle('skill:enable', (e, id) => skillPublic(skillRegistry.enable(id)));
+  ipcMain.handle('skill:disable', (e, id) => skillPublic(skillRegistry.disable(id)));
+  ipcMain.handle('skill:resolve', (e, { skillIds, agentContext, projectContext } = {}) => {
+    const result = skillResolver.resolve({ requestedSkillIds: skillIds || [], agentContext: agentContext || {}, projectContext: projectContext || null });
+    if (!result.ok) return { ok: false, error: result.error, errorCode: result.errorCode };
+    return {
+      ok: true,
+      skills: result.skills.map(skillPublic),
+      instructions: result.instructions,
+      requiredTools: result.requiredTools,
+      optionalTools: result.optionalTools,
+      deniedTools: result.deniedTools,
+      requiredPermissions: result.requiredPermissions,
+      modelRequirements: result.modelRequirements,
+      reasons: result.reasons
+    };
+  });
+  ipcMain.handle('skill:resolveModelMerge', (e, { skillIds, agentModelRequirements } = {}) =>
+    skillResolver.resolveModelMerge(skillIds || [], agentModelRequirements || {}));
 
   // v2.7.1 — Project Mutation Lock IPC
   ipcMain.handle('lock:isBusy', (e, projectRoot) => projectLock.isBusy(projectRoot));

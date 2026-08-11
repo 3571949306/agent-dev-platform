@@ -82,6 +82,16 @@ export const api = {
   promptRemove: (id) => call('prompts:remove', id),
   skills: () => call('skills:list'),
 
+  // v2.9.3 — Skill Engine（R2/R3）
+  skillList: () => call('skill:list'),
+  skillGet: (id) => call('skill:get', id),
+  skillCreate: (definition) => call('skill:create', definition),
+  skillUpdate: (id, patch) => call('skill:update', id, patch),
+  skillDelete: (id) => call('skill:delete', id),
+  skillEnable: (id) => call('skill:enable', id),
+  skillDisable: (id) => call('skill:disable', id),
+  skillResolve: (skillIds, agentContext, projectContext) => call('skill:resolve', { skillIds, agentContext, projectContext }),
+
   // agents
   agents: () => call('agents:list'),
   agentGet: (id) => call('agents:get', id),

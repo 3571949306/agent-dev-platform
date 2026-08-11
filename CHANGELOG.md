@@ -1,5 +1,18 @@
 # Changelog
 
+## v2.9.3 — Skill Engine
+
+- Added a strict, versioned, serializable `SkillDefinition` contract (`schemaVersion 1`) with credential/runtime-object rejection (`SKILL_DEFINITION_INVALID`), deterministic tool-name alias expansion, and Skill-level instructions that can never override the Runtime Safety Contract.
+- Added persistent `SkillRegistry` (`register/unregister/get/list/enable/disable` + CRUD) over a new `skill_definitions` table; runtime Skill Context is derived at resolve time and never persisted; a store restart keeps definitions and enabled state.
+- Added a deterministic `SkillResolver` (0 provider calls): stable skillId ordering, transitive `requiresSkills` with cycle detection, unknown/disabled fail-closed, and strict model-requirements merge (`SKILL_MODEL_REQUIREMENTS_CONFLICT` on incomparable hard limits).
+- Enforced the core invariant — a Skill can only REQUIRE capabilities, never GRANT them: required tools outside policy/availability fail with `SKILL_REQUIRED_TOOL_UNAVAILABLE`, unheld permissions fail with `SKILL_REQUIRED_PERMISSION_UNAVAILABLE`, and cross-skill deny/require conflicts fail with `SKILL_CONFLICT`. Skill denied tools are enforced through the existing single `getTool` gate; PermissionEngine/PathSecurity/ProjectMutationLock/Model Router remain the only authority.
+- Layered Skill Instructions into prompt composition below Runtime Safety Contract → Base Prompt → Agent Role → Task Context; R5 proof observes stable skill markers in the real model `system`.
+- Integrated the existing Model Router: Skill ModelRequirements merge strictly (OR booleans, max context, allowed intersection, denied union, min price); a Skill can never loosen an Agent constraint.
+- Integrated Main and Dynamic runtimes: `mainAgent:run` accepts `skillIds` (routing merge happens before the run, resolution failure fails the run fast); `AgentDefinition` gains `skills: { required, optional }` and `inlineAgentDefinition` may reference Skill IDs. No `SkillRun` — execution and Route Audit stay bound to existing Main/Dynamic runs.
+- Added three small built-in Skills (`readonly-code-review`, `test-analysis`, `security-review`) — framework proof, not a content library; built-ins are immutable but toggleable.
+- Added minimal `skill:*` IPC (list/get/create/update/delete/enable/disable/resolve/resolveModelMerge; resolve is 0 provider calls) and a minimal Skills GUI page (view, enable/disable, create/delete).
+- Added `npm run test:skill` (18 unit proofs incl. x100 determinism/shuffle and adversarial ceilings) and `npm run test:skill:production` (R8 production chain: registry → resolver → prompt → router → provider wire → child result, selected model == wire model, zero paid calls).
+- Added `docs/SKILL_ENGINE.md`; Skill remains distinct from Agent, Tool, Workflow, and Hook.
 ## v2.9.2 — Model Router Framework
 
 - Closed the final routing invariants without changing the framework pipeline: connection usability is separate from API-key/custom-header configuration, decisions bind to actual Main/Dynamic Run IDs, and prices are compared only after unit normalization on a compatible currency basis.

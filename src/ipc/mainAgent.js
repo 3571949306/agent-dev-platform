@@ -66,9 +66,9 @@ function bindMainRouteDecision({ selection, bindRouteDecisionToRun, runId, conve
  * }
  */
 function register(deps) {
-  const { store, emit, runManager, getTool, buildProvider, resolveModelFor, resolveRuntimeModel, bindRouteDecisionToRun, activeRuns, requestPermission, getCurrentProject, getAgentFull, PermissionEngine } = deps;
+  const { store, emit, runManager, getTool, buildProvider, resolveModelFor, resolveRuntimeModel, bindRouteDecisionToRun, activeRuns, requestPermission, getCurrentProject, getAgentFull, PermissionEngine, skillRegistry, skillResolver, availableToolNames } = deps;
 
-  reg('mainAgent:run', async ({ conversationId, agentId, goal, verification, requiredFiles, initialPlan, timeoutMs, useInjectedModel } = {}) => {
+  reg('mainAgent:run', async ({ conversationId, agentId, goal, verification, requiredFiles, initialPlan, timeoutMs, useInjectedModel, skillIds } = {}) => {
     if (!goal) throw new Error('goal 必填（用户目标）');
     const agent = getAgentFull ? getAgentFull(agentId) : null;
     const project = getCurrentProject ? getCurrentProject() : null;
@@ -76,13 +76,29 @@ function register(deps) {
     const projectId = project ? project.id : null;
     if (!projectRoot) throw new Error('未打开项目，Main Agent 无法执行本地编码');
 
+    // v2.9.3 Skill Engine（R6/R7）— Main Agent 支持 requestedSkillIds：
+    // 路由前把 Skill ModelRequirements 严格合并进 Agent 的模型要求（0 provider calls）；
+    // Skill 不能放宽 Agent 限制（合并语义只取更严格结果）。完整 R4 校验在 runMainAgent 内。
+    let effectiveAgent = agent;
+    if (Array.isArray(skillIds) && skillIds.length && agent && skillResolver) {
+      const merged = skillResolver.resolveModelMerge(skillIds, agent.modelRequirements || (agent.workspace && agent.workspace.modelRequirements) || {});
+      if (!merged.ok) throw new Error(`${merged.errorCode}: ${merged.error}`);
+      if (merged.modelRequirements) {
+        effectiveAgent = {
+          ...agent,
+          modelRequirements: merged.modelRequirements,
+          workspace: { ...(agent.workspace || {}), modelRequirements: merged.modelRequirements }
+        };
+      }
+    }
+
     // 选择 model：测试注入优先，否则用 ProviderModelAdapter
     let model;
     let modelSelection = null;
     if (useInjectedModel && injectedModel) {
       model = injectedModel;
-    } else if (agent) {
-      const resolution = resolveConfiguredMainModel({ agent, agentId, conversationId, resolveRuntimeModel, buildProvider, resolveModelFor });
+    } else if (effectiveAgent) {
+      const resolution = resolveConfiguredMainModel({ agent: effectiveAgent, agentId, conversationId, resolveRuntimeModel, buildProvider, resolveModelFor });
       model = resolution.modelAdapter;
       modelSelection = resolution.selection || null;
     } else {
@@ -98,6 +114,10 @@ function register(deps) {
       permissionEngine: pe,
       verification, requiredFiles, initialPlan,
       timeoutMs,
+      // v2.9.3 Skill Engine（R7）
+      skillIds: Array.isArray(skillIds) ? skillIds : undefined,
+      skillRegistry, skillResolver,
+      availableToolNames,
       onRunCreated: ({ runId: actualRunId }) => {
         bindMainRouteDecision({ selection: modelSelection, bindRouteDecisionToRun, runId: actualRunId, conversationId });
       },

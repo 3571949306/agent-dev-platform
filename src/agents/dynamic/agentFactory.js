@@ -5,6 +5,7 @@ const { normalizeAgentDefinition } = require('./agentDefinition');
 const { restrictivePolicy } = require('./agentTemplate');
 const { DynamicNativeAgentAdapter } = require('./dynamicNativeAgentAdapter');
 const { getSkillRuntime } = require('../../skills/runtimeRegistry');
+const { normalizePlatform } = require('../../skills/skillResolver');
 
 const TERMINAL = new Set(['COMPLETED', 'FAILED', 'CANCELLED', 'TIMEOUT']);
 
@@ -47,13 +48,16 @@ function createAgentFactory(options = {}) {
     return normalizeAgentDefinition(merged, { id: definition.id, templateId: definition.templateId });
   }
 
-  // v2.9.3 Skill Engine（R7）— 在实例创建时解析 Skill 并应用能力边界。
+  // v2.9.3 Skill Engine（R4/R7）— 在实例创建时解析 Skill 并应用能力边界。
   // 规则：
   //   - required Skills 解析失败（SKILL_*）→ 拒绝创建实例（fail closed）
   //   - optional Skills 解析失败 → 跳过，不影响实例
   //   - Skill deniedTools 合并进定义 toolPolicy.deny（唯一强制点：adapter.getTool）
   //   - Skill ModelRequirements 严格合并进 modelPolicy.requirements（R6）
   //   - Skill Instructions 经 scopedTask.skillInstructions 进入 Prompt 组合（R5）
+  //   - R4A: required + optional 合并为同一个最终集合，再次整体解析一次
+  //   - R4B: 把 Parent PermissionEngine 的真实授权状态作为 permissionCheck 传入
+  //          Resolver；父级 deny/ask 的必需权限 → createInstance 失败（fail fast）
   function applySkills(definition, context) {
     const required = definition.skills.required || [];
     const optional = definition.skills.optional || [];
@@ -67,25 +71,34 @@ function createAgentFactory(options = {}) {
       toolPolicy: definition.toolPolicy,
       permissionPolicy: definition.permissionPolicy,
       availableTools: platformToolNames(options),
-      modelRequirements: definition.modelPolicy.requirements
+      modelRequirements: definition.modelPolicy.requirements,
+      agentType: definition.agentType || 'native',
+      // R4B — Parent PermissionEngine 的真实授权状态：必需权限未被父级授予
+      // （deny / ask）→ 视为未持有，Factory 阶段即失败（fail fast），而非等到
+      // 真正 executeAction 才抛 PermissionDenied。
+      permissionCheck: context.parentPermissionEngine
+        ? scope => context.parentPermissionEngine.evaluate(scope, context) === 'allow'
+        : null
     };
-    const projectContext = context.projectContext || null;
-    const resolveSet = ids => resolver.resolve({ requestedSkillIds: ids, agentContext, projectContext });
-    const requiredResult = required.length ? resolveSet(required) : null;
-    if (requiredResult && !requiredResult.ok) {
-      throw skillError(requiredResult.errorCode, requiredResult.error);
+    const projectContext = {
+      platform: normalizePlatform(process.platform),
+      projectRoot: (context.projectContext && context.projectContext.projectRoot) || null,
+      projectId: (context.projectContext && context.projectContext.projectId) || null,
+      signals: (context.projectContext && context.projectContext.signals) || null
+    };
+    // R4A — required + optional 经单次 resolveWithOptions 合并为同一最终集合：
+    //   required 失败 → fail closed；optional 失败 → 跳过；最终集合整体再解析一次
+    //   （交叉 deny/require 冲突、模型合并、R3 兼容均重新校验）。
+    const result = resolver.resolveWithOptions
+      ? resolver.resolveWithOptions({ requiredSkillIds: required, optionalSkillIds: optional, agentContext, projectContext })
+      : resolver.resolve({ requestedSkillIds: [...required, ...optional], agentContext, projectContext });
+    if (!result.ok) {
+      throw skillError(result.errorCode, result.error);
     }
-    const optionalResult = optional.length ? resolveSet(optional) : null;
-    if (!requiredResult && optionalResult && !optionalResult.ok) {
-      return { definition, skillInstructions: null };   // optional-only failure → skip
-    }
-    // required ok + optional failed → 只应用 required（错误技能绝不部分应用）
-    const applied = requiredResult && requiredResult.ok ? requiredResult : (optionalResult && optionalResult.ok ? optionalResult : null);
-    if (!applied) return { definition, skillInstructions: null };
     const merged = JSON.parse(JSON.stringify(definition));
-    merged.toolPolicy.deny = [...new Set([...merged.toolPolicy.deny, ...applied.deniedTools])];
-    if (applied.modelRequirements) merged.modelPolicy.requirements = applied.modelRequirements;
-    return { definition: merged, skillInstructions: applied.instructions };
+    merged.toolPolicy.deny = [...new Set([...merged.toolPolicy.deny, ...result.deniedTools])];
+    if (result.modelRequirements) merged.modelPolicy.requirements = result.modelRequirements;
+    return { definition: merged, skillInstructions: result.instructions };
   }
 
   function resolveModel(definition, context) {

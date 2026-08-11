@@ -364,3 +364,266 @@ test('R8: production deterministic Skill chain — registry → resolver → pro
     fs.rmSync(fixtureRoot, { recursive: true, force: true });
   }
 });
+
+/* ------------------------------------------------------------------ */
+/* §7 — Production Skill Engine closure smoke (R1/R3/R4 adversarial)  */
+/* ------------------------------------------------------------------ */
+
+/** Shared production harness: real store + catalog + router + SkillRegistry +
+ *  SkillResolver + runtime model resolver + AgentFactory + AgentHub, all wired
+ *  exactly like the R8 chain. Used by the §7 adversarial closure tests. */
+function buildSkillHarness({ skills = [], grantWrite = 'allow' } = {}) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'adp-s7-'));
+  const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'adp-s7-fix-'));
+  const projectRoot = path.join(fixtureRoot, 'project');
+  fs.mkdirSync(projectRoot, { recursive: true });
+
+  const previousHub = getAgentHub();
+  const previousDynamic = getDynamicAgentRuntime();
+  const previousSkill = getSkillRuntime();
+
+  store.init(root);
+  const r1 = addConnection('RemoteOne', 'custom', ['A', 'B']);
+  const r2 = addConnection('RemoteTwo', 'custom', ['D', 'G']);
+  const local = addConnection('Local', 'local', ['C']);
+  const put = (conn, id, caps) => store.models.upsert(conn.id, id, caps);
+  put(r1, 'A', { text: cap(true), vision: cap(false), contextWindow: metric(32000), pricing: { input: metric(0.1), output: metric(0.2), currency: 'USD', unit: 'per_1m_tokens', source: 'fixture' }, latencyMs: 100 });
+  put(r1, 'B', { text: cap(true), vision: cap(true), contextWindow: metric(128000), pricing: { input: metric(2), output: metric(4), currency: 'USD', unit: 'per_1m_tokens', source: 'fixture' }, latencyMs: 250 });
+  put(local, 'C', { text: cap(true), vision: cap(null, 'unknown'), contextWindow: metric(64000), pricing: {}, latencyMs: 40 });
+  put(r2, 'D', { text: cap(true), vision: cap(true, 'inferred'), contextWindow: cap(null, 'unknown'), pricing: { input: metric(0.1), output: metric(0.2), currency: 'USD', unit: 'per_1m_tokens' } });
+  put(r2, 'G', { text: cap(true), vision: cap(false), contextWindow: metric(16000) });
+
+  const catalog = createModelCatalog({ store });
+  const audit = createRouteAudit(store.modelRouteDecisions);
+  const router = createModelRouter({ catalog, audit });
+
+  const skillRegistry = createSkillRegistry({ store: store.skillDefinitions, builtins: [] });
+  for (const s of skills) skillRegistry.create(s);
+  const skillResolver = createSkillResolver({ registry: skillRegistry });
+  setSkillRuntime(skillRegistry, skillResolver);
+
+  const wireModels = [];
+  let providerCalls = 0;
+  const provider = {
+    async streamResponse(input) {
+      providerCalls++;
+      wireModels.push(input.model);
+      const text = JSON.stringify({ action: { type: 'complete', args: { summary: 'harness complete' } } });
+      input.onChunk(text);
+      return { content: text };
+    }
+  };
+
+  const resolver = createRuntimeModelResolver({
+    router,
+    audit,
+    createModelAdapter(selection) {
+      const agent = { id: `s7-${selection.selected.modelId}`, api_connection_id: selection.selected.connectionId, model: selection.selected.modelId, max_tokens: 256 };
+      return createProviderModelAdapter({
+        buildProvider: async () => provider,
+        agent,
+        resolveModel: configured => ({ model: configured.model, connectionId: configured.api_connection_id })
+      });
+    }
+  });
+
+  const parentPermissionEngine = new PermissionEngine({ projectId: 's7-project' });
+  parentPermissionEngine.grant('filesystem.read', 'always', { persist: false });
+  parentPermissionEngine.grant('filesystem.write', grantWrite, { persist: false });
+
+  const runManager = new RunManager();
+  const registry = createAgentRegistry();
+  const lifecycle = createLifecycleManager();
+  const contextFactory = createExecutionContextFactory({
+    runManager,
+    getTool: getBuiltin,
+    store,
+    permissionEngine: parentPermissionEngine,
+    pathSecurity: createPathSecurity({ cacheRoots: true })
+  });
+  const hub = createAgentHub({
+    registry,
+    router: createAgentRouter({ registry }),
+    healthManager: createHealthManager({ registry }),
+    lifecycleManager: lifecycle,
+    runBridge: createRunBridge({ runManager, lifecycleManager: lifecycle }),
+    contextFactory
+  });
+  const factory = createAgentFactory({
+    getTool: getBuiltin,
+    resolveRuntimeModel: resolver.resolveRuntimeModel,
+    bindRouteDecisionToRun: audit.bindRunIdentity,
+    skillResolver
+  });
+  setAgentHub(hub);
+  setDynamicAgentRuntime(factory, null);
+
+  return {
+    root, fixtureRoot, projectRoot,
+    store, catalog, audit, router, skillRegistry, skillResolver,
+    provider, wireModels, getProviderCalls: () => providerCalls,
+    resolver, parentPermissionEngine, runManager, hub, factory,
+    cleanup() {
+      setAgentHub(previousHub);
+      setDynamicAgentRuntime(previousDynamic.factory, previousDynamic.definitionStore);
+      setSkillRuntime(previousSkill.registry, previousSkill.resolver);
+      try { store.getDb().close(); } catch { /* best effort */ }
+      fs.rmSync(root, { recursive: true, force: true });
+      fs.rmSync(fixtureRoot, { recursive: true, force: true });
+    }
+  };
+}
+
+test('§7a: production — disjoint agent/skill allowed-set fails closed with ZERO provider calls', async () => {
+  const conflictSkill = {
+    id: 'prod-conflict-prov', name: 'Conflict Provider',
+    instructions: 'CONFLICT_PROV_MARKER', tags: ['security'],
+    toolRequirements: { required: ['read_file'], optional: [], denied: [] },
+    permissionRequirements: { required: [] },
+    modelRequirements: { constraints: { allowedProviders: ['anthropic'] } },
+    compatibility: { agentTypes: ['native'], platforms: ['windows'], projectSignals: [] },
+    metadata: {}
+  };
+  const h = buildSkillHarness({ skills: [conflictSkill] });
+  try {
+    // (1) IPC pre-check path: agent(openai) ∩ skill(anthropic) must fail closed
+    const merged = h.skillResolver.resolveModelMerge(['prod-conflict-prov'], { constraints: { allowedProviders: ['openai'] } });
+    assert.strictEqual(merged.ok, false, 'merge must fail closed on disjoint allow-lists');
+    assert.strictEqual(merged.errorCode, 'SKILL_MODEL_REQUIREMENTS_CONFLICT');
+    assert.strictEqual(h.getProviderCalls(), 0, 'no provider call during pre-routing merge');
+
+    // (2) full run path: runMainAgent must reject BEFORE any provider call
+    const mainResolution = resolveConfiguredMainModel({
+      agent: { id: 's7a-main', workspace: { modelRoutingMode: 'auto', modelRequirements: {} } },
+      agentId: 's7a-main', conversationId: 's7a-conv',
+      resolveRuntimeModel: h.resolver.resolveRuntimeModel,
+      buildProvider: async () => h.provider,
+      resolveModelFor: c => ({ model: c.model })
+    });
+    assert.strictEqual(h.getProviderCalls(), 0, 'main model resolution does not call provider');
+
+    let threw = null;
+    try {
+      await runMainAgent({
+        conversationId: 's7a-conv', agentId: 's7a-main', goal: 'run conflicting skill',
+        projectRoot: h.projectRoot, projectId: 's7a-project', projectName: 's7a-fix',
+        model: mainResolution.modelAdapter,
+        getTool: getBuiltin, store: h.store, emit: () => {}, runManager: h.runManager,
+        permissionEngine: h.parentPermissionEngine,
+        timeoutMs: 8000,
+        skillIds: ['prod-conflict-prov'],
+        skillRegistry: h.skillRegistry, skillResolver: h.skillResolver,
+        modelRequirements: { constraints: { allowedProviders: ['openai'] } },
+        onRunCreated: ({ runId }) => bindMainRouteDecision({ selection: mainResolution.selection, bindRouteDecisionToRun: h.audit.bindRunIdentity, runId, conversationId: 's7a-conv' })
+      });
+    } catch (err) { threw = err; }
+    assert.ok(threw, 'runMainAgent must reject on conflicting allowed-set');
+    assert.strictEqual(threw.code, 'SKILL_MODEL_REQUIREMENTS_CONFLICT', `expected conflict code, got ${threw && threw.code}: ${threw && threw.message}`);
+    assert.strictEqual(h.getProviderCalls(), 0, 'provider NEVER called in fail-closed path (0 wire calls)');
+    assert.strictEqual(h.wireModels.length, 0, '0 wire models reached the provider');
+    console.log(`S7A ok=${merged.ok} code=${merged.errorCode} providerCalls=${h.getProviderCalls()}`);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('§7b: production — required + optional vision skills both reach routing (optional never dropped)', () => {
+  const reqVision = {
+    id: 'prod-req-vision', name: 'Req Vision', instructions: 'REQ_VISION_MARKER', tags: ['vision'],
+    toolRequirements: { required: ['read_file'], optional: [], denied: [] },
+    permissionRequirements: { required: [] },
+    modelRequirements: { required: { vision: true } },
+    compatibility: { agentTypes: ['native'], platforms: ['windows'], projectSignals: [] },
+    metadata: {}
+  };
+  const optVision = {
+    id: 'prod-opt-vision', name: 'Opt Vision', instructions: 'OPT_VISION_MARKER', tags: ['vision'],
+    toolRequirements: { required: ['read_file'], optional: [], denied: [] },
+    permissionRequirements: { required: [] },
+    modelRequirements: { required: { vision: true } },
+    compatibility: { agentTypes: ['native'], platforms: ['windows'], projectSignals: [] },
+    metadata: {}
+  };
+  const h = buildSkillHarness({ skills: [reqVision, optVision] });
+  try {
+    // (1) resolver-level: both present in final set, optional not skipped, vision merged
+    const res = h.skillResolver.resolveWithOptions({
+      requiredSkillIds: ['prod-req-vision'], optionalSkillIds: ['prod-opt-vision'],
+      agentContext: { toolPolicy: { allow: ['read_file'], deny: [] }, permissionPolicy: { readOnly: false, allow: [], deny: [] }, availableTools: ['read_file'], agentType: 'native' },
+      projectContext: { platform: 'windows' }
+    });
+    assert.strictEqual(res.ok, true, 'required + compatible optional resolve OK');
+    assert.strictEqual(res.skipped.length, 0, 'compatible optional must NOT be skipped');
+    assert.deepStrictEqual(res.instructions.map(i => i.skillId).sort(), ['prod-opt-vision', 'prod-req-vision'], 'BOTH required and optional skills in final set');
+    assert.strictEqual(res.modelRequirements.required.vision, true, 'vision requirement merged into modelRequirements');
+
+    // (2) routing-level: Main Agent with merged requirements routes to vision model B
+    const mainResolution = resolveConfiguredMainModel({
+      agent: { id: 's7b-main', workspace: { modelRoutingMode: 'auto', modelRequirements: res.modelRequirements } },
+      agentId: 's7b-main', conversationId: 's7b-conv',
+      resolveRuntimeModel: h.resolver.resolveRuntimeModel,
+      buildProvider: async () => h.provider,
+      resolveModelFor: c => ({ model: c.model })
+    });
+    assert.strictEqual(mainResolution.selection.selected.modelId, 'B', 'required+optional vision routes to vision model B');
+
+    // (3) factory-level: child instance carries BOTH markers and is routed to B
+    const def = {
+      id: 's7b-child', name: 'S7B Child', role: 'code_reviewer', runtime: { kind: 'native' }, capabilities: ['review'],
+      toolPolicy: { allow: ['read_file'], deny: [] }, permissionPolicy: { readOnly: true, allow: ['filesystem.read'], deny: [] },
+      modelPolicy: { mode: 'auto', requirements: { required: { text: true } }, fallback: 'fail' },
+      skills: { required: ['prod-req-vision'], optional: ['prod-opt-vision'] },
+      lifetime: 'run', budgets: { maxIterations: 5, maxToolCalls: 5, maxRuntimeMs: 5000 }, canDelegate: false
+    };
+    const child = h.factory.createInstance(def, {
+      parentPermissionEngine: h.parentPermissionEngine,
+      projectContext: { projectRoot: h.projectRoot, projectId: 's7b-project' },
+      getTool: getBuiltin
+    });
+    assert.ok(child, 'child instance created');
+    const childMarkers = child.adapter.skillInstructions.map(i => i.instructions).join(' ');
+    assert.ok(childMarkers.includes('REQ_VISION_MARKER') && childMarkers.includes('OPT_VISION_MARKER'), 'child carries BOTH required and optional skill instructions');
+    assert.strictEqual(child.modelSelection.selected.modelId, 'B', 'child routed to vision model B via combined skill requirements');
+    assert.strictEqual(h.factory.listInstances().length, 1, 'exactly one instance created');
+    console.log(`S7B markers=${child.adapter.skillInstructions.map(i => i.skillId).join('+')} route=${child.modelSelection.selected.modelId}`);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('§7c: production — required skill needing parent-denied permission fails at factory (0 provider/tool calls)', () => {
+  const writeSkill = {
+    id: 'prod-write-skill', name: 'Write Skill', instructions: 'WRITE_SKILL_MARKER', tags: ['write'],
+    toolRequirements: { required: ['write_file'], optional: [], denied: [] },
+    permissionRequirements: { required: ['filesystem.write'] },
+    modelRequirements: { required: { text: true } },
+    compatibility: { agentTypes: ['native'], platforms: ['windows'], projectSignals: [] },
+    metadata: {}
+  };
+  const h = buildSkillHarness({ skills: [writeSkill], grantWrite: 'deny' });
+  try {
+    const def = {
+      id: 's7c-child', name: 'S7C Child', role: 'writer', runtime: { kind: 'native' }, capabilities: ['write'],
+      toolPolicy: { allow: ['read_file', 'write_file'], deny: [] }, permissionPolicy: { readOnly: false, allow: ['filesystem.write'], deny: [] },
+      modelPolicy: { mode: 'auto', requirements: { required: { text: true } }, fallback: 'fail' },
+      skills: { required: ['prod-write-skill'], optional: [] },
+      lifetime: 'run', budgets: { maxIterations: 5, maxToolCalls: 5, maxRuntimeMs: 5000 }, canDelegate: false
+    };
+    let threw = null;
+    try {
+      h.factory.createInstance(def, {
+        parentPermissionEngine: h.parentPermissionEngine,
+        projectContext: { projectRoot: h.projectRoot, projectId: 's7c-project' },
+        getTool: getBuiltin
+      });
+    } catch (err) { threw = err; }
+    assert.ok(threw, 'factory must reject when required permission is denied by parent');
+    assert.strictEqual(threw.code, 'SKILL_REQUIRED_PERMISSION_UNAVAILABLE', `expected permission-unavailable, got ${threw && threw.code}: ${threw && threw.message}`);
+    assert.strictEqual(h.factory.listInstances().length, 0, 'no instance leaked on fail-closed');
+    assert.strictEqual(h.getProviderCalls(), 0, 'provider never called on fail-closed factory path');
+    assert.strictEqual(h.wireModels.length, 0, '0 wire models');
+    console.log(`S7C error=${threw.code} providerCalls=${h.getProviderCalls()}`);
+  } finally {
+    h.cleanup();
+  }
+});

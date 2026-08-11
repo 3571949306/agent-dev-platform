@@ -8,10 +8,17 @@
  * Multiple sources (Agent + Skill A + Skill B) merge safely and strictly:
  *   - hard required booleans:  OR        (stricter: any source needs it → needed)
  *   - minContextWindow:        max
- *   - allowed sets:            intersection (empty = unrestricted; disjoint → no candidate, fail closed)
+ *   - allowed sets:            intersection of NON-EMPTY allow-lists; an empty allow-set
+ *                              means UNRESTRICTED (does NOT further restrict). Two NON-EMPTY
+ *                              allow-lists whose intersection is empty → SKILL_MODEL_REQUIREMENTS_CONFLICT
+ *                              (NEVER collapses to [] which the router treats as unrestricted —
+ *                              that would be a constraint-reversal fail-open).
  *   - denied sets:             union
- *   - max price / latency:     min (stricter); comparable price basis only,
- *                              otherwise SKILL_MODEL_REQUIREMENTS_CONFLICT
+ *   - max price / latency:     min (stricter); ALL active hard price constraints
+ *                              (maxInputPrice AND maxOutputPrice, across every source) must share
+ *                              ONE canonical price basis (currency + unit): cross-field or
+ *                              cross-source currency mismatch → SKILL_MODEL_REQUIREMENTS_CONFLICT;
+ *                              unknown basis → fail closed.
  *   - preferences:             strongest wins, never loosens hard constraints
  *
  * A Skill can never relax an Agent constraint: the Agent's denied set is always
@@ -70,27 +77,47 @@ function mergeInto(acc, next, path = 'skill') {
 
   const c = acc.constraints;
   const nc = next.constraints;
+  // R1 — allowed sets: intersection of NON-EMPTY allow-lists only.
+  //   - one side empty (UNRESTRICTED) → keep the other (does not further restrict);
+  //   - both non-empty → intersect; EMPTY intersection is a hard conflict and is
+  //     NEVER collapsed to [] (the router would treat [] as "unrestricted").
   for (const key of ['allowedConnectionIds', 'allowedProviders', 'allowedModels']) {
-    if (!c[key].length) c[key] = [...nc[key]].sort();
-    else if (nc[key].length) c[key] = c[key].filter(item => nc[key].includes(item)).sort();
+    const next = nc[key];
+    if (!next.length) continue; // this source is unrestricted on this axis → keep current
+    if (!c[key].length) {
+      // first non-empty restrictor seeds the accumulator (narrows from unrestricted)
+      c[key] = [...next].sort();
+    } else {
+      const intersection = c[key].filter(item => next.includes(item));
+      if (!intersection.length) {
+        throw conflict(`allowed set '${key}' has empty intersection (incompatible allow-lists): ${c[key].join(',')} ∩ ${next.join(',')}`, path);
+      }
+      c[key] = intersection.sort();
+    }
   }
   for (const key of ['deniedConnectionIds', 'deniedProviders', 'deniedModels']) {
     c[key] = [...new Set([...c[key], ...nc[key]])].sort();
   }
 
+  // R2 — hard price constraints: every active hard price (maxInputPrice OR maxOutputPrice)
+  // must belong to a single canonical price basis (currency + unit). Cross-field and
+  // cross-source mismatches are a conflict; an undefined basis is fail-closed. The last
+  // source never silently overrides the established basis.
   for (const key of ['maxInputPrice', 'maxOutputPrice']) {
-    const a = c[key];
     const b = nc[key];
-    if (a === null) {
-      c[key] = b;
-      if (b !== null && !c.priceBasis) c.priceBasis = nc.priceBasis ? { ...nc.priceBasis } : null;
-    } else if (b !== null) {
-      if (c.priceBasis && nc.priceBasis && c.priceBasis.currency !== nc.priceBasis.currency) {
-        throw conflict(`price basis mismatch on ${key}: ${c.priceBasis.currency} vs ${nc.priceBasis.currency}`, path);
-      }
-      c[key] = Math.min(a, b);
-      if (!c.priceBasis && nc.priceBasis) c.priceBasis = { ...nc.priceBasis };
+    if (b === null) continue; // this source does not constrain this price field
+    if (!nc.priceBasis) {
+      throw conflict(`hard price constraint '${key}' has no price basis (unknown basis → fail closed)`, path);
     }
+    if (c.priceBasis) {
+      if (c.priceBasis.currency !== nc.priceBasis.currency || c.priceBasis.unit !== nc.priceBasis.unit) {
+        throw conflict(`price basis mismatch on '${key}': ${c.priceBasis.currency}/${c.priceBasis.unit} vs ${nc.priceBasis.currency}/${nc.priceBasis.unit}`, path);
+      }
+    } else {
+      // adopt the first established canonical basis; later sources must be compatible
+      c.priceBasis = { ...nc.priceBasis };
+    }
+    c[key] = (c[key] === null) ? b : Math.min(c[key], b);
   }
   if (nc.maxLatencyMs !== null) {
     c.maxLatencyMs = c.maxLatencyMs === null ? nc.maxLatencyMs : Math.min(c.maxLatencyMs, nc.maxLatencyMs);

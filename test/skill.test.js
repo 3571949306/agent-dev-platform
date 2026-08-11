@@ -633,6 +633,320 @@ test('R7: Main Agent skill resolution failure fails the run with the SKILL code 
   }
 });
 
+/* ------------------------------------------------------------------ */
+/* R1 (closure) — Allowed-set empty intersection must fail-closed       */
+/* ------------------------------------------------------------------ */
+test('R1: Skill allowed-set disjoint intersection fails closed (provider/model/connection)', () => {
+  const conflictCode = e => e.code === 'SKILL_MODEL_REQUIREMENTS_CONFLICT';
+  // provider disjoint
+  assert.throws(() => mergeModelRequirements(
+    { constraints: { allowedProviders: ['openai'] } },
+    { constraints: { allowedProviders: ['anthropic'] } }
+  ), conflictCode);
+  // model disjoint
+  assert.throws(() => mergeModelRequirements(
+    { constraints: { allowedModels: ['A'] } },
+    { constraints: { allowedModels: ['B'] } }
+  ), conflictCode);
+  // connection disjoint
+  assert.throws(() => mergeModelRequirements(
+    { constraints: { allowedConnectionIds: ['conn-A'] } },
+    { constraints: { allowedConnectionIds: ['conn-B'] } }
+  ), conflictCode);
+  // empty intersection MUST NOT become unrestricted ([] would be treated as unrestricted by the router)
+  assert.throws(() => mergeModelRequirements(
+    { constraints: { allowedProviders: ['openai'] } },
+    { constraints: { allowedProviders: ['anthropic'] } }
+  ), conflictCode, 'merge must throw, never return empty (unrestricted)');
+  // multi-source legal intersection: [A,B,C] ∩ [B,C] ∩ [C,D] = [C]
+  const legal = mergeModelRequirements(
+    { constraints: { allowedProviders: ['A', 'B', 'C'] } },
+    { constraints: { allowedProviders: ['B', 'C'] } },
+    { constraints: { allowedProviders: ['C', 'D'] } }
+  );
+  assert.deepStrictEqual(legal.constraints.allowedProviders, ['C']);
+});
+
+test('R1: resolver fails closed when agent and skill allow-lists are disjoint', () => {
+  const skill = fixtureSkill({ id: 'prov-skill', modelRequirements: { constraints: { allowedProviders: ['anthropic'] } } });
+  const resolver = createSkillResolver({ registry: memoryRegistry([skill]) });
+  const res = resolver.resolve({
+    requestedSkillIds: ['prov-skill'],
+    agentContext: { availableTools: AVAILABLE, modelRequirements: { constraints: { allowedProviders: ['openai'] } } }
+  });
+  assert.strictEqual(res.ok, false);
+  assert.strictEqual(res.errorCode, 'SKILL_MODEL_REQUIREMENTS_CONFLICT');
+});
+
+test('R1: allowed-set merge is order-independent (shuffle x100 identical); disjoint still fails', () => {
+  const sources = [
+    { constraints: { allowedProviders: ['A', 'B', 'C'] } },
+    { constraints: { allowedProviders: ['B', 'C'] } },
+    { constraints: { allowedProviders: ['C', 'D'] } }
+  ];
+  const base = mergeModelRequirements(...sources);
+  function shuffle(arr, seed) {
+    const a = [...arr];
+    let s = seed >>> 0;
+    for (let i = a.length - 1; i > 0; i--) {
+      s = (s * 1103515245 + 12345) & 0x7fffffff;
+      const j = s % (i + 1);
+      [a[i], a[j]] = [a[j], a[i]];
+    }
+    return a;
+  }
+  for (let i = 0; i < 100; i++) {
+    assert.deepStrictEqual(mergeModelRequirements(...shuffle(sources, i + 1)), base, `shuffle ${i} mismatch`);
+  }
+  // disjoint in any order still throws
+  const disjoint = [
+    { constraints: { allowedModels: ['X'] } },
+    { constraints: { allowedModels: ['Y'] } }
+  ];
+  for (let i = 0; i < 10; i++) {
+    assert.throws(() => mergeModelRequirements(...shuffle(disjoint, i + 1)), e => e.code === 'SKILL_MODEL_REQUIREMENTS_CONFLICT');
+  }
+});
+
+/* ------------------------------------------------------------------ */
+/* R2 (closure) — Pricing basis merge integrity                         */
+/* ------------------------------------------------------------------ */
+test('R2: cross-field price basis mismatch fails closed; same-basis & unit-normalization pass', () => {
+  const conflictCode = e => e.code === 'SKILL_MODEL_REQUIREMENTS_CONFLICT';
+  // cross-field USD input + CNY output → conflict (must NOT merge under one currency)
+  assert.throws(() => mergeModelRequirements(
+    { constraints: { maxInputPrice: 5, priceBasis: { currency: 'USD', unit: 'per_1m_tokens' } } },
+    { constraints: { maxOutputPrice: 10, priceBasis: { currency: 'CNY', unit: 'per_1m_tokens' } } }
+  ), conflictCode);
+  // same basis, two different fields → PASS, basis preserved
+  const same = mergeModelRequirements(
+    { constraints: { maxInputPrice: 5, priceBasis: { currency: 'USD', unit: 'per_1m_tokens' } } },
+    { constraints: { maxOutputPrice: 10, priceBasis: { currency: 'USD', unit: 'per_1m_tokens' } } }
+  );
+  assert.strictEqual(same.constraints.maxInputPrice, 5);
+  assert.strictEqual(same.constraints.maxOutputPrice, 10);
+  assert.strictEqual(same.constraints.priceBasis.currency, 'USD');
+  // per_1K + per_1M same currency → canonical conversion PASS (both normalized to per_1m)
+  const norm = mergeModelRequirements(
+    { constraints: { maxInputPrice: 0.005, priceBasis: { currency: 'USD', unit: 'per_1k_tokens' } } },
+    { constraints: { maxOutputPrice: 10, priceBasis: { currency: 'USD', unit: 'per_1m_tokens' } } }
+  );
+  assert.strictEqual(norm.constraints.maxInputPrice, 5, '0.005/1k == 5/1m');
+  assert.strictEqual(norm.constraints.maxOutputPrice, 10);
+  assert.strictEqual(norm.constraints.priceBasis.unit, 'per_1m_tokens');
+  // tighter hard limit wins
+  const tight = mergeModelRequirements(
+    { constraints: { maxInputPrice: 5, priceBasis: { currency: 'USD', unit: 'per_1m_tokens' } } },
+    { constraints: { maxInputPrice: 2, priceBasis: { currency: 'USD', unit: 'per_1m_tokens' } } }
+  );
+  assert.strictEqual(tight.constraints.maxInputPrice, 2);
+  // unknown price basis (hard price, no basis) → fail closed
+  assert.throws(() => mergeModelRequirements(
+    { constraints: { maxInputPrice: 5 } },
+    { constraints: { maxOutputPrice: 10, priceBasis: { currency: 'USD', unit: 'per_1m_tokens' } } }
+  ), conflictCode);
+  // merge source shuffle x100 identical
+  const s = [
+    { constraints: { maxInputPrice: 5, priceBasis: { currency: 'USD', unit: 'per_1m_tokens' } } },
+    { constraints: { maxOutputPrice: 10, priceBasis: { currency: 'USD', unit: 'per_1m_tokens' } } }
+  ];
+  const base = mergeModelRequirements(...s);
+  for (let i = 0; i < 100; i++) assert.deepStrictEqual(mergeModelRequirements(...[...s].reverse()), base);
+});
+
+/* ------------------------------------------------------------------ */
+/* R3 (closure) — Compatibility is real (agentType / platform / signal) */
+/* ------------------------------------------------------------------ */
+test('R3: compatibility filters agentType / platform / projectSignal (required incompatible → SKILL_INCOMPATIBLE)', () => {
+  const resolver = createSkillResolver({ registry: memoryRegistry([fixtureSkill()]) });
+  // native skill + native agent → load
+  assert.strictEqual(resolver.resolve({ requestedSkillIds: ['fixture-security-review'], agentContext: { availableTools: AVAILABLE, agentType: 'native' }, projectContext: { platform: 'windows' } }).ok, true);
+  // native skill + external agent → incompatible (fail closed)
+  const external = resolver.resolve({ requestedSkillIds: ['fixture-security-review'], agentContext: { availableTools: AVAILABLE, agentType: 'external' }, projectContext: { platform: 'windows' } });
+  assert.strictEqual(external.ok, false);
+  assert.strictEqual(external.errorCode, 'SKILL_INCOMPATIBLE');
+  // windows skill + windows → load; linux skill + windows → incompatible
+  const lr = createSkillResolver({ registry: memoryRegistry([fixtureSkill({ id: 'linux-only', compatibility: { agentTypes: ['native'], platforms: ['linux'], projectSignals: [] } })]) });
+  assert.strictEqual(lr.resolve({ requestedSkillIds: ['linux-only'], agentContext: { availableTools: AVAILABLE, agentType: 'native' }, projectContext: { platform: 'linux' } }).ok, true, 'linux skill loads on linux');
+  const onWindows = lr.resolve({ requestedSkillIds: ['linux-only'], agentContext: { availableTools: AVAILABLE, agentType: 'native' }, projectContext: { platform: 'windows' } });
+  assert.strictEqual(onWindows.ok, false);
+  assert.strictEqual(onWindows.errorCode, 'SKILL_INCOMPATIBLE');
+  // project signal: at least one must match
+  const sr = createSkillResolver({ registry: memoryRegistry([fixtureSkill({ id: 'sig-skill', compatibility: { agentTypes: ['native'], platforms: ['windows'], projectSignals: ['file:package.json', 'extension:.cs'] } })]) });
+  assert.strictEqual(sr.resolve({ requestedSkillIds: ['sig-skill'], agentContext: { availableTools: AVAILABLE, agentType: 'native' }, projectContext: { platform: 'windows', signals: ['file:package.json'] } }).ok, true, 'matching signal loads');
+  const noSig = sr.resolve({ requestedSkillIds: ['sig-skill'], agentContext: { availableTools: AVAILABLE, agentType: 'native' }, projectContext: { platform: 'windows', signals: ['file:README.md'] } });
+  assert.strictEqual(noSig.ok, false);
+  assert.strictEqual(noSig.errorCode, 'SKILL_INCOMPATIBLE');
+  // empty signal list → no restriction
+  const nr = createSkillResolver({ registry: memoryRegistry([fixtureSkill({ id: 'norestrict', compatibility: { agentTypes: ['native'], platforms: ['windows'], projectSignals: [] } })]) });
+  assert.strictEqual(nr.resolve({ requestedSkillIds: ['norestrict'], agentContext: { availableTools: AVAILABLE, agentType: 'native' }, projectContext: { platform: 'windows', signals: [] } }).ok, true);
+});
+
+test('R3: optional incompatible skill is skipped (not fatal); required incompatible fails closed', () => {
+  const resolver = createSkillResolver({ registry: memoryRegistry([
+    fixtureSkill({ id: 'req-inc', compatibility: { agentTypes: ['external'], platforms: ['windows'], projectSignals: [] } }),
+    fixtureSkill({ id: 'opt-inc', compatibility: { agentTypes: ['native'], platforms: ['linux'], projectSignals: [] } }),
+    fixtureSkill({ id: 'base', compatibility: { agentTypes: ['native'], platforms: ['windows'], projectSignals: [] } })
+  ]) });
+  // required incompatible → fail closed
+  const reqFail = resolver.resolveWithOptions({ requiredSkillIds: ['req-inc'], optionalSkillIds: [], agentContext: { availableTools: AVAILABLE, agentType: 'native' }, projectContext: { platform: 'windows' } });
+  assert.strictEqual(reqFail.ok, false);
+  assert.strictEqual(reqFail.errorCode, 'SKILL_INCOMPATIBLE');
+  // optional incompatible → skipped; required loads; only required in final set
+  const optSkip = resolver.resolveWithOptions({ requiredSkillIds: ['base'], optionalSkillIds: ['opt-inc'], agentContext: { availableTools: AVAILABLE, agentType: 'native' }, projectContext: { platform: 'windows' } });
+  assert.strictEqual(optSkip.ok, true);
+  assert.strictEqual(optSkip.skipped.length, 1);
+  assert.strictEqual(optSkip.skipped[0].id, 'opt-inc');
+  assert.strictEqual(optSkip.skipped[0].code, 'SKILL_INCOMPATIBLE');
+  assert.deepStrictEqual(optSkip.skills.map(s => s.id), ['base']);
+});
+
+/* ------------------------------------------------------------------ */
+/* R4A (closure) — Required + optional combine into one effective set    */
+/* ------------------------------------------------------------------ */
+test('R4A: required + optional skills combine into one effective set (instructions, tools, model)', () => {
+  const required = fixtureSkill({
+    id: 'req-A', name: 'Req A', instructions: 'REQ_A_MARKER do A',
+    toolRequirements: { required: ['read_file'], optional: [], denied: [] },
+    permissionRequirements: { required: [] }, modelRequirements: { required: { vision: false } },
+    compatibility: { agentTypes: ['native'], platforms: ['windows'], projectSignals: [] }
+  });
+  const optional = fixtureSkill({
+    id: 'opt-B', name: 'Opt B', instructions: 'OPT_B_MARKER do B',
+    toolRequirements: { required: ['search'], optional: [], denied: [] },
+    permissionRequirements: { required: [] }, modelRequirements: { required: { vision: true } },
+    compatibility: { agentTypes: ['native'], platforms: ['windows'], projectSignals: [] }
+  });
+  const resolver = createSkillResolver({ registry: memoryRegistry([required, optional]) });
+  const result = resolver.resolveWithOptions({
+    requiredSkillIds: ['req-A'], optionalSkillIds: ['opt-B'],
+    agentContext: { availableTools: AVAILABLE, agentType: 'native' }, projectContext: { platform: 'windows' }
+  });
+  assert.strictEqual(result.ok, true);
+  assert.ok(result.instructions.some(i => i.skillId === 'req-A' && i.instructions.includes('REQ_A_MARKER')));
+  assert.ok(result.instructions.some(i => i.skillId === 'opt-B' && i.instructions.includes('OPT_B_MARKER')));
+  assert.ok(result.requiredTools.includes('read_file'));
+  assert.ok(result.requiredTools.includes('search_files'));
+  assert.strictEqual(result.modelRequirements.required.vision, true, 'optional vision requirement applied to merged model requirements');
+  // via factory: optional skill is NOT lost
+  const factory = createAgentFactory({ getTool: getBuiltin, skillResolver: resolver });
+  const instance = factory.createInstance({
+    id: 'r4a-child', name: 'R4A Child', runtime: { kind: 'native' },
+    toolPolicy: { allow: ['read_file', 'search'], deny: [] },
+    permissionPolicy: { readOnly: true, allow: [], deny: [] },
+    modelPolicy: { mode: 'inherit_parent', requirements: { required: { text: true } }, fallback: 'fail' },
+    skills: { required: ['req-A'], optional: ['opt-B'] },
+    budgets: { maxIterations: 1, maxToolCalls: 0, maxRuntimeMs: 1000 }
+  }, { rootRunId: 'r4a-root', parentModelAdapter: { decide: async () => ({}) } });
+  assert.strictEqual(instance.adapter.skillInstructions.length, 2, 'optional skill B must not be lost');
+  assert.ok(instance.adapter.skillInstructions.some(i => i.skillId === 'opt-B'));
+  assert.strictEqual(instance.definition.modelPolicy.requirements.required.vision, true, 'optional vision merged into child modelPolicy');
+  factory.disposeInstance(instance.instanceId);
+});
+
+/* ------------------------------------------------------------------ */
+/* R4B (closure) — Dynamic Skill validates against Parent PermissionEngine */
+/* ------------------------------------------------------------------ */
+test('R4B: Dynamic Skill validates against parent PermissionEngine (fail fast)', () => {
+  const writerSkill = fixtureSkill({
+    id: 'writer-skill', name: 'Writer', toolRequirements: { required: ['write_file'], denied: [] },
+    permissionRequirements: { required: ['filesystem.write'] }, modelRequirements: { required: { text: true } },
+    compatibility: { agentTypes: ['native'], platforms: ['windows'], projectSignals: [] }
+  });
+  const readerSkill = fixtureSkill({
+    id: 'reader-skill', name: 'Reader', toolRequirements: { required: ['read_file'], denied: [] },
+    permissionRequirements: { required: ['filesystem.read'] }, modelRequirements: { required: { text: true } },
+    compatibility: { agentTypes: ['native'], platforms: ['windows'], projectSignals: [] }
+  });
+  const computerSkill = fixtureSkill({
+    id: 'computer-skill', name: 'Computer', toolRequirements: { required: ['read_file'], denied: [] },
+    permissionRequirements: { required: ['computer'] }, modelRequirements: { required: { text: true } },
+    compatibility: { agentTypes: ['native'], platforms: ['windows'], projectSignals: [] }
+  });
+  function makeEngine(grants) {
+    const pe = new PermissionEngine({ projectId: 'r4b' });
+    for (const [scope, range] of grants) pe.grant(scope, range, { persist: false });
+    return pe;
+  }
+  // parent allow read → PASS (instance created)
+  const allowRead = createAgentFactory({ getTool: getBuiltin, skillResolver: createSkillResolver({ registry: memoryRegistry([readerSkill]) }) });
+  const instOk = allowRead.createInstance({
+    id: 'r4b-read', name: 'R', runtime: { kind: 'native' },
+    toolPolicy: { allow: ['read_file'], deny: [] },
+    permissionPolicy: { readOnly: false, allow: ['filesystem.read'], deny: [] },
+    modelPolicy: { mode: 'inherit_parent', requirements: { required: { text: true } }, fallback: 'fail' },
+    skills: { required: ['reader-skill'], optional: [] },
+    budgets: { maxIterations: 1, maxToolCalls: 0, maxRuntimeMs: 1000 }
+  }, { rootRunId: 'r4b-root-ok', parentModelAdapter: { decide: async () => ({}) }, parentPermissionEngine: makeEngine([['filesystem.read', 'always']]) });
+  assert.strictEqual(instOk.adapter.skillInstructions.length, 1);
+  allowRead.disposeInstance(instOk.instanceId);
+  // parent deny write (child policy allows write) → createInstance fails, 0 provider calls
+  const denyWrite = createAgentFactory({ getTool: getBuiltin, skillResolver: createSkillResolver({ registry: memoryRegistry([writerSkill]) }) });
+  let providerCalls = 0;
+  assert.throws(() => denyWrite.createInstance({
+    id: 'r4b-write-deny', name: 'W', runtime: { kind: 'native' },
+    toolPolicy: { allow: ['write_file'], deny: [] },
+    permissionPolicy: { readOnly: false, allow: ['filesystem.write'], deny: [] },
+    modelPolicy: { mode: 'inherit_parent', requirements: { required: { text: true } }, fallback: 'fail' },
+    skills: { required: ['writer-skill'], optional: [] },
+    budgets: { maxIterations: 1, maxToolCalls: 0, maxRuntimeMs: 1000 }
+  }, { rootRunId: 'r4b-root-deny', parentModelAdapter: { decide: async () => { providerCalls++; return {}; } }, parentPermissionEngine: makeEngine([['filesystem.write', 'deny']]) }), e => e.code === 'SKILL_REQUIRED_PERMISSION_UNAVAILABLE');
+  assert.strictEqual(providerCalls, 0, 'no provider call when parent denies required permission');
+  // parent ask write (default 'ask' scope = computer) → treated as not held → createInstance fails
+  const askEngine = createAgentFactory({ getTool: getBuiltin, skillResolver: createSkillResolver({ registry: memoryRegistry([computerSkill]) }) });
+  let providerCallsAsk = 0;
+  assert.throws(() => askEngine.createInstance({
+    id: 'r4b-computer-ask', name: 'C', runtime: { kind: 'native' },
+    toolPolicy: { allow: ['read_file'], deny: [] },
+    permissionPolicy: { readOnly: false, allow: ['computer'], deny: [] },
+    modelPolicy: { mode: 'inherit_parent', requirements: { required: { text: true } }, fallback: 'fail' },
+    skills: { required: ['computer-skill'], optional: [] },
+    budgets: { maxIterations: 1, maxToolCalls: 0, maxRuntimeMs: 1000 }
+  }, { rootRunId: 'r4b-root-ask', parentModelAdapter: { decide: async () => { providerCallsAsk++; return {}; } }, parentPermissionEngine: makeEngine([]) }), e => e.code === 'SKILL_REQUIRED_PERMISSION_UNAVAILABLE');
+  assert.strictEqual(providerCallsAsk, 0, 'no provider call when parent asks for required permission');
+});
+
+/* ------------------------------------------------------------------ */
+/* R5 (closure) — Main Skill model merge uses real mainAgent entrypoint  */
+/* ------------------------------------------------------------------ */
+test('R5: Main Skill model merge enters real routing (vision requirement reaches model selection)', async () => {
+  const previous = getSkillRuntime();
+  const visionSkill = fixtureSkill({
+    id: 'vision-r5', name: 'Vision R5', instructions: 'R5_VISION_MARKER inspect visually',
+    toolRequirements: { required: ['read_file'], denied: [] }, permissionRequirements: { required: [] },
+    modelRequirements: { required: { vision: true } },
+    compatibility: { agentTypes: ['native'], platforms: ['windows'], projectSignals: [] }
+  });
+  const reg = memoryRegistry([visionSkill]);
+  const resolver = createSkillResolver({ registry: reg });
+  setSkillRuntime(reg, resolver);
+  try {
+    // handler-level merge feeds the router (real entry point equivalent)
+    const merged = resolver.resolveModelMerge(['vision-r5'], { required: { text: true } });
+    assert.strictEqual(merged.ok, true);
+    assert.strictEqual(merged.modelRequirements.required.vision, true, 'vision requirement folded into merged requirements');
+    // real runMainAgent entry: skill resolves and its marker reaches the model
+    const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'adp-r5-'));
+    const projectRoot = path.join(fixtureRoot, 'project');
+    fs.mkdirSync(projectRoot, { recursive: true });
+    const systems = [];
+    const model = { async decide(input) { systems.push(input.system); return { action: { type: 'complete', args: { summary: 'done' } } }; } };
+    const runManager = new RunManager();
+    const runId = runMainAgent({
+      conversationId: 'r5-conv', agentId: 'native-main', goal: 'x',
+      projectRoot, projectId: 'p', model, getTool: getBuiltin, store: null, emit: () => {}, runManager,
+      timeoutMs: 5000, skillIds: ['vision-r5'], skillRegistry: reg, skillResolver: resolver,
+      pathSecurity: createPathSecurity({ cacheRoots: true })
+    }).runId;
+    const result = await waitForTerminal(runManager, runId);
+    assert.strictEqual(result.status, 'completed', `run failed: ${result.error}`);
+    assert.ok(systems[systems.length - 1].includes('R5_VISION_MARKER'), 'vision skill marker reached the model via real entry');
+    fs.rmSync(fixtureRoot, { recursive: true, force: true });
+  } finally {
+    setSkillRuntime(previous.registry, previous.resolver);
+  }
+});
+
 /* helpers */
 async function waitForTerminal(runManager, runId) {
   for (let i = 0; i < 300; i++) {

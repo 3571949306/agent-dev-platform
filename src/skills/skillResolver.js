@@ -13,6 +13,11 @@
  * requestedSkillIds still produce the same ordered result (dedupe → sort by id →
  * transitive requiresSkills in sorted order, cycle detection).
  *
+ * R3 — compatibility is REAL, not metadata. Every requested skill is checked against
+ *   agentContext.agentType, projectContext.platform, projectContext.signals:
+ *     - required skill incompatible → SKILL_INCOMPATIBLE (fail closed)
+ *     - optional skill incompatible → skipped (SKILL_OPTIONAL_SKIPPED_INCOMPATIBLE)
+ *
  * R4 — a Skill can only REQUIRE capabilities, never GRANT them:
  *   - required tool not available / outside agent tool policy → SKILL_REQUIRED_TOOL_UNAVAILABLE
  *   - required permission not already held → SKILL_REQUIRED_PERMISSION_UNAVAILABLE
@@ -20,9 +25,16 @@
  *   - disabled Skill explicitly requested → SKILL_DISABLED
  *   - unknown Skill ID → SKILL_UNKNOWN
  *
+ * resolveWithOptions({ requiredSkillIds, optionalSkillIds, agentContext, projectContext })
+ *   applies R3/R4 to required skills (fail closed) and optional skills (skip on failure),
+ *   then re-resolves the combined final set ONCE so cross-skill conflicts and model
+ *   merges are re-verified over the whole set (optional skills are never silently lost).
+ *
  * This resolver performs 0 provider calls by construction.
  */
 
+const fs = require('fs');
+const path = require('path');
 const { expandToolNames } = require('./skillDefinition');
 const { mergeModelRequirements } = require('./modelMerge');
 const { MUTATION_SCOPES } = require('../agents/dynamic/permissionPolicy');
@@ -35,6 +47,109 @@ const SKILL_CONFLICT = 'SKILL_CONFLICT';
 const SKILL_REQUIRED_TOOL_UNAVAILABLE = 'SKILL_REQUIRED_TOOL_UNAVAILABLE';
 const SKILL_REQUIRED_PERMISSION_UNAVAILABLE = 'SKILL_REQUIRED_PERMISSION_UNAVAILABLE';
 const SKILL_MODEL_REQUIREMENTS_CONFLICT = 'SKILL_MODEL_REQUIREMENTS_CONFLICT';
+const SKILL_INCOMPATIBLE = 'SKILL_INCOMPATIBLE';
+const SKILL_OPTIONAL_SKIPPED_INCOMPATIBLE = 'SKILL_OPTIONAL_SKIPPED_INCOMPATIBLE';
+
+/* ------------------------------------------------------------------ */
+/* R3 — platform / agent-type / project-signal compatibility helpers  */
+/* ------------------------------------------------------------------ */
+
+/** Normalize process.platform ('win32'/'darwin'/'linux') to the canonical skill
+ *  compatibility token ('windows'/'darwin'/'linux'). Already-canonical values pass through. */
+function normalizePlatform(value) {
+  if (value === 'win32') return 'windows';
+  if (value === 'darwin') return 'darwin';
+  if (value === 'linux') return 'linux';
+  if (value === 'freebsd') return 'freebsd';
+  return value;
+}
+
+/**
+ * Compute the deterministic set of project signals for a project root.
+ * Signals: 'file:<relativePath>', 'extension:<ext>', 'package:<name>'.
+ * Bounded walk (depth 4, ≤ 8000 files) so production use stays cheap.
+ */
+function computeProjectSignals(projectRoot) {
+  const signals = new Set();
+  if (!projectRoot || typeof projectRoot !== 'string') return signals;
+  let count = 0;
+  const MAX = 8000;
+  function walk(dir, depth) {
+    if (depth > 4 || count > MAX) return;
+    let entries;
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    for (const entry of entries) {
+      if (count > MAX) return;
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        if (entry.name === 'node_modules' || entry.name === '.git' || entry.name === 'dist' || entry.name === 'build') continue;
+        walk(full, depth + 1);
+      } else {
+        count++;
+        const rel = path.relative(projectRoot, full).split(path.sep).join('/');
+        signals.add(`file:${rel}`);
+        const ext = path.extname(entry.name).toLowerCase();
+        if (ext) signals.add(`extension:${ext}`);
+      }
+    }
+  }
+  try { walk(projectRoot, 0); } catch { /* best effort */ }
+  try {
+    const pkgRaw = fs.readFileSync(path.join(projectRoot, 'package.json'), 'utf8');
+    const pkg = JSON.parse(pkgRaw);
+    if (pkg && typeof pkg.name === 'string' && pkg.name) signals.add(`package:${pkg.name}`);
+  } catch { /* no package.json */ }
+  return signals;
+}
+
+/**
+ * At least one of the required signals must be present in the project.
+ * projectContext.signals (precomputed array) takes precedence (test-friendly &
+ * deterministic); otherwise signals are computed from projectContext.projectRoot.
+ */
+function projectSignalsMatch(required, projectContext) {
+  if (!required || !required.length) return true;
+  let present;
+  if (projectContext && Array.isArray(projectContext.signals)) {
+    present = new Set(projectContext.signals);
+  } else {
+    present = computeProjectSignals(projectContext && projectContext.projectRoot);
+  }
+  return required.some(req => present.has(req));
+}
+
+/**
+ * Evaluate a skill's compatibility against the resolve inputs.
+ * Returns { ok:true } or { ok:false, field, value, allowed }.
+ * Semantics (deterministic):
+ *   - agentTypes  non-empty → agentContext.agentType must be included (default 'native')
+ *   - platforms   non-empty → resolved platform must be included
+ *   - projectSignals non-empty → at least one signal must match the project
+ */
+function checkCompatibility(skill, agentContext, projectContext) {
+  const compat = skill.compatibility || {};
+  const agentTypes = compat.agentTypes || [];
+  if (agentTypes.length) {
+    const agentType = (agentContext && agentContext.agentType) ? agentContext.agentType : 'native';
+    if (!agentTypes.includes(agentType)) {
+      return { ok: false, field: 'agentType', value: agentType, allowed: agentTypes };
+    }
+  }
+  const platforms = compat.platforms || [];
+  if (platforms.length) {
+    const platform = normalizePlatform((projectContext && projectContext.platform) || process.platform);
+    if (!platforms.includes(platform)) {
+      return { ok: false, field: 'platform', value: platform, allowed: platforms };
+    }
+  }
+  const signals = compat.projectSignals || [];
+  if (signals.length) {
+    if (!projectSignalsMatch(signals, projectContext)) {
+      return { ok: false, field: 'projectSignal', value: signals, allowed: [] };
+    }
+  }
+  return { ok: true };
+}
 
 function resolveError(code, message) {
   const error = new Error(`${code}: ${message}`);
@@ -109,6 +224,17 @@ function createSkillResolver({ registry } = {}) {
     // R5 stable order: the final set is always sorted by skillId, regardless of
     // requested order or requiresSkills traversal order (deterministic).
     order = [...order].sort((a, b) => String(a.id).localeCompare(String(b.id)));
+
+    // R3 — compatibility is REAL (not metadata). A required skill that is
+    // incompatible with the agent type / platform / project fails closed.
+    for (const record of order) {
+      const compat = checkCompatibility(record, agentContext, projectContext);
+      if (!compat.ok) {
+        return failed(SKILL_INCOMPATIBLE, `skill '${record.id}' is incompatible (${compat.field}=${JSON.stringify(compat.value)} not in ${JSON.stringify(compat.allowed)})`, [
+          { code: SKILL_INCOMPATIBLE, skillId: record.id, field: compat.field, value: compat.value, allowed: compat.allowed }
+        ]);
+      }
+    }
 
     const toolPolicy = agentContext.toolPolicy || {};
     const allowTools = new Set(expandToolNames(toolPolicy.allow || []));
@@ -241,12 +367,49 @@ function createSkillResolver({ registry } = {}) {
     }
   }
 
-  return { resolve, resolveModelMerge };
+  /**
+   * R4A — resolve required + optional skills into ONE effective set.
+   *
+   *   - required skills are resolved with full R3/R4 validation (incompatible /
+   *     unknown / disabled / tool / permission / conflict → fail closed).
+   *   - each optional skill is evaluated individually; ANY failure (incompatible,
+   *     unknown, disabled, tool, permission, conflict) is SKIPPED — never fatal —
+   *     and recorded in `skipped`.
+   *   - the FINAL set = resolved required + resolved compatible optional is then
+   *     re-resolved ONCE so cross-skill deny/require conflicts, tool/permission
+   *     ceilings and model merges are re-verified over the whole set. A resolved
+   *     optional skill that produces a security conflict only AFTER entering the
+   *     final set fails closed (it is never silently dropped).
+   *
+   * Returns the same ResolvedSkillSet shape as resolve(), plus `skipped` (array of
+   * { id, code, reason } describing every optional skill that was skipped).
+   */
+  function resolveWithOptions({ requiredSkillIds = [], optionalSkillIds = [], agentContext = {}, projectContext = null } = {}) {
+    const skipped = [];
+    for (const id of optionalSkillIds) {
+      const single = resolve({ requestedSkillIds: [id], agentContext, projectContext });
+      if (!single.ok) skipped.push({ id, code: single.errorCode, reason: single.error });
+    }
+    const keptOptional = optionalSkillIds.filter(id => !skipped.some(s => s.id === id));
+    const finalIds = [...requiredSkillIds, ...keptOptional];
+    const finalRes = resolve({ requestedSkillIds: finalIds, agentContext, projectContext });
+    if (!finalRes.ok) {
+      finalRes.reasons = [...(finalRes.reasons || []), { code: 'SKILL_OPTIONAL_SKIPPED', skipped }];
+      finalRes.skipped = skipped;
+      return finalRes; // ok:false — propagate SKILL_* (fail closed)
+    }
+    finalRes.reasons.push({ code: 'SKILL_OPTIONAL_SKIPPED', skipped });
+    finalRes.skipped = skipped;
+    return finalRes;
+  }
+
+  return { resolve, resolveModelMerge, resolveWithOptions };
 }
 
 module.exports = {
   ERROR_CODE, SKILL_UNKNOWN, SKILL_DISABLED, SKILL_DEPENDENCY_CYCLE, SKILL_CONFLICT,
   SKILL_REQUIRED_TOOL_UNAVAILABLE, SKILL_REQUIRED_PERMISSION_UNAVAILABLE,
-  SKILL_MODEL_REQUIREMENTS_CONFLICT,
+  SKILL_MODEL_REQUIREMENTS_CONFLICT, SKILL_INCOMPATIBLE, SKILL_OPTIONAL_SKIPPED_INCOMPATIBLE,
+  normalizePlatform, checkCompatibility,
   createSkillResolver
 };

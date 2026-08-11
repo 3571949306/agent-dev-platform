@@ -33,6 +33,7 @@ CREATE TABLE IF NOT EXISTS api_connections (
   tested_at TEXT,
   last_error TEXT DEFAULT '',
   latency_ms INTEGER,
+  enabled INTEGER DEFAULT 1,
   import_source TEXT DEFAULT '',          -- v2.5.0: 来源标识 manual/codex/claude-code/opencode/ccswitch-local/environment/env-file/json-file/toml-file/smart-paste
   import_source_path TEXT DEFAULT '',     -- v2.5.0: 来源路径（仅元数据，不含原文）
   created_at TEXT,
@@ -322,6 +323,28 @@ CREATE TABLE IF NOT EXISTS permission_decisions (
   command TEXT
 );
 
+-- v2.9.2: explainable, secret-free model routing decisions and outcome foundation.
+CREATE TABLE IF NOT EXISTS model_route_decisions (
+  id TEXT PRIMARY KEY,
+  run_id TEXT,
+  agent_id TEXT,
+  connection_id TEXT,
+  model_id TEXT,
+  mode TEXT NOT NULL,
+  requirements_json TEXT NOT NULL DEFAULT '{}',
+  score REAL,
+  reasons_json TEXT NOT NULL DEFAULT '[]',
+  rejected_json TEXT NOT NULL DEFAULT '[]',
+  status TEXT NOT NULL DEFAULT 'routed',
+  latency_ms INTEGER,
+  input_tokens INTEGER,
+  output_tokens INTEGER,
+  error_code TEXT,
+  created_at TEXT,
+  updated_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_model_route_decisions_run ON model_route_decisions(run_id, created_at);
+
 CREATE TABLE IF NOT EXISTS settings (
   key TEXT PRIMARY KEY,
   value_json TEXT
@@ -400,6 +423,7 @@ const COLUMN_MIGRATIONS = [
   // 而不是 NULL。Runtime/UI 据此把空串视为 manual 来源。
   ['api_connections', 'import_source', 'TEXT', "''"],
   ['api_connections', 'import_source_path', 'TEXT', "''"],
+  ['api_connections', 'enabled', 'INTEGER', '1'],
   // v2.7.0 — Agent Integration Hub columns
   // (capabilities_json already exists in the SCHEMA, so it is intentionally
   //  omitted here to avoid a duplicate ADD COLUMN.)

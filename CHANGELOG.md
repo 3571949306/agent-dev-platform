@@ -1,5 +1,15 @@
 # Changelog
 
+## v2.9.2 — Model Router Framework
+
+- Added versioned `ModelRequirements`, secret-free `ModelCandidate` discovery from existing Connections/Models/probe evidence, and strict unknown-preserving capability/numeric semantics.
+- Added hard filtering, deterministic metadata-only scoring, stable tie-breaking, explainable `ModelSelection`, and exact explicit/no-candidate fail-closed errors.
+- Added one `resolveRuntimeModel()` entry for Main and Dynamic Native Agents while retaining the existing `ProviderModelAdapter` and credential-owning `buildProvider()` boundary.
+- Extended Dynamic `modelPolicy` with fail-only `auto`; `inherit_parent` and `explicit` retain their behavior. Main manual Connection + Model bindings remain explicit; auto remains opt-in.
+- Added secret-free `model_route_decisions` persistence with requirements/rejection evidence and nullable model-call outcomes, including failed routes.
+- Added fast and production Model Router suites; the production smoke proves selection B equals provider wire B and the Dynamic child completes.
+- Added `docs/MODEL_ROUTER_FRAMEWORK.md`; ModelRouter remains separate from AgentRouter, Provider runtime, Skill Engine, and online pricing/benchmark systems.
+
 ## v2.9.1 — Dynamic Agent Framework
 
 ### Dynamic Agent Closure Patch

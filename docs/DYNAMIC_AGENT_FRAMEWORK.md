@@ -1,6 +1,6 @@
 # Dynamic Agent Framework
 
-> Agent Dev Platform v2.9.1
+> Agent Dev Platform v2.9.2
 
 ## 1. Scope
 
@@ -20,6 +20,10 @@ AgentTemplate
 ```
 
 This release does not implement an AI Agent Generator, Model Router, Skill Engine, Hook Engine, Workflow DAG, marketplace, worktree swarm, or external runtime generator.
+
+### v2.9.2 model policy integration
+
+The shared `resolveRuntimeModel()` entry supports `inherit_parent`, `explicit`, and `auto`. Inheritance returns the exact Parent adapter without routing; explicit requires the exact configured connection/model; auto submits `modelPolicy.requirements` to ModelRouter and allows only `fallback = fail`. A no-candidate auto route never continues on the Parent model. ModelRouter chooses model providers only and remains separate from AgentRouter. See `docs/MODEL_ROUTER_FRAMEWORK.md`.
 
 ## 2. Identity and persistence boundaries
 

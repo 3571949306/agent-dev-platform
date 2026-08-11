@@ -32,14 +32,43 @@ function createAgentFactory(options = {}) {
     return normalizeAgentDefinition(merged, { id: definition.id, templateId: definition.templateId });
   }
 
-  function resolveModelAdapter(definition, context) {
+  function resolveModel(definition, context) {
+    if (typeof options.resolveRuntimeModel === 'function') {
+      const result = options.resolveRuntimeModel({
+        mode: definition.modelPolicy.mode,
+        requirements: definition.modelPolicy.requirements,
+        explicit: definition.modelPolicy.mode === 'explicit' ? {
+          connectionId: definition.modelPolicy.connectionId,
+          modelId: definition.modelPolicy.model
+        } : null,
+        parentModelAdapter: context.parentModelAdapter || null,
+        parentSelection: context.parentModelSelection || null,
+        context: {
+          ...context,
+          runId: context.rootRunId || context.parentRunId || null,
+          agentId: context.adapterId || definition.id,
+          definition
+        }
+      });
+      if (!result || !result.modelAdapter || typeof result.modelAdapter.decide !== 'function') {
+        const error = new Error('DYNAMIC_AGENT_MODEL_UNRESOLVED: runtime resolver returned an invalid ModelAdapter');
+        error.code = 'DYNAMIC_AGENT_MODEL_UNRESOLVED';
+        throw error;
+      }
+      return result;
+    }
     if (definition.modelPolicy.mode === 'inherit_parent') {
       if (!context.parentModelAdapter || typeof context.parentModelAdapter.decide !== 'function') {
         const error = new Error('DYNAMIC_AGENT_MODEL_UNRESOLVED: parent ModelAdapter is required');
         error.code = 'DYNAMIC_AGENT_MODEL_UNRESOLVED';
         throw error;
       }
-      return context.parentModelAdapter;
+      return { modelAdapter: context.parentModelAdapter, selection: null };
+    }
+    if (definition.modelPolicy.mode === 'auto') {
+      const error = new Error('DYNAMIC_AGENT_MODEL_UNRESOLVED: auto model resolver unavailable');
+      error.code = 'DYNAMIC_AGENT_MODEL_UNRESOLVED';
+      throw error;
     }
     if (typeof options.resolveExplicitModel !== 'function') {
       const error = new Error('DYNAMIC_AGENT_MODEL_UNRESOLVED: explicit model resolver unavailable');
@@ -52,7 +81,7 @@ function createAgentFactory(options = {}) {
       error.code = 'DYNAMIC_AGENT_MODEL_UNRESOLVED';
       throw error;
     }
-    return adapter;
+    return { modelAdapter: adapter, selection: null };
   }
 
   function createInstance(input, context = {}) {
@@ -63,6 +92,7 @@ function createAgentFactory(options = {}) {
 
     const instanceId = `dyn-instance-${crypto.randomUUID()}`;
     const adapterId = `dyn-agent-${instanceId.slice('dyn-instance-'.length)}`;
+    const modelResolution = resolveModel(definition, { ...context, rootRunId, adapterId });
     const instance = {
       instanceId,
       definitionId: definition.id,
@@ -77,6 +107,7 @@ function createAgentFactory(options = {}) {
       terminalAt: null,
       lifecycleHistory: ['CREATED'],
       adapter: null,
+      modelSelection: modelResolution.selection || null,
       definition
     };
     const onState = (status, detail = {}) => {
@@ -90,7 +121,7 @@ function createAgentFactory(options = {}) {
       instanceId,
       adapterId,
       rootRunId,
-      modelAdapter: resolveModelAdapter(definition, context),
+      modelAdapter: modelResolution.modelAdapter,
       getTool: context.getTool || options.getTool,
       parentPermissionEngine: context.parentPermissionEngine || null,
       runMainAgentFn,

@@ -1,4 +1,55 @@
-# Test Report — Agent Dev Platform（v2.9.1）
+# Test Report — Agent Dev Platform（v2.9.2）
+
+## v2.9.2 — Model Router Framework（2026-08-11）
+
+Baseline at `ac99bbed1bb2d86d19c6ecd0e6202144c6736e1f`, version `2.9.1`: unit 1524/1523 pass/0 fail/1 skip; Dynamic 9/9; Dynamic production 1/1. Paid provider calls: 0.
+
+| Requirement | Automated proof |
+| --- | --- |
+| R1 ModelRequirements | Invalid schema/preference/negative price/fractional context/invalid capability/unknown field fail closed |
+| R2 ModelCatalog | Four connections/eight models with disabled/missing/unknown/tested/local fixtures and secret stripping |
+| R3 Hard Filter | Strict vision/context/price/disabled/auth/allow-deny gates; explicit missing and all-rejected fail closed |
+| R4 Scoring | Metadata-only breakdown, unknown penalties, stable ties, 100 reordered inputs choose one winner |
+| R5 Explainability | Requirements/score/breakdown/reasons/rejections are present and secret-free |
+| R6 Runtime | Shared resolver covers Main explicit/opt-in auto and Dynamic inherit/explicit/auto; production wire receives B |
+| R7 Audit | Successful outcomes and failed no-candidate decisions persist; absent token data stays null |
+| R8 Compatibility/security | Dynamic regressions pass; router handles model providers only; production reuses ProviderModelAdapter |
+
+```text
+npm run test:model-router: 9 passed / 0 failed
+npm run test:model-router:production: 1 passed / 0 failed
+selected model: B
+provider wire model: B
+selection == wire: yes
+paid provider calls: 0
+```
+
+### Final release gates
+
+```text
+npm test
+1534 tests / 1533 pass / 0 fail / 1 skip
+
+npm run test:dynamic-agent
+9 pass / 0 fail
+
+npm run test:dynamic-agent:production
+1 pass / 0 fail
+
+npm run test:model-router
+9 pass / 0 fail
+
+npm run test:model-router:production
+1 pass / 0 fail
+
+npm run e2e
+65 pass / 0 fail
+
+npm run dist
+PASS — NSIS + portable Windows artifacts
+```
+
+The secret gate scanned all 24 changed/new files. Matches were credential field names in existing secure-storage compatibility code, documentation, sanitizer patterns, or explicit fake rejection sentinels; no real credential value was introduced. Paid provider calls remained 0. R1-R8 are VERIFIED and the package version was bumped only after all gates passed.
 
 ## v2.9.1 — Dynamic Agent Closure Patch（2026-08-11）
 

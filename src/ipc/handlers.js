@@ -51,6 +51,12 @@ const { createProjectMutationLock } = require('../security/projectMutationLock')
 const { createAgentFactory } = require('../agents/dynamic/agentFactory');
 const { setDynamicAgentRuntime } = require('../agents/dynamic/runtimeRegistry');
 const { createProviderModelAdapter } = require('../agent/runtime/providerModelAdapter');
+const {
+  createModelCatalog,
+  createModelRouter,
+  createRuntimeModelResolver,
+  createRouteAudit
+} = require('../models/router');
 
 const mcpManager = new McpManager();
 const browser = createBrowserTools();
@@ -112,9 +118,31 @@ const executionContextFactory = createExecutionContextFactory({
 });
 const agentHub = createAgentHub({ registry: agentRegistry, router: agentRouter, healthManager, lifecycleManager, eventNormalizer, runBridge, emit, projectLock, contextFactory: executionContextFactory });
 setAgentHub(agentHub);
+// v2.9.2 — one model-resolution entry for Main/Dynamic native runtimes.
+// The router sees public Store metadata only; buildProvider remains the sole credential boundary.
+const modelCatalog = createModelCatalog({ store });
+const routeAudit = createRouteAudit(store.modelRouteDecisions);
+const modelRouter = createModelRouter({ catalog: modelCatalog, audit: routeAudit });
+const runtimeModelResolver = createRuntimeModelResolver({
+  router: modelRouter,
+  audit: routeAudit,
+  createModelAdapter(selection, context = {}) {
+    const baseAgent = context.agent || {};
+    const agent = {
+      ...baseAgent,
+      id: baseAgent.id || context.agentId || `routed-model-${selection.selected.connectionId}`,
+      name: baseAgent.name || 'Routed Native Agent',
+      api_connection_id: selection.selected.connectionId,
+      model: selection.selected.modelId,
+      max_tokens: baseAgent.max_tokens || 4096
+    };
+    return createProviderModelAdapter({ buildProvider, agent, resolveModel: resolveModelFor, timeoutMs: context.timeoutMs || 120000 });
+  }
+});
 const dynamicAgentFactory = createAgentFactory({
   getTool,
   emit,
+  resolveRuntimeModel: runtimeModelResolver.resolveRuntimeModel,
   resolveExplicitModel(modelPolicy) {
     const agent = {
       id: `dynamic-model-${modelPolicy.connectionId}`,
@@ -550,6 +578,7 @@ function register(window) {
   // v2.6.0 — Main Agent Runtime IPC（自主编码闭环）
   mainAgentIpc.register({
     store, emit, runManager, getTool, buildProvider, resolveModelFor,
+    resolveRuntimeModel: runtimeModelResolver.resolveRuntimeModel,
     activeRuns, requestPermission,
     getCurrentProject: () => currentProjectId ? store.projects.get(currentProjectId) : null,
     getAgentFull, PermissionEngine

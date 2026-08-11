@@ -30,15 +30,33 @@ function reg(channel, fn) {
   });
 }
 
+function resolveConfiguredMainModel({ agent, agentId, conversationId, resolveRuntimeModel, buildProvider, resolveModelFor }) {
+  const hasExplicitBinding = !!(agent.api_connection_id && agent.model);
+  const autoRequested = !hasExplicitBinding && (
+    agent.routingMode === 'auto' || agent.routing_mode === 'auto' || agent.modelRoutingMode === 'auto'
+    || (agent.workspace && agent.workspace.modelRoutingMode === 'auto')
+  );
+  if (typeof resolveRuntimeModel === 'function' && (hasExplicitBinding || autoRequested)) {
+    const resolution = resolveRuntimeModel({
+      mode: hasExplicitBinding ? 'explicit' : 'auto',
+      requirements: agent.modelRequirements || (agent.workspace && agent.workspace.modelRequirements) || {},
+      explicit: hasExplicitBinding ? { connectionId: agent.api_connection_id, modelId: agent.model } : null,
+      context: { agent, agentId: agent.id || agentId, runId: conversationId || null, timeoutMs: 120000 }
+    });
+    return resolution.modelAdapter;
+  }
+  return createProviderModelAdapter({ buildProvider, agent, resolveModel: resolveModelFor, timeoutMs: 120000 });
+}
+
 /**
  * @param {object} deps {
- *   store, emit, runManager, getTool, buildProvider, resolveModelFor,
+ *   store, emit, runManager, getTool, buildProvider, resolveModelFor, resolveRuntimeModel,
  *   activeRuns: Map,  // conversationId -> AbortController
  *   requestPermission, getCurrentProject, getAgentFull, PermissionEngine
  * }
  */
 function register(deps) {
-  const { store, emit, runManager, getTool, buildProvider, resolveModelFor, activeRuns, requestPermission, getCurrentProject, getAgentFull, PermissionEngine } = deps;
+  const { store, emit, runManager, getTool, buildProvider, resolveModelFor, resolveRuntimeModel, activeRuns, requestPermission, getCurrentProject, getAgentFull, PermissionEngine } = deps;
 
   reg('mainAgent:run', async ({ conversationId, agentId, goal, verification, requiredFiles, initialPlan, timeoutMs, useInjectedModel } = {}) => {
     if (!goal) throw new Error('goal 必填（用户目标）');
@@ -53,7 +71,7 @@ function register(deps) {
     if (useInjectedModel && injectedModel) {
       model = injectedModel;
     } else if (agent) {
-      model = createProviderModelAdapter({ buildProvider, agent, resolveModel: resolveModelFor, timeoutMs: 120000 });
+      model = resolveConfiguredMainModel({ agent, agentId, conversationId, resolveRuntimeModel, buildProvider, resolveModelFor });
     } else {
       throw new Error('无可用模型（未注入测试模型且无 agent）');
     }
@@ -117,4 +135,4 @@ function register(deps) {
   reg('mainAgent:states', () => ({ NON_TERMINAL: states.NON_TERMINAL, TERMINAL: states.TERMINAL }));
 }
 
-module.exports = { register, EVENTS, _setInjectedModel: (m) => { injectedModel = m; } };
+module.exports = { register, EVENTS, resolveConfiguredMainModel, _setInjectedModel: (m) => { injectedModel = m; } };

@@ -6,6 +6,7 @@
 const crypto = require('crypto');
 const dbm = require('./schema');
 const sec = require('../security/secret');
+const { sanitizePublic } = require('../models/router/publicData');
 
 function db() { return dbm.getDb(); }
 function uuid() { return crypto.randomUUID(); }
@@ -54,7 +55,7 @@ function normalizeModels(models) {
 
 const connections = {
   list() {
-    return db().prepare('SELECT id,name,provider,base_url,api_key_masked,headers_json,models_json,tested,tested_at,last_error,latency_ms,import_source,import_source_path,created_at,updated_at FROM api_connections ORDER BY created_at').all()
+    return db().prepare('SELECT id,name,provider,base_url,api_key_masked,headers_json,models_json,tested,tested_at,last_error,latency_ms,enabled,import_source,import_source_path,created_at,updated_at FROM api_connections ORDER BY created_at').all()
       .map(r => ({ ...r, headers: p(r.headers_json, {}), models: normalizeModels(p(r.models_json, [])), has_key: !!r.api_key_masked }));
   },
   get(id) {
@@ -71,11 +72,11 @@ const connections = {
   create(body) {
     const id = uuid(); const t = now();
     const key = body.api_key || '';
-    db().prepare(`INSERT INTO api_connections (id,name,provider,base_url,api_key_enc,api_key_masked,headers_json,models_json,tested,import_source,import_source_path,created_at,updated_at)
-      VALUES (?,?,?,?,?,?,?,?,0,?,?,?,?)`)
+    db().prepare(`INSERT INTO api_connections (id,name,provider,base_url,api_key_enc,api_key_masked,headers_json,models_json,tested,enabled,import_source,import_source_path,created_at,updated_at)
+      VALUES (?,?,?,?,?,?,?,?,0,?,?,?,?,?)`)
       .run(id, body.name || '新连接', body.provider || 'openai', body.base_url || 'https://api.openai.com/v1',
         sec.encrypt(key), sec.mask(key), j(body.headers || {}), j(body.models || []),
-        body.import_source || '', body.import_source_path || '', t, t);
+        body.enabled === false ? 0 : 1, body.import_source || '', body.import_source_path || '', t, t);
     return connections.get(id);
   },
   update(id, body) {
@@ -94,10 +95,11 @@ const connections = {
     const testedAt = body.tested_at ?? cur.tested_at;
     const lastError = body.last_error ?? cur.last_error;
     const latency = body.latency_ms ?? cur.latency_ms;
+    const enabled = body.enabled === undefined ? cur.enabled : (body.enabled ? 1 : 0);
     const importSource = body.import_source ?? cur.import_source;
     const importSourcePath = body.import_source_path ?? cur.import_source_path;
-    db().prepare(`UPDATE api_connections SET name=?,provider=?,base_url=?,api_key_enc=?,api_key_masked=?,headers_json=?,models_json=?,tested=?,tested_at=?,last_error=?,latency_ms=?,import_source=?,import_source_path=?,updated_at=? WHERE id=?`)
-      .run(name, provider, baseUrl, enc, masked, headers, models, tested ? 1 : 0, testedAt, lastError, latency, importSource, importSourcePath, now(), id);
+    db().prepare(`UPDATE api_connections SET name=?,provider=?,base_url=?,api_key_enc=?,api_key_masked=?,headers_json=?,models_json=?,tested=?,tested_at=?,last_error=?,latency_ms=?,enabled=?,import_source=?,import_source_path=?,updated_at=? WHERE id=?`)
+      .run(name, provider, baseUrl, enc, masked, headers, models, tested ? 1 : 0, testedAt, lastError, latency, enabled, importSource, importSourcePath, now(), id);
     return connections.get(id);
   },
   setTestResult(id, { ok, error, latency }) {
@@ -566,6 +568,42 @@ const permissionDecisions = {
   list(limit) { return db().prepare('SELECT * FROM permission_decisions ORDER BY time DESC LIMIT ?').all(limit || 200); }
 };
 
+// ---------- model route decisions (v2.9.2) ----------
+function routeDecisionRow(row) {
+  return row ? {
+    ...row,
+    requirements: p(row.requirements_json, {}),
+    reasons: p(row.reasons_json, []),
+    rejectedCandidates: p(row.rejected_json, [])
+  } : null;
+}
+
+const modelRouteDecisions = {
+  record(input = {}) {
+    const value = sanitizePublic(input);
+    const id = uuid(); const t = now();
+    db().prepare(`INSERT INTO model_route_decisions
+      (id,run_id,agent_id,connection_id,model_id,mode,requirements_json,score,reasons_json,rejected_json,status,latency_ms,input_tokens,output_tokens,error_code,created_at,updated_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+      .run(id, value.runId || null, value.agentId || null, value.connectionId || null, value.modelId || null,
+        value.mode || 'auto', j(value.requirements || {}), value.score ?? null, j(value.reasons || []),
+        j(value.rejectedCandidates || []), value.status || 'routed', value.latencyMs ?? null,
+        value.inputTokens ?? null, value.outputTokens ?? null, value.errorCode || null, t, t);
+    return id;
+  },
+  get(id) { return routeDecisionRow(db().prepare('SELECT * FROM model_route_decisions WHERE id=?').get(id)); },
+  list(limit = 100) {
+    return db().prepare('SELECT * FROM model_route_decisions ORDER BY created_at DESC LIMIT ?').all(limit).map(routeDecisionRow);
+  },
+  updateOutcome(id, input = {}) {
+    const value = sanitizePublic(input);
+    const result = db().prepare(`UPDATE model_route_decisions SET status=?,latency_ms=?,input_tokens=?,output_tokens=?,error_code=?,updated_at=? WHERE id=?`)
+      .run(value.status || 'unknown', value.latencyMs ?? null, value.inputTokens ?? null,
+        value.outputTokens ?? null, value.errorCode || null, now(), id);
+    return result.changes > 0;
+  }
+};
+
 // ---------- settings ----------
 const settings = {
   get(key, def) { const r = db().prepare('SELECT value_json FROM settings WHERE key=?').get(key); return r ? p(r.value_json, def) : def; },
@@ -852,6 +890,6 @@ module.exports = {
   projects, connections, models, prompts, skills, agents, externalAgents,
   conversations, messages, events, tasks, runs, agentMessages, tools, mcpServers,
   memories, checkpoints, fileChanges, usage, modelCalls, permissionGrants, audit, permissionDecisions, settings, agentPrefs, extAgentConfigs,
-  externalAgentSessions, externalAgentAuthStates, agentDefinitions, agentTemplates,
+  externalAgentSessions, externalAgentAuthStates, agentDefinitions, agentTemplates, modelRouteDecisions,
   migrateFromJson
 };

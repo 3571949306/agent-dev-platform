@@ -1,11 +1,12 @@
 'use strict';
 
 const crypto = require('crypto');
+const { normalizeModelRequirements } = require('../../models/router/modelRequirements');
 
 const ERROR_CODE = 'DYNAMIC_AGENT_DEFINITION_INVALID';
 const RUNTIME_KINDS = new Set(['native']);
 const LIFETIMES = new Set(['run', 'session', 'manual']);
-const MODEL_MODES = new Set(['inherit_parent', 'explicit']);
+const MODEL_MODES = new Set(['inherit_parent', 'explicit', 'auto']);
 const CREDENTIAL_KEYS = new Set([
   'apikey', 'authorization', 'bearer', 'cookie', 'password',
   'refreshtoken', 'accesstoken', 'secret', 'credential', 'credentials'
@@ -20,7 +21,7 @@ const DEFAULTS = Object.freeze({
   capabilities: Object.freeze([]),
   toolPolicy: Object.freeze({ allow: Object.freeze([]), deny: Object.freeze([]) }),
   permissionPolicy: Object.freeze({ readOnly: false, allow: Object.freeze([]), deny: Object.freeze([]) }),
-  modelPolicy: Object.freeze({ mode: 'inherit_parent', connectionId: null, model: null }),
+  modelPolicy: Object.freeze({ mode: 'inherit_parent', connectionId: null, model: null, requirements: Object.freeze({}), fallback: 'fail' }),
   lifetime: 'run',
   budgets: Object.freeze({ maxIterations: 10, maxToolCalls: 30, maxRuntimeMs: 300000 }),
   canDelegate: false,
@@ -113,6 +114,14 @@ function normalizeAgentDefinition(input, options = {}) {
     model.connectionId = null;
     model.model = null;
   }
+  if (model.mode === 'auto') {
+    model.connectionId = null;
+    model.model = null;
+  }
+  if (model.fallback !== 'fail') throw invalid('only fail fallback is supported', 'definition.modelPolicy.fallback');
+  let modelRequirements;
+  try { modelRequirements = normalizeModelRequirements(model.requirements || {}); }
+  catch (error) { throw invalid(error.message, `definition.modelPolicy.${error.path || 'requirements'}`); }
 
   const toolPolicy = Object.assign({}, DEFAULTS.toolPolicy, input.toolPolicy || {});
   const permissionPolicy = Object.assign({}, DEFAULTS.permissionPolicy, input.permissionPolicy || {});
@@ -145,7 +154,9 @@ function normalizeAgentDefinition(input, options = {}) {
     modelPolicy: {
       mode: model.mode,
       connectionId: model.connectionId || null,
-      model: model.model || null
+      model: model.model || null,
+      requirements: modelRequirements,
+      fallback: 'fail'
     },
     lifetime,
     budgets: {

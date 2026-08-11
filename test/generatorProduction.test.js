@@ -15,6 +15,7 @@ const { createAgentRegistry } = require('../src/agents/hub/agentRegistry');
 const { createModelCatalog, createModelRouter, createRuntimeModelResolver, createRouteAudit } = require('../src/models/router');
 const { createProviderModelAdapter } = require('../src/agent/runtime/providerModelAdapter');
 const { createGeneratorEngine } = require('../src/generator');
+const { createProductEntry } = require('../src/services/productEntry');
 
 const cap = value => ({ value, state: 'tested', source: 'generator-production-fixture' });
 const metric = value => ({ value, state: 'declared', source: 'generator-production-fixture' });
@@ -135,9 +136,14 @@ test('R8 production generator scenarios A-J use the real framework with zero exe
     requestTimeoutMs: 2000, totalTimeoutMs: 10000
   });
   const service = engine.service;
+  const productEntry = createProductEntry({
+    mainAgentService: { run() {}, stop() {} },
+    workflowRuntime: { run() {}, cancel() {}, approve() {}, reject() {} },
+    generatorService: service
+  });
   const generate = async (artifactType, intent, responses, extra = {}) => {
     providerState.responses = responses.slice();
-    const started = service.generate({
+    const started = productEntry.generator.generate({
       schemaVersion: 1, artifactType, intent, mode: 'auto', explicitModel: null,
       context: { projectId: null, projectSummary: 'Public summary only.' }, ...extra
     });
@@ -156,7 +162,7 @@ test('R8 production generator scenarios A-J use the real framework with zero exe
     assert.strictEqual(skillBefore, null);
     assert.strictEqual(skillRegistry.get(skillCandidate.id), null);
     const callsBeforeSkillSave = providerState.calls;
-    const aSaved = service.save(a.draftId);
+    const aSaved = productEntry.generator.save(a.draftId);
     assert.strictEqual(providerState.calls, callsBeforeSkillSave);
     assert.strictEqual(aSaved.draft.status, 'SAVED');
     assert.strictEqual(skillRegistry.get(skillCandidate.id).enabled, false);

@@ -1,6 +1,6 @@
 {
   "name": "agent-dev-platform",
-  "version": "2.9.6",
+  "version": "2.9.7",
   "description": "Agent Dev Platform - 本地 AI Agent IDE（智能体开发环境）：Coding Agent / 多 Agent 调度 / API 管理 / Computer Use / MCP / 外部 Agent 聚合",
   "main": "main.js",
   "scripts": {
@@ -31,6 +31,9 @@
     "test:workflow:production": "node scripts/run-tests.js workflowProduction",
     "test:generator": "node scripts/run-tests.js generator.test",
     "test:generator:production": "node scripts/run-tests.js generatorProduction",
+    "test:architecture": "node scripts/test-architecture.js",
+    "test:product": "node scripts/run-tests.js product.test",
+    "test:product:production": "node scripts/product-production-smoke.js",
     "icon": "node scripts/make-icon.js"
   },
   "dependencies": {

@@ -117,14 +117,38 @@ export function handleProbeEvent(ev) {
 
 async function renderDiagnostics(body) {
   diagActive = null;
-  const connections = await api.connections();
+  const [connections, product] = await Promise.all([
+    api.connections(),
+    api.diagProduct({ probeExternal: true, probeComputer: true })
+  ]);
+  const subsystem = (label, value) => `<tr><td>${esc(label)}</td><td><span class="chip">${esc(value == null ? 'UNKNOWN' : value)}</span></td></tr>`;
+  const productPanel = `<section class="panel">
+    <h3>Product Diagnostics · ${esc(product.version)}</h3>
+    <table class="tbl"><tbody>
+      ${subsystem('Database', product.database && product.database.status)}
+      ${subsystem('Model Connections', `${product.modelConnections.available} available / ${product.modelConnections.unavailable} unavailable / ${product.modelConnections.unknown} unknown`)}
+      ${subsystem('Model Router', product.modelRouter.status)}
+      ${subsystem('主智能体', product.mainAgent.status)}
+      ${subsystem('动态智能体', product.dynamicAgent.status)}
+      ${subsystem('Skills', `${product.skills.count} / ${product.skills.invalid == null ? 'UNKNOWN' : product.skills.invalid} invalid`)}
+      ${subsystem('Hooks', `${product.hooks.count} / ${product.hooks.invalid == null ? 'UNKNOWN' : product.hooks.invalid} invalid`)}
+      ${subsystem('Workflows', `${product.workflows.count} / ${product.workflows.invalid == null ? 'UNKNOWN' : product.workflows.invalid} invalid`)}
+      ${subsystem('Generator', product.generator.status)}
+      ${subsystem('Computer Use', product.computerUse.status)}
+      ${subsystem('Browser', product.browser.status)}
+      ${subsystem('MCP', `${product.mcp.connected} connected`)}
+      ${subsystem('Project Lock', product.projectLock.status)}
+    </tbody></table>
+    <h3 style="margin-top:12px">外部智能体</h3>
+    <table class="tbl"><tbody>${product.externalAgents.map(item => subsystem(`${item.name} (${item.transport})`, item.status)).join('')}</tbody></table>
+  </section>`;
   if (!connections.length) {
-    body.innerHTML = `<div class="empty">还没有 API 连接。<a href="#" id="diag-goto-api">先到 API 页创建一个连接</a>。</div>`;
+    body.innerHTML = productPanel + `<div class="empty">还没有 API 连接。<a href="#" id="diag-goto-api">先到 API 页创建一个连接</a>。</div>`;
     const g = $('#diag-goto-api', body);
     if (g) g.onclick = e => { e.preventDefault(); open('connections'); };
     return;
   }
-  body.innerHTML = `
+  body.innerHTML = productPanel + `
     <div class="page-actions">
       <select id="diag-conn">${connections.map(c => `<option value="${c.id}">${esc(c.name)}（${esc(c.provider)}）</option>`).join('')}</select>
       <select id="diag-model"></select>

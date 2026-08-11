@@ -1,5 +1,6 @@
 'use strict';
 const { app, BrowserWindow, shell } = require('electron');
+const { spawn } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 
@@ -13,6 +14,30 @@ let httpServer = null;
 let handlersModule = null;
 let shutdownStarted = false;
 let shutdownComplete = false;
+
+function closeHttpServer() {
+  if (!httpServer) return;
+  const server = httpServer;
+  httpServer = null;
+  try { if (typeof server.closeIdleConnections === 'function') server.closeIdleConnections(); } catch {}
+  try { if (typeof server.closeAllConnections === 'function') server.closeAllConnections(); } catch {}
+  try { server.close(); } catch {}
+}
+
+function exitAfterCleanup(code = 0) {
+  if (process.platform === 'win32') {
+    try {
+      const killer = spawn('taskkill.exe', ['/PID', String(process.pid), '/T', '/F'], {
+        detached: true,
+        stdio: 'ignore',
+        windowsHide: true
+      });
+      killer.unref();
+      return;
+    } catch { /* use Electron fallback */ }
+  }
+  app.exit(code);
+}
 
 // --smoke : boot headless-ish, load the UI, collect renderer errors, exit.
 // Used by `npm run smoke` so the packaged app is never shipped with a
@@ -249,7 +274,7 @@ function createWindow(port) {
 app.whenReady().then(bootstrap);
 
 app.on('window-all-closed', () => {
-  if (httpServer) { try { httpServer.close(); } catch {} httpServer = null; }
+  closeHttpServer();
   app.quit();
 });
 app.on('before-quit', event => {
@@ -259,8 +284,15 @@ app.on('before-quit', event => {
   shutdownStarted = true;
   Promise.resolve(handlersModule.shutdownServices()).finally(() => {
     shutdownComplete = true;
-    if (httpServer) { try { httpServer.close(); } catch {} httpServer = null; }
-    app.quit();
+    closeHttpServer();
+    // Some external-agent transports can leave Chromium-side handles that do
+    // not participate in Electron's quit events. All owned resources and the
+    // database checkpoint are complete at this point; destroy remaining windows
+    // before the immediate exit so Chromium cannot keep the main process alive.
+    for (const win of BrowserWindow.getAllWindows()) {
+      try { win.destroy(); } catch { /* already closed */ }
+    }
+    exitAfterCleanup(0);
   });
 });
 app.on('will-quit', () => {

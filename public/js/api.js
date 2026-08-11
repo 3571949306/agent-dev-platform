@@ -74,6 +74,7 @@ export const api = {
   diagDescribe: (connId, modelId) => call('diagnostics:describe', connId, modelId),
   diagModelCalls: (limit) => call('diagnostics:modelCalls', limit),
   diagMismatches: () => call('diagnostics:mismatches'),
+  diagProduct: (options) => call('diagnostics:product', options),
 
   // prompts / skills
   prompts: () => call('prompts:list'),

@@ -1,5 +1,16 @@
 # Changelog
 
+## v2.9.7 — Architecture Freeze + Productization Baseline
+
+- Froze the production contracts for Main Agent, Dynamic Agent, Model Router, Skill, Hook, Workflow, and Generator, with a machine-readable architecture manifest and static architecture gate.
+- Added a single thin product entry facade over the existing Main, Workflow, and Generator application services; no new framework or duplicate execution runtime was introduced.
+- Audited every provider, model, tool, process, filesystem, AgentHub, Main Agent, and PermissionEngine execution signature. The final inventory contains zero unsafe duplicate production paths.
+- Added truthful unified product diagnostics for database, model connections and routing, frozen frameworks, Computer Use, Browser, MCP, external agents, and project locks. Unknown evidence remains `UNKNOWN` and unavailable integrations remain `UNAVAILABLE`.
+- Added cold-start recovery for stale Agent, Workflow, approval, and Generator state, plus bounded quit cleanup for providers, managed runs, workflows, locks, MCP/browser resources, owned child processes, and the database checkpoint.
+- Added real product-entry production proofs for Main, Dynamic, Skill, Hook, Workflow, Generator, the cross-framework security chain, and cancellation. Production components use fake network providers only; paid provider calls remain zero.
+- Added the ordered productization roadmap (P1–P9) without implementing any new framework.
+- Final verification: 1612 pass / 0 fail / 1 skip (1613 unit tests), all focused and production suites pass, Architecture/Product gates pass, E2E 65/65, and Windows NSIS + portable builds pass.
+
 ## v2.9.6 — AI Generator Framework
 
 - Added a strict, bounded `GeneratorRequest` with pre-provider secret detection and no permission, provider, tool implementation, runtime object, or executable authority fields.

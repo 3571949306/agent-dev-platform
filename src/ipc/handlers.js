@@ -56,6 +56,10 @@ const { createHookEngine, setHookRuntime } = require('../hooks');
 const { createWorkflowEngine } = require('../workflows');
 const { createGeneratorEngine } = require('../generator');
 const { createProviderModelAdapter } = require('../agent/runtime/providerModelAdapter');
+const { createProductEntry } = require('../services/productEntry');
+const { createProductDiagnostics } = require('../services/productDiagnostics');
+const { recoverInterruptedRuntime } = require('../services/runtimeRecovery');
+const { getDb } = require('../db/schema');
 const {
   createModelCatalog,
   createModelRouter,
@@ -265,22 +269,99 @@ const claudeCodeAdapter = new ClaudeCodeAgentAdapter({
 });
 agentHub.register(claudeCodeAdapter);
 
+const productDiagnostics = createProductDiagnostics({
+  version: require('../../package.json').version,
+  store,
+  getDb,
+  modelCatalog,
+  dynamicAgentFactory,
+  skillRegistry,
+  hookEngine,
+  workflowEngine,
+  generatorEngine,
+  computerManager: computer.manager,
+  browserManager: browser.manager,
+  mcpManager,
+  agentRegistry,
+  healthManager,
+  projectLock
+});
+
 let shutdownPromise = null;
+function forceDisposeAdapter(adapter) {
+  if (!adapter) return;
+  const runs = adapter._runs instanceof Map ? [...adapter._runs.values()] : [];
+  for (const run of runs) {
+    try { if (run.ac) run.ac.abort(); } catch { /* already terminal */ }
+    try { if (run.controller) run.controller.abort(); } catch { /* already terminal */ }
+    try { if (run.runtime && typeof run.runtime.disconnect === 'function') run.runtime.disconnect(); } catch { /* already gone */ }
+    try { if (run.handle && !run.handle._finished) run.handle.kill('SIGKILL'); } catch { /* already gone */ }
+    try { if (run.client && typeof run.client.dispose === 'function') run.client.dispose(); } catch { /* already gone */ }
+    try { if (run.query && typeof run.query.close === 'function') run.query.close(); } catch { /* already gone */ }
+  }
+  try { if (adapter.supervisor && typeof adapter.supervisor.dispose === 'function') adapter.supervisor.dispose(); } catch { /* already gone */ }
+  try { if (adapter._sidecar && typeof adapter._sidecar._killChild === 'function') adapter._sidecar._killChild(); } catch { /* already gone */ }
+  if (adapter._runs instanceof Map) adapter._runs.clear();
+}
+
+function forceOwnedResources() {
+  for (const adapter of agentRegistry.list()) forceDisposeAdapter(adapter);
+  for (const instance of dynamicAgentFactory.listInstances()) forceDisposeAdapter(instance.adapter);
+  try { productionClineSidecarManager._killChild(); } catch { /* already gone */ }
+  try { void openCodeServerManager.dispose(); } catch { /* already gone */ }
+}
+
 async function shutdownServices() {
   if (shutdownPromise) return shutdownPromise;
-  shutdownPromise = (async () => {
-    projectLock.clearAll();
-    await Promise.allSettled([
-      clineAdapter.dispose(),
-      openCodeAdapter.dispose(),
-      openHandsAdapter.dispose(),
-      ...dynamicAgentFactory.listInstances().map(instance => dynamicAgentFactory.disposeInstance(instance.instanceId)),
+  const timeoutMs = 10000;
+  const cleanup = (async () => {
+    for (const controller of activeRuns.values()) {
+      try { controller.abort(); } catch { /* already terminal */ }
+    }
+    activeRuns.clear();
+    for (const resolve of pendingPermissions.values()) {
+      try { resolve({ decision: 'deny', range: 'once', reason: 'APPLICATION_SHUTDOWN' }); } catch { /* already settled */ }
+    }
+    pendingPermissions.clear();
+
+    const activeHubRunIds = lifecycleManager.listActive()
+      .map(run => runBridge.getRunMapping(run.id))
+      .filter(Boolean)
+      .map(mapping => mapping.runId);
+    const cancellationWork = [
+      ...activeHubRunIds.map(runId => agentHub.cancel(runId)),
       ...workflowEngine.runtime.listRuns()
         .filter(run => !['COMPLETED', 'FAILED', 'CANCELLED'].includes(run.status))
         .map(run => workflowEngine.runtime.cancel(run.workflowRunId)),
       ...[...generatorEngine.service.active.keys()].map(draftId => generatorEngine.service.cancel(draftId))
-    ]);
+    ];
+    await Promise.allSettled(cancellationWork);
+    const disposalWork = [
+      ...dynamicAgentFactory.listInstances().map(instance => dynamicAgentFactory.disposeInstance(instance.instanceId)),
+      ...agentRegistry.list()
+        .filter(adapter => !String(adapter.id).startsWith('dyn-agent-') && typeof adapter.dispose === 'function')
+        .map(adapter => adapter.dispose()),
+      browser.manager.close()
+    ];
+    for (const id of [...mcpManager.clients.keys()]) mcpManager.disconnect(id);
+    await Promise.allSettled(disposalWork);
+    try { getDb().pragma('wal_checkpoint(PASSIVE)'); } catch { /* SQLite writes are synchronous; checkpoint is best effort */ }
   })();
+  let shutdownTimer = null;
+  shutdownPromise = Promise.race([
+    cleanup.then(() => ({ timedOut: false })),
+    new Promise(resolve => { shutdownTimer = setTimeout(() => resolve({ timedOut: true }), timeoutMs); })
+  ]).finally(() => {
+    if (shutdownTimer) clearTimeout(shutdownTimer);
+    for (const controller of activeRuns.values()) {
+      try { controller.abort(); } catch { /* already terminal */ }
+    }
+    activeRuns.clear();
+    pendingPermissions.clear();
+    for (const id of [...mcpManager.clients.keys()]) mcpManager.disconnect(id);
+    forceOwnedResources();
+    projectLock.clearAll();
+  });
   return shutdownPromise;
 }
 
@@ -644,7 +725,7 @@ function register(window) {
   rebuildMcpToolMap();
 
   // v2.6.0 — Main Agent Runtime IPC（自主编码闭环）
-  mainAgentIpc.register({
+  const mainAgentService = mainAgentIpc.register({
     store, emit, runManager, getTool, buildProvider, resolveModelFor,
     resolveRuntimeModel: runtimeModelResolver.resolveRuntimeModel,
     bindRouteDecisionToRun: routeAudit.bindRunIdentity,
@@ -655,6 +736,11 @@ function register(window) {
     skillRegistry, skillResolver,
     hookEngine,
     availableToolNames: platformToolNames()
+  });
+  const productEntry = createProductEntry({
+    mainAgentService,
+    workflowRuntime: workflowEngine.runtime,
+    generatorService: generatorEngine.service
   });
 
   // projects
@@ -740,6 +826,7 @@ function register(window) {
   });
   reg('diagnostics:modelCalls', (limit) => store.modelCalls.list(limit || 100));
   reg('diagnostics:mismatches', () => store.modelCalls.mismatches());
+  reg('diagnostics:product', (options) => productDiagnostics.inspect(options || {}));
   // v2.3.2 (P0-2 诊断)：E2E 超时排查用 —— 返回所有活跃 Run + 按 conversation 索引，
   // 让测试在断言失败时能立刻看到 RunManager 真实状态（status / stage / lastActivityAt / error）。
   reg('diagnostics:dumpRuns', () => ({
@@ -1386,7 +1473,7 @@ function register(window) {
   ipcMain.handle('workflow:run', async (e, id, input = {}, runtime = {}) => {
     const projectId = runtime.projectId || currentProjectId || null;
     const project = projectId ? store.projects.get(projectId) : null;
-    return workflowEngine.runtime.run(id, {
+    return productEntry.workflow.run(id, {
       input,
       projectId,
       projectRoot: runtime.projectRoot || (project && project.root_path) || null,
@@ -1396,19 +1483,19 @@ function register(window) {
   });
   ipcMain.handle('workflow:getRun', (e, workflowRunId) => workflowEngine.runtime.getRun(workflowRunId));
   ipcMain.handle('workflow:listRuns', (e, limit) => workflowEngine.runtime.listRuns(limit));
-  ipcMain.handle('workflow:cancel', (e, workflowRunId) => workflowEngine.runtime.cancel(workflowRunId));
-  ipcMain.handle('workflow:approve', (e, workflowRunId) => workflowEngine.runtime.approve(workflowRunId));
-  ipcMain.handle('workflow:reject', (e, workflowRunId) => workflowEngine.runtime.reject(workflowRunId));
+  ipcMain.handle('workflow:cancel', (e, workflowRunId) => productEntry.workflow.cancel(workflowRunId));
+  ipcMain.handle('workflow:approve', (e, workflowRunId) => productEntry.workflow.approve(workflowRunId));
+  ipcMain.handle('workflow:reject', (e, workflowRunId) => productEntry.workflow.reject(workflowRunId));
 
   // v2.9.6 AI Generator: generation returns a durable draft immediately. Save
   // and validate are provider-free and always cross the real validator boundary.
-  ipcMain.handle('generator:generate', (e, request) => generatorEngine.service.generate(request));
+  ipcMain.handle('generator:generate', (e, request) => productEntry.generator.generate(request));
   ipcMain.handle('generator:getDraft', (e, draftId) => generatorEngine.service.getDraft(draftId));
   ipcMain.handle('generator:listDrafts', (e, limit) => generatorEngine.service.listDrafts(limit));
-  ipcMain.handle('generator:validate', (e, draftId) => generatorEngine.service.validate(draftId));
-  ipcMain.handle('generator:save', (e, draftId) => generatorEngine.service.save(draftId));
+  ipcMain.handle('generator:validate', (e, draftId) => productEntry.generator.validate(draftId));
+  ipcMain.handle('generator:save', (e, draftId) => productEntry.generator.save(draftId));
   ipcMain.handle('generator:discard', (e, draftId) => generatorEngine.service.discard(draftId));
-  ipcMain.handle('generator:cancel', (e, draftId) => generatorEngine.service.cancel(draftId));
+  ipcMain.handle('generator:cancel', (e, draftId) => productEntry.generator.cancel(draftId));
 
   // v2.7.1 — Project Mutation Lock IPC
   ipcMain.handle('lock:isBusy', (e, projectRoot) => projectLock.isBusy(projectRoot));
@@ -1666,7 +1753,8 @@ function register(window) {
 async function initServices() {
   // v2.3.1 (P1-14): 应用上次被关闭 —— 数据库里所有非终态 Run 统一标记 interrupted，
   // GUI 绝不恢复旧 Spinner。
-  try { runManager.interruptStale(); } catch (e) { console.log('[runManager] interruptStale 失败: ' + e.message); }
+  projectLock.clearAll();
+  try { recoverInterruptedRuntime({ store, runManager }); } catch (e) { console.log('[runtimeRecovery] recovery failed: ' + e.message); }
   const targets = store.mcpServers.list().filter(s => s.status === 'connected');
   // Reconnect in parallel: one dead server must not delay the others, and a
   // hung handshake is bounded by the client-side timeout.
@@ -1682,4 +1770,25 @@ async function initServices() {
   rebuildMcpToolMap();
 }
 
-module.exports = { register, initServices, shutdownServices, runChatTurn, runManager, _internals: { getTool, mcpManager, browser: browser.manager, computer: computer.manager, clineAdapter } };
+module.exports = {
+  register,
+  initServices,
+  shutdownServices,
+  runChatTurn,
+  runManager,
+  _internals: {
+    getTool,
+    mcpManager,
+    browser: browser.manager,
+    computer: computer.manager,
+    clineAdapter,
+    productDiagnostics,
+    projectLock,
+    activeRuns,
+    pendingPermissions,
+    lifecycleManager,
+    dynamicAgentFactory,
+    workflowEngine,
+    generatorEngine
+  }
+};

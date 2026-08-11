@@ -1,4 +1,47 @@
-# Test Report — Agent Dev Platform (v2.9.6)
+# Test Report — Agent Dev Platform (v2.9.7)
+
+## v2.9.7 — Architecture Freeze + Productization Baseline (2026-08-11)
+
+Starting HEAD: `cc9196a4decea0154df09b22850f10b63d99b67d` (v2.9.6 FROZEN). The starting worktree was clean. Baseline unit was 1607 pass / 0 fail / 1 skip (1608 total), and baseline E2E was 65/65.
+
+| Requirement | Deterministic proof | Status |
+| --- | --- | --- |
+| R1 Architecture Inventory | Production chain, module ownership, frozen boundaries, identity vocabulary, and authority contracts documented in `ARCHITECTURE_FREEZE.md` and `ARCHITECTURE_MANIFEST.json` | VERIFIED |
+| R2 Single Runtime Truth | Static inventory classified provider/model/tool/process/filesystem/AgentHub/Main/permission call sites; unsafe duplicate paths = 0 | VERIFIED |
+| R3 Authority / Identity | Real Workflow → Dynamic → Skill → Hook → Tool chain preserves Platform ∩ Parent ∩ AgentDefinition ∩ Skill; parent write deny reaches zero write executions; real Run IDs and route identity observed | VERIFIED |
+| R4 Lifecycle / Cleanup | Cancellation is terminal under late provider/agent results; dynamic instances, child processes, controller references, approvals, locks, and temporary ownership return to zero; quit cleanup is bounded | VERIFIED |
+| R5 Diagnostics | Unified product diagnostics use live evidence and preserve UNKNOWN/UNAVAILABLE; false READY = 0 | VERIFIED |
+| R6 Product Production Smoke | Actual application service and IPC-backed service entries cover Main, Dynamic, Skill, Hook, Workflow, Generator, Security Chain, and Cancellation with fake network providers only | VERIFIED |
+| R7 Desktop Reliability | Cold start, same-data restart, migrations, renderer/IPC, running work on quit, owned child cleanup, crash recovery, and real Windows Computer Use window discovery/screenshot verified | VERIFIED |
+| R8 Architecture Gate | Ten machine-checked frozen-boundary assertions plus live execution-signature inventory pass | VERIFIED |
+
+Final serialized release gates:
+
+```text
+npm test: 1612 pass / 0 fail / 1 skip (1613 total)
+npm run test:dynamic-agent: PASS
+npm run test:dynamic-agent:production: PASS
+npm run test:model-router: PASS
+npm run test:model-router:production: PASS
+npm run test:skill: PASS
+npm run test:skill:production: PASS
+npm run test:hook: PASS
+npm run test:hook:production: PASS
+npm run test:workflow: PASS
+npm run test:workflow:production: PASS
+npm run test:generator: PASS
+npm run test:generator:production: PASS
+npm run test:architecture: PASS (unsafe duplicate paths: 0)
+npm run test:product: 4/4
+npm run test:product:production: PASS (Main/Dynamic/Skill/Hook/Workflow/Generator/Security/Cancellation)
+npm run e2e: 65/65
+npm run dist: PASS — Windows NSIS + portable
+Windows Computer Use: PASS — real window discovery (4 windows) + real screenshot capture
+paid provider calls: 0
+secret scan: PASS — no real credential values; matches are explicit test placeholders/rejection sentinels
+```
+
+The architecture is frozen at v2.9.7: one execution truth, one authority truth, one identity truth, and terminal means terminal.
 
 ## v2.9.6 — AI Generator Framework (2026-08-11)
 

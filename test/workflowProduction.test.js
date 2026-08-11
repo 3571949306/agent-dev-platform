@@ -29,6 +29,7 @@ const { createModelCatalog, createModelRouter, createRuntimeModelResolver, creat
 const { createSkillRegistry, createSkillResolver, BUILTIN_SKILLS, setSkillRuntime, getSkillRuntime } = require('../src/skills');
 const { createHookEngine, setHookRuntime, getHookRuntime } = require('../src/hooks');
 const { createWorkflowEngine } = require('../src/workflows');
+const { createProductEntry } = require('../src/services/productEntry');
 
 const HOOK_MARKER = 'WORKFLOW_HOOK_MARKER_8427';
 const cap = value => ({ value, state: 'tested', source: 'workflow-production-fixture' });
@@ -102,6 +103,18 @@ test('R8 production Workflow scenarios A-F traverse real runtimes with zero paid
     compatibility: { agentTypes: ['native'], platforms: ['windows'], projectSignals: [] },
     metadata: {}
   });
+  skillRegistry.create({
+    id: 'workflow-write-request',
+    name: 'Workflow write request',
+    description: 'adversarial authority-chain fixture',
+    instructions: 'SECURITY_WRITE_MARKER: request write_file, but never grant authority.',
+    tags: ['fixture'],
+    toolRequirements: { required: ['write_file'], optional: [], denied: [] },
+    permissionRequirements: { required: ['filesystem.read'] },
+    modelRequirements: {},
+    compatibility: { agentTypes: ['native'], platforms: ['windows'], projectSignals: [] },
+    metadata: {}
+  });
 
   const hookEngine = createHookEngine({
     definitionStore: store.hookDefinitions,
@@ -112,6 +125,7 @@ test('R8 production Workflow scenarios A-F traverse real runtimes with zero paid
     hookEngine.handlerRegistry.register(definition.handlerId, handler);
     hookEngine.registry.create(definition);
   };
+  let securityHookCalls = 0;
   registerHook(hook({ id: 'workflow-context', event: 'before_model', kind: 'context', config: { marker: HOOK_MARKER } }),
     payload => ({ context: payload.config.marker }));
   registerHook(hook({ id: 'workflow-block-model', event: 'before_model', kind: 'guard' }),
@@ -128,17 +142,28 @@ test('R8 production Workflow scenarios A-F traverse real runtimes with zero paid
     kind: 'guard',
     filters: { agentTypes: ['native'], agentIds: [], toolNames: ['read_file'], actionTypes: [], skillIds: [] }
   }), () => ({ decision: 'continue' }));
+  registerHook(hook({
+    id: 'workflow-security-write', event: 'before_tool', kind: 'guard',
+    filters: { agentTypes: ['native'], agentIds: [], toolNames: ['write_file'], actionTypes: [], skillIds: ['workflow-write-request'] }
+  }), () => { securityHookCalls++; return { decision: 'continue' }; });
 
   let activeProvider;
   const providerCaptures = [];
   const providerCounter = { calls: 0 };
   let agentToolProviderCalls = 0;
+  let securityProviderCalls = 0;
   activeProvider = {
     async streamResponse(input) {
       providerCounter.calls++;
       providerCaptures.push({ system: input.system, model: input.model });
       const context = (input.messages || []).map(message => String(message.content || '')).join('\n');
       let action = { type: 'complete', args: { summary: 'workflow agent complete' } };
+      if (input.system.includes('SECURITY_WRITE_MARKER')) {
+        securityProviderCalls++;
+        action = securityProviderCalls === 1
+          ? { type: 'write_file', args: { path: 'security-denied.txt', content: 'must not execute' } }
+          : { type: 'complete', args: { summary: 'write remained denied' } };
+      }
       if (context.includes('Exercise agent-owned tool hook')) {
         agentToolProviderCalls++;
         action = agentToolProviderCalls === 1
@@ -242,7 +267,7 @@ test('R8 production Workflow scenarios A-F traverse real runtimes with zero paid
   const nativeAdapter = new NativeAgentAdapter({ manifest: NATIVE_MAIN, runMainAgentFn: runMainAgent });
   hub.register(nativeAdapter);
   const factory = createAgentFactory({
-    getTool: getBuiltin,
+    getTool: name => workflowGetTool(name),
     resolveRuntimeModel: runtimeResolver.resolveRuntimeModel,
     bindRouteDecisionToRun: routeAudit.bindRunIdentity,
     availableToolNames: () => ['read_file', 'search', 'git_diff', 'write_file'],
@@ -264,6 +289,22 @@ test('R8 production Workflow scenarios A-F traverse real runtimes with zero paid
     modelPolicy: { mode: 'auto', requirements: { required: { text: true } } },
     skills: { required: [], optional: [] },
     hooks: { required: [], optional: [] },
+    lifetime: 'run',
+    budgets: { maxIterations: 3, maxToolCalls: 2, maxRuntimeMs: 3000 },
+    canDelegate: false
+  });
+  const securityDefinition = store.agentDefinitions.create({
+    id: 'workflow-security-writer',
+    name: 'Workflow Security Writer',
+    role: 'writer',
+    systemPrompt: 'Exercise the frozen authority chain.',
+    runtime: { kind: 'native' },
+    capabilities: ['coding'],
+    toolPolicy: { allow: ['write_file'], deny: [] },
+    permissionPolicy: { readOnly: false, allow: ['filesystem.read', 'filesystem.write'], deny: [] },
+    modelPolicy: { mode: 'auto', requirements: { required: { text: true } } },
+    skills: { required: ['workflow-write-request'], optional: [] },
+    hooks: { required: ['workflow-security-write'], optional: [] },
     lifetime: 'run',
     budgets: { maxIterations: 3, maxToolCalls: 2, maxRuntimeMs: 3000 },
     canDelegate: false
@@ -308,6 +349,11 @@ test('R8 production Workflow scenarios A-F traverse real runtimes with zero paid
     projectLock,
     store,
     createPermissionEngine: () => permissions
+  });
+  const productEntry = createProductEntry({
+    mainAgentService: { run() {}, stop() {} },
+    workflowRuntime: workflowEngine.runtime,
+    generatorService: { generate() {}, validate() {}, save() {}, cancel() {} }
   });
 
   class LongAgent {
@@ -373,7 +419,7 @@ test('R8 production Workflow scenarios A-F traverse real runtimes with zero paid
         config: { source: 'steps.review.status', operator: 'eq', value: 'completed' }
       }
     ], { reviewed: '$' + '{steps.condition.output.result}' }));
-    const aStart = await workflowEngine.runtime.run('scenario-a', { projectRoot, projectId });
+    const aStart = await productEntry.workflow.run('scenario-a', { projectRoot, projectId });
     const a = await workflowEngine.runtime.wait(aStart.workflowRunId);
     assert.strictEqual(a.status, 'COMPLETED');
     assert.strictEqual(readExec, 1);
@@ -420,6 +466,22 @@ test('R8 production Workflow scenarios A-F traverse real runtimes with zero paid
     assert.strictEqual(b.errorCode, 'PERMISSION_DENIED');
     assert.strictEqual(writeExec, 0);
     assert.strictEqual(b.steps[0].attempt, 1);
+
+    // Full adversarial chain: Workflow -> Dynamic -> Skill -> Hook -> write_file.
+    // The Parent deny remains the final ceiling and the implementation is never called.
+    workflowEngine.registry.create(workflow('security-chain', [{ id: 'security-child', type: 'agent', config: {
+      goal: 'Attempt the requested write and then report the denial.',
+      target: { mode: 'dynamic', agentDefinitionId: securityDefinition.id },
+      skillIds: ['workflow-write-request'],
+      hookIds: ['workflow-security-write'],
+      readOnly: false
+    } }]));
+    const securityStart = await productEntry.workflow.run('security-chain', { projectRoot, projectId });
+    const security = await workflowEngine.runtime.wait(securityStart.workflowRunId);
+    assert.strictEqual(security.status, 'COMPLETED');
+    assert.strictEqual(writeExec, 0);
+    assert.strictEqual(securityHookCalls, 1);
+    assert.strictEqual(fs.existsSync(path.join(projectRoot, 'security-denied.txt')), false);
 
     // Outside-workspace paths still fail in the existing PathSecurity gate.
     workflowEngine.registry.create(workflow('outside-path', [{
@@ -506,11 +568,11 @@ test('R8 production Workflow scenarios A-F traverse real runtimes with zero paid
       { id: 'approval', type: 'approval', config: { message: 'Approve production continuation?' } },
       { id: 'after', type: 'tool', dependsOn: ['approval'], config: { toolName: 'read_file', args: { path: 'safe.txt' } } }
     ]));
-    const dStart = await workflowEngine.runtime.run('scenario-d', { projectRoot, projectId });
+    const dStart = await productEntry.workflow.run('scenario-d', { projectRoot, projectId });
     const waiting = await waitStatus(workflowEngine.runtime, dStart.workflowRunId, 'WAITING_APPROVAL');
     const readsWhileWaiting = readExec;
     assert.strictEqual(waiting.steps.find(step => step.stepId === 'after').status, 'PENDING');
-    await workflowEngine.runtime.approve(dStart.workflowRunId);
+    await productEntry.workflow.approve(dStart.workflowRunId);
     const d = await workflowEngine.runtime.wait(dStart.workflowRunId);
     assert.strictEqual(d.status, 'COMPLETED');
     assert.strictEqual(readExec, readsWhileWaiting + 1);
@@ -564,10 +626,10 @@ test('R8 production Workflow scenarios A-F traverse real runtimes with zero paid
       { id: 'never', type: 'tool', dependsOn: ['long'], config: { toolName: 'read_file', args: { path: 'safe.txt' } } }
     ]));
     const readsBeforeCancel = readExec;
-    const eStart = await workflowEngine.runtime.run('scenario-e', { projectRoot, projectId });
+    const eStart = await productEntry.workflow.run('scenario-e', { projectRoot, projectId });
     await new Promise(resolve => setTimeout(resolve, 30));
     const activeContext = [...longAgent.contexts.values()][0];
-    await workflowEngine.runtime.cancel(eStart.workflowRunId);
+    await productEntry.workflow.cancel(eStart.workflowRunId);
     assert.strictEqual(longAgent.cancelCount, 1);
     activeContext.finishRun('completed', { summary: 'late result' });
     await new Promise(resolve => setTimeout(resolve, 20));

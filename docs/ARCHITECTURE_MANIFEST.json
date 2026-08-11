@@ -1,0 +1,39 @@
+{
+  "schemaVersion": 1,
+  "frozenAtVersion": "2.9.7",
+  "currentPackageVersion": "2.9.7",
+  "releaseState": "frozen",
+  "frameworks": {
+    "mainAgent": "frozen",
+    "dynamicAgent": "frozen",
+    "modelRouter": "frozen",
+    "skillEngine": "frozen",
+    "hookEngine": "frozen",
+    "workflowEngine": "frozen",
+    "generator": "frozen"
+  },
+  "canonicalModules": {
+    "mainAgent": "src/agent/runtime/mainAgentRuntime.js",
+    "dynamicAgent": "src/agents/dynamic/agentFactory.js",
+    "modelRouter": "src/models/router/modelRouter.js",
+    "skillEngine": "src/skills/skillResolver.js",
+    "hookEngine": "src/hooks/hookEngine.js",
+    "workflowEngine": "src/workflows/workflowRuntime.js",
+    "generator": "src/generator/generatorService.js",
+    "toolExecutor": "src/agent/runtime/actionExecutor.js",
+    "permissionEngine": "src/security/permissions.js",
+    "runManager": "src/agent/runManager.js",
+    "agentHub": "src/agents/hub/agentHub.js",
+    "productEntry": "src/services/productEntry.js"
+  },
+  "requiredContractPhrases": [
+    "Model Provider != Agent Provider != Tool Provider",
+    "Skill cannot grant authority",
+    "Hook cannot grant authority",
+    "Workflow cannot create authority",
+    "Generator cannot execute configuration",
+    "Platform ∩ Parent ∩ AgentDefinition ∩ Skill",
+    "PermissionEngine + PathSecurity",
+    "Terminal means terminal"
+  ]
+}

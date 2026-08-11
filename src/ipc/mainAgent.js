@@ -65,10 +65,15 @@ function bindMainRouteDecision({ selection, bindRouteDecisionToRun, runId, conve
  *   requestPermission, getCurrentProject, getAgentFull, PermissionEngine
  * }
  */
-function register(deps) {
+function register(deps, registrar = reg) {
   const { store, emit, runManager, getTool, buildProvider, resolveModelFor, resolveRuntimeModel, bindRouteDecisionToRun, activeRuns, requestPermission, getCurrentProject, getAgentFull, PermissionEngine, skillRegistry, skillResolver, hookEngine, availableToolNames } = deps;
+  const handlers = {};
+  const expose = (channel, fn) => {
+    handlers[channel] = fn;
+    registrar(channel, fn);
+  };
 
-  reg('mainAgent:run', async ({ conversationId, agentId, goal, verification, requiredFiles, initialPlan, timeoutMs, useInjectedModel, skillIds, hookIds } = {}) => {
+  expose('mainAgent:run', async ({ conversationId, agentId, goal, verification, requiredFiles, initialPlan, timeoutMs, useInjectedModel, skillIds, hookIds } = {}) => {
     if (!goal) throw new Error('goal 必填（用户目标）');
     const agent = getAgentFull ? getAgentFull(agentId) : null;
     const project = getCurrentProject ? getCurrentProject() : null;
@@ -129,7 +134,7 @@ function register(deps) {
     return result; // { runId, conversationId }
   });
 
-  reg('mainAgent:stop', ({ conversationId, runId } = {}) => {
+  expose('mainAgent:stop', ({ conversationId, runId } = {}) => {
     const key = conversationId || runId;
     const ac = activeRuns.get(key);
     if (ac) ac.abort();
@@ -140,25 +145,25 @@ function register(deps) {
     return { stopped: !!ac };
   });
 
-  reg('mainAgent:changedFiles', ({ taskId } = {}) => {
+  expose('mainAgent:changedFiles', ({ taskId } = {}) => {
     // 通过 taskId 查 file_changes
     const ctx = { store, taskId, projectId: null, agentId: null };
     return changedFilesSummary(ctx);
   });
 
-  reg('mainAgent:fileDiff', ({ taskId, filePath } = {}) => {
+  expose('mainAgent:fileDiff', ({ taskId, filePath } = {}) => {
     const files = listChangedFiles({ store, taskId });
     const f = files.find(x => x.path === filePath);
     if (!f) return null;
     return { path: f.path, before: f.before, after: f.after, diff: f.diff };
   });
 
-  reg('mainAgent:listRuns', ({ limit = 20 } = {}) => {
+  expose('mainAgent:listRuns', ({ limit = 20 } = {}) => {
     try { return store.runs.list(limit); } catch { return []; }
   });
 
   // 测试钩子：注入 FakeCodingModel（spec §35，E2E 用）
-  reg('mainAgent:testSetModel', ({ script, opts } = {}) => {
+  expose('mainAgent:testSetModel', ({ script, opts } = {}) => {
     if (process.env.NODE_ENV !== 'test' && !process.env.CI) {
       throw new Error('testSetModel 仅在测试环境可用');
     }
@@ -170,7 +175,20 @@ function register(deps) {
     return { injected: !!injectedModel };
   });
 
-  reg('mainAgent:states', () => ({ NON_TERMINAL: states.NON_TERMINAL, TERMINAL: states.TERMINAL }));
+  expose('mainAgent:states', () => ({ NON_TERMINAL: states.NON_TERMINAL, TERMINAL: states.TERMINAL }));
+
+  return Object.freeze({
+    run: handlers['mainAgent:run'],
+    stop: handlers['mainAgent:stop'],
+    changedFiles: handlers['mainAgent:changedFiles'],
+    fileDiff: handlers['mainAgent:fileDiff'],
+    listRuns: handlers['mainAgent:listRuns'],
+    states: handlers['mainAgent:states']
+  });
 }
 
-module.exports = { register, EVENTS, resolveConfiguredMainModel, bindMainRouteDecision, _setInjectedModel: (m) => { injectedModel = m; } };
+function createMainAgentService(deps) {
+  return register(deps, () => {});
+}
+
+module.exports = { register, createMainAgentService, EVENTS, resolveConfiguredMainModel, bindMainRouteDecision, _setInjectedModel: (m) => { injectedModel = m; } };

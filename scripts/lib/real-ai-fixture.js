@@ -46,10 +46,25 @@ function createRealAiFixture() {
 
   const originalTestContent = fs.readFileSync(testPath, 'utf8');
   let cleaned = false;
+  /**
+   * v2.9.0 Harness Safety Patch（R2）：cleanup 必须返回明确结果，不允许静默吞掉
+   * 删除失败：{ ok: true } 或 { ok: false, error }。幂等：重复调用返回首次结果。
+   */
+  let cleanupResult = null;
   function cleanup() {
-    if (cleaned) return;
+    if (cleaned) return cleanupResult || { ok: true };
     cleaned = true;
-    try { fs.rmSync(root, { recursive: true, force: true }); } catch { /* noop */ }
+    try {
+      fs.rmSync(root, { recursive: true, force: true });
+      if (fs.existsSync(root)) {
+        cleanupResult = { ok: false, error: new Error(`fixture root 删除后仍存在: ${root}`) };
+      } else {
+        cleanupResult = { ok: true };
+      }
+    } catch (e) {
+      cleanupResult = { ok: false, error: e };
+    }
+    return cleanupResult;
   }
 
   return {

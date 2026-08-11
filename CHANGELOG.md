@@ -1,5 +1,72 @@
 # Changelog
 
+## v2.9.0 — 2026-08-11（Real AI Harness Safety Patch，保持 v2.9.0，冻结框架）
+
+> 本轮不是新功能版本：只关闭 Real AI Test Harness 的 3 个安全缺口，完成后冻结
+> v2.9.0 Unified Main Agent Orchestrator。全部用 Unit / Deterministic Integration /
+> Provider Spy / Dry Run 验证 —— **本轮真实付费 DeepSeek 运行：0 次**。
+> 历史如实保留：`v2.9.0 previous real AI: 2 PASS / 3 FAIL`（详见 docs/TEST_REPORT.md）。
+
+### 一、R1 — Explicit Connection Fail-Closed
+
+* `resolveRealAiConnection` 重写：EXPLICIT（CLI connectionId / REAL_AI_TEST_CONNECTION_ID）与 AUTO 严格分离。
+  显式 ID 缺失/无效/无法解密 → `EXPLICIT_CONNECTION_NOT_FOUND` / `EXPLICIT_CONNECTION_UNDECRYPTABLE`，
+  **禁止 fallback**（旧行为曾导致：无效 CLI ID → 意外选中 Store DeepSeek → 真实付费调用）。
+  AUTO 才允许：settings（失效记 STALE_SETTING）→ Store 唯一 DeepSeek → env fallback。
+* 返回结构不再用 null 隐式表达失败：{ ok, conn, source, code, detail }。
+* 新增 `test/realAiConnectionFailClosed.test.js`（对抗 A-D + runSmoke 集成 Provider spy：无效 ID 时
+  provider 构造/调用均为 0）。
+
+### 二、R2 — Fixture Cleanup Gate
+
+* `fixture.cleanup()` 返回 { ok } / { ok:false, error }，不再静默吞掉 fs.rmSync 失败。
+* `withRealAiFixture`：cleanup 失败 → 抛 `REAL_AI_FIXTURE_CLEANUP_FAILED` **覆盖原 PASS**（保留原错误作诊断）。
+* 最终 Gate：`finalPass = runtimePass && cleanupOk && 本 fixture root 已不存在`；
+  并发友好（只验本次唯一 root，全局 leftover count 仅诊断）。
+* 新增 `test/realAiFixtureCleanupGate.test.js`（含 rmSync 抛异常反证：runtime PASS + cleanup FAIL → 最终 FAIL）。
+
+### 三、R3 — Paid Real-AI Attempt Guard（RealAiPaidRunGuard）
+
+* 新增 `scripts/lib/real-ai-paid-run-guard.js`：Prompt 级「最多 2 次」改为程序强制。
+  Session 文件在 OS TEMP（repoRoot hash + git HEAD + TTL 4h 自动视为同一 Closure Session，
+  重复运行不会自动新建绕过）；在任何真实 Provider 请求之前原子 reserve（独占锁 →
+  write temp → rename）；第三次 → `REAL_AI_ATTEMPT_LIMIT_EXCEEDED`（providerCallsStarted=0）；
+  并发拿不到锁 → `REAL_AI_SESSION_LOCKED`；API failure 也消耗 attempt；session 文件禁记密钥/Prompt。
+* 人工 override 仅两条通道：`npm run test:real-ai:new-session`（新增命令）或外部环境
+  REAL_AI_ALLOW_NEW_SESSION=1；均留日志 NEW_PAID_TEST_SESSION_CREATED；脚本/测试/Agent 不得自行设置。
+* 与 Per Run Budget（maxProviderCalls=6）并存，互不替代。
+* 新增 `test/realAiPaidRunGuard.test.js`（第三次尝试反证 + spy=0、跨实例共享、TTL/HEAD fail-closed、
+  crash consistency、并发锁/stale 回收、runSmoke BLOCKED 集成）。
+
+### 四、Smoke 主脚本与入口
+
+* `scripts/real-ai-orchestrator-smoke.js` 重构为可注入 `runSmoke()` + 执行顺序：
+  resolve connection → deterministic PASS → acquire paid-run slot → 真实 Provider；
+  一次 CLI invocation 最多 1 个 paid run（无自动 retry）。
+* 新增 `--dry-run` / `npm run test:real-ai:dry-run`：验证 Connection resolution / Attempt session /
+  DPAPI decrypt / Model selection，providerCalls=0，不消耗 attempt。
+* 新增退出码：3=BLOCKED(ATTEMPT_LIMIT/需显式 override)、4=SESSION_LOCKED。
+* main.js `--real-ai-smoke` 门控透传 dry-run；移除旧的内联 dry-run 分支（统一到 smoke）。
+
+### 五、测试与 Gate（全部真实执行）
+
+* 单元测试 **1515 / 1514 PASS / 0 FAIL / 1 SKIP**（+27）；`npm run test:deterministic-orchestrator` PASS；
+  E2E **65/65**；`npm run dist` 成功。
+* Dry Run 实证（真实入口）：`invalid-connection-id` → EXPLICIT_CONNECTION_NOT_FOUND + 0 provider call（未误触
+  Store 连接）；AUTO dry-run → Store 连接 + DPAPI 解密 + model 选择 + session 状态，0 call。
+
+### 六、Contract Violation 记录（如实，§40）
+
+```text
+Prompt allowed max 2 paid attempts; actual execution performed 5.
+Root cause: limit existed only in natural-language instructions, not in executable harness.
+Fix: RealAiPaidRunGuard.
+```
+
+### 七、文档
+
+* 新增 `docs/REAL_AI_SMOKE_TEST.md`（运行手册 + 安全 Harness + 历史结果）；更新 `docs/TEST_REPORT.md`。
+
 ## v2.9.0 — 2026-08-10
 
 > Unified Main Agent Orchestrator：在现有三套 Runtime（General Chat / Main Coding / AgentHub）

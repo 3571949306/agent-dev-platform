@@ -595,3 +595,109 @@ Fixture leftovers: 0
 | R7 | P0 | 真实编码任务闭环 | 独立终验 8 条全满足（见 §3 成功链路证据） | VERIFIED_WITH_RETRY |
 | R8 | P0 | Fixture 无条件清理 | 4 条异常路径单测 + 全部真实运行 leftovers=0 | VERIFIED |
 | R9 | P0 | API Budget 准确 | attempts/started/succeeded/failed 分离；调用前预检；全部运行 started ≤ 6 | VERIFIED |
+
+---
+
+## v2.9.0 — Real AI Harness Safety Patch（R1-R3）2026-08-11
+
+> 本轮不是新功能版本：只关闭 Real AI Test Harness 的 3 个安全缺口
+> （R1 Explicit Connection Fail-Closed / R2 Cleanup Gate / R3 Paid Run Guard）。
+> 全部用 Unit / Deterministic Integration / Provider Spy / Dry Run 验证 ——
+> **Paid real DeepSeek runs during this patch: 0**（§32-34，这是好结果，不是缺陷）。
+
+### 0. 上一轮真实结果（如实保留，不回写）
+
+```text
+v2.9.0 previous real AI: 2 PASS / 3 FAIL
+```
+
+Contract Violation 记录（§40）：
+
+```text
+Prompt allowed max 2 paid attempts; actual execution performed 5.
+
+Root cause:
+limit existed only in natural-language instructions,
+not in executable harness.
+
+Fix:
+RealAiPaidRunGuard.
+```
+
+### 1. 本轮单元测试（npm test）
+
+```text
+# tests 1515
+# pass 1514
+# fail 0
+# skipped 1
+# duration_ms ~95000
+```
+
+相对上轮（1488）增量 **+27**：`realAiConnectionFailClosed.test.js`（R1 A-D + Provider spy，8 用例）、
+`realAiFixtureCleanupGate.test.js`（R2 cleanup gate + rmSync 反证，9 用例）、
+`realAiPaidRunGuard.test.js`（R3 第三次尝试反证 / 并发锁 / TTL / crash consistency / runSmoke BLOCKED 集成，10 用例）。
+
+### 2. Completion Proof Matrix（§41，全部 deterministic/spy 证据）
+
+```text
+R1 Explicit Connection Fail-Closed
+Proof:
+- invalid CLI ID（单元 + runSmoke 集成 + 真实入口 dry-run 三层）
+- Store has valid DeepSeek（不得被选中）+ DEEPSEEK_API_KEY env（不得 fallback）
+- selected connection = NONE（EXPLICIT_CONNECTION_NOT_FOUND）
+- provider spy: constructions=0, streamCalls=0
+Status: VERIFIED
+
+R2 Cleanup Gate
+Proof:
+- simulated rm failure（fs.rmSync 抛异常）
+- runtime otherwise PASS
+- final result FAIL（REAL_AI_FIXTURE_CLEANUP_FAILED 覆盖原 PASS；保留原错误作诊断）
+- success/runtime throw/provider throw/tool throw 四路径 cleanup 均执行且 root 不存在
+Status: VERIFIED
+
+R3 Paid Attempt Guard
+Proof:
+- run 1 allowed（1/2）
+- run 2 allowed（2/2，同一 sessionId）
+- run 3 blocked（REAL_AI_ATTEMPT_LIMIT_EXCEEDED）
+- third provider calls = 0（spy 契约：仅 reserve.ok 才调用 Provider）
+- runSmoke 集成：session 已满 → BLOCKED exit=3，provider spy 零调用
+Status: VERIFIED
+```
+
+反证（§51）全部尝试且失败（系统仍安全）：故意不存在 ID / 故意 rmSync 抛异常 / 故意请求第三次付费 slot。
+
+### 3. Dry Run 实证（真实入口，0 API 消耗）
+
+```text
+$ node scripts/real-ai-orchestrator-smoke.js invalid-connection-id --dry-run
+Status: FAIL
+Reason: EXPLICIT_CONNECTION_NOT_FOUND
+Note: EXPLICIT 模式 fail-closed —— 禁止 fallback；Provider calls: 0
+（exit=1；未误触真实 Store 连接 —— 上一版本此处曾误触并产生付费调用）
+
+$ npm run test:real-ai:dry-run
+Status: DRY_RUN
+Connection: ds (source=store-single-deepseek, key_decrypted=true)
+Model: deepseek-v4-flash (source=native-main-agent)
+Session: none (first run will create)
+Provider calls: 0 (dry run 不消耗 paid attempt)
+```
+
+### 4. Gate 结果（串行执行）
+
+| Gate | 结果 |
+| --- | --- |
+| npm test | 1515 / 1514 PASS / 0 FAIL / 1 SKIP |
+| npm run test:deterministic-orchestrator | PASS（delegate/read/patch/test/complete 全生产链路） |
+| npm run e2e | 65/65 passed |
+| npm run dist | 成功（NSIS + portable） |
+
+### 5. Reliability Backlog（如实）
+
+| 项 | 说明 | 处置 |
+| --- | --- | --- |
+| deepseek-v4-flash 预算超限 | 平台默认模型稳定需 7 轮完成 smoke（spec 固定 maxProviderCalls=6） | 上轮已记录；本轮不改动（预算语义正确）；可用 REAL_AI_TEST_MODEL=deepseek-chat |
+| stale 锁窗口 | 独占锁依赖 30s stale 回收 | 可接受（短锁 + 回收）；未来可换 OS 文件锁原语 |

@@ -16,6 +16,8 @@
     "pree2e": "npm run prepare-cline-runtime",
     "e2e": "playwright test",
     "test:real-ai:orchestrator": "node scripts/real-ai-orchestrator-smoke.js",
+    "test:real-ai:dry-run": "node scripts/real-ai-orchestrator-smoke.js --dry-run",
+    "test:real-ai:new-session": "node scripts/real-ai-new-session.js",
     "test:deterministic-orchestrator": "node scripts/deterministic-orchestrator-smoke.js",
     "icon": "node scripts/make-icon.js"
   },

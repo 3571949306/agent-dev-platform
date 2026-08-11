@@ -62,16 +62,18 @@ test('createRealAiFixture：字段齐全 + 初始测试 FAIL（fixture 真有 bu
 // §5 Connection 解析优先级
 // ---------------------------------------------------------------------------
 
-test('§5 无任何 Connection / env → null（如实 SKIP，不得伪造）', () => {
+test('§5 无任何 Connection / env → { ok:false, CONNECTION_NOT_CONFIGURED }（如实 SKIP，不得伪造）', () => {
   withEnv({ DEEPSEEK_API_KEY: undefined, REAL_AI_TEST_CONNECTION_ID: undefined }, () => {
-    assert.strictEqual(rt.resolveRealAiConnection(null, { store: null }), null);
+    const r = rt.resolveRealAiConnection(null, { store: null });
+    assert.strictEqual(r.ok, false);
+    assert.strictEqual(r.code, 'CONNECTION_NOT_CONFIGURED');
   });
 });
 
 test('§5 env fallback：source 必须标记 env-fallback（不是 env）', () => {
   withEnv({ DEEPSEEK_API_KEY: 'sk-unit-placeholder', REAL_AI_TEST_CONNECTION_ID: undefined }, () => {
     const r = rt.resolveRealAiConnection(null, { store: null });
-    assert.ok(r);
+    assert.strictEqual(r.ok, true);
     assert.strictEqual(r.source, 'env-fallback');
     assert.strictEqual(r.conn.api_key, 'sk-unit-placeholder');
   });
@@ -83,7 +85,7 @@ test('§5 优先级：settings.realAiTestConnectionId 优先于 env-fallback；s
     withEnv({ DEEPSEEK_API_KEY: 'sk-env', REAL_AI_TEST_CONNECTION_ID: undefined }, () => {
       // 未设置 settings 时：store 中恰好唯一 DeepSeek 连接 → 使用它（优先于 env）
       const r1 = rt.resolveRealAiConnection(null, { store });
-      assert.ok(r1, '应解析出 store 连接');
+      assert.strictEqual(r1.ok, true, '应解析出 store 连接');
       assert.strictEqual(r1.source, 'store-single-deepseek');
       assert.strictEqual(r1.connectionId, c1.id);
       assert.strictEqual(r1.conn.api_key, 'sk-one', '必须用平台绑定的 Connection，而非 env key');
@@ -91,6 +93,7 @@ test('§5 优先级：settings.realAiTestConnectionId 优先于 env-fallback；s
       // 设置 settings 后：settings 优先
       store.settings.set('realAiTestConnectionId', c1.id);
       const r2 = rt.resolveRealAiConnection(null, { store });
+      assert.strictEqual(r2.ok, true);
       assert.strictEqual(r2.source, 'settings');
       assert.strictEqual(r2.connectionId, c1.id);
     });
@@ -105,11 +108,13 @@ test('§5 explicit CLI connectionId 最高优先；REAL_AI_TEST_CONNECTION_ID �
   try {
     withEnv({ DEEPSEEK_API_KEY: undefined, REAL_AI_TEST_CONNECTION_ID: c2.id }, () => {
       const rCli = rt.resolveRealAiConnection(c1.id, { store });
-      assert.strictEqual(rCli.source, 'cli');
+      assert.strictEqual(rCli.ok, true);
+      assert.strictEqual(rCli.source, 'cli-explicit');
       assert.strictEqual(rCli.connectionId, c1.id);
 
       const rEnv = rt.resolveRealAiConnection(null, { store });
-      assert.strictEqual(rEnv.source, 'env-id');
+      assert.strictEqual(rEnv.ok, true);
+      assert.strictEqual(rEnv.source, 'env-id-explicit');
       assert.strictEqual(rEnv.connectionId, c2.id);
     });
   } finally { /* connections 保留不影响其他用例（唯一性测试已先执行） */ }

@@ -95,44 +95,85 @@ function modelIdFromListModel(m) {
 }
 
 /**
- * 解析 Real AI Test Connection（spec §5 优先级）：
- *   1. explicit CLI connectionId
- *   2. REAL_AI_TEST_CONNECTION_ID
- *   3. 平台保存的 settings.realAiTestConnectionId
- *   4. Store 中恰好唯一可用的 DeepSeek 测试连接
- *   5. env fallback（DEEPSEEK_API_KEY，source = env-fallback）
- * 禁止用 DEEPSEEK_API_KEY env 优先覆盖平台已绑定 Connection。
+ * 解析 Real AI Test Connection。
+ *
+ * v2.9.0 Harness Safety Patch（R1 Fail-Closed）：EXPLICIT / AUTO 严格分离。
+ *   EXPLICIT（用户显式提供 CLI connectionId 或 REAL_AI_TEST_CONNECTION_ID）：
+ *     ID 存在且可解密 → 恰好使用该连接（source = cli-explicit / env-id-explicit）；
+ *     ID 缺失 / 无效 / 无法解密 → FAIL CLOSED（EXPLICIT_CONNECTION_NOT_FOUND /
+ *     EXPLICIT_CONNECTION_UNDECRYPTABLE），**禁止 fallback** 到 settings / Store / env。
+ *     （旧行为曾导致：传入无效 CLI ID → 意外选中 Store DeepSeek → 真实付费调用。）
+ *   AUTO（无显式 ID）才允许 fallback：
+ *     settings.realAiTestConnectionId（失效时记录 stale 后继续自动发现）
+ *     → Store 唯一可用 DeepSeek → env fallback。
+ *
+ * 返回结构不再用 null 隐式表达失败：
+ *   { ok: true, conn, source, connectionId }
+ *   { ok: false, code: 'EXPLICIT_CONNECTION_NOT_FOUND' | 'EXPLICIT_CONNECTION_UNDECRYPTABLE'
+ *                | 'CONNECTION_NOT_CONFIGURED', detail }
  */
 function resolveRealAiConnection(connectionId, opts = {}) {
   const store = opts.store || null;
+  const explicitId = connectionId || process.env.REAL_AI_TEST_CONNECTION_ID || null;
+  const explicitSource = connectionId ? 'cli-explicit' : 'env-id-explicit';
 
+  // ---------- EXPLICIT 模式：fail-closed，禁止 fallback ----------
+  if (explicitId) {
+    if (!store || typeof store.connections.getDecrypted !== 'function') {
+      return {
+        ok: false,
+        code: 'EXPLICIT_CONNECTION_NOT_FOUND',
+        detail: `显式 Connection ID "${explicitId}" 无法解析：平台 Store 不可用（fail-closed，禁止 fallback）`
+      };
+    }
+    let conn = null;
+    let decryptError = null;
+    try {
+      conn = store.connections.getDecrypted(explicitId);
+    } catch (e) {
+      decryptError = e;
+    }
+    if (!conn) {
+      return {
+        ok: false,
+        code: 'EXPLICIT_CONNECTION_NOT_FOUND',
+        detail: `显式 Connection ID "${explicitId}" 不存在（fail-closed，禁止 fallback 到 settings/Store/env）`
+      };
+    }
+    if (!conn.api_key) {
+      return {
+        ok: false,
+        code: 'EXPLICIT_CONNECTION_UNDECRYPTABLE',
+        detail: `显式 Connection "${conn.name || explicitId}" 无法解密出 API Key${decryptError ? '（' + String(decryptError.message || decryptError).slice(0, 120) + '）' : ''}（fail-closed）`
+      };
+    }
+    return { ok: true, conn, source: explicitSource, connectionId: explicitId };
+  }
+
+  // ---------- AUTO 模式：允许按优先级 fallback ----------
   const fromStore = (id, source) => {
     if (!store || !id || typeof store.connections.getDecrypted !== 'function') return null;
     try {
       const conn = store.connections.getDecrypted(id);
-      if (conn && conn.api_key) return { conn, source, connectionId: id };
+      if (conn && conn.api_key) return { ok: true, conn, source, connectionId: id };
     } catch { /* fallthrough */ }
     return null;
   };
 
-  // 1. explicit CLI connectionId
-  const cli = fromStore(connectionId, 'cli');
-  if (cli) return cli;
-
-  // 2. REAL_AI_TEST_CONNECTION_ID
-  const envId = fromStore(process.env.REAL_AI_TEST_CONNECTION_ID || null, 'env-id');
-  if (envId) return envId;
-
-  // 3. 平台保存的 realAiTestConnectionId
+  // 1. 平台保存的 realAiTestConnectionId（用户明确保存的测试连接）
   if (store && store.settings) {
     try {
       const saved = store.settings.get('realAiTestConnectionId', null);
-      const s = fromStore(saved, 'settings');
-      if (s) return s;
+      if (saved) {
+        const s = fromStore(saved, 'settings');
+        if (s) return s;
+        // 失效：明确记录 stale setting，然后继续自动发现（AUTO 模式下语义确定）
+        console.log(`[real-ai-runtime] STALE_SETTING: settings.realAiTestConnectionId=${saved} 已失效（不存在/无法解密），继续自动发现`);
+      }
     } catch { /* non-fatal */ }
   }
 
-  // 4. Store 中恰好只有一个可用 DeepSeek 测试连接
+  // 2. Store 中恰好只有一个可用 DeepSeek 测试连接
   if (store && typeof store.connections.list === 'function') {
     try {
       const candidates = store.connections.list().filter(c => c.has_key && isDeepSeekLikeConnection(c));
@@ -143,7 +184,7 @@ function resolveRealAiConnection(connectionId, opts = {}) {
     } catch { /* non-fatal */ }
   }
 
-  // 5. env fallback（仅兜底；source 明确标记 env-fallback）
+  // 3. env fallback（仅兜底；source 明确标记 env-fallback，绝不覆盖平台绑定）
   if (process.env.DEEPSEEK_API_KEY) {
     const pv = process.env.DEEPSEEK_PROVIDER || 'deepseek';
     const conn = {
@@ -154,9 +195,9 @@ function resolveRealAiConnection(connectionId, opts = {}) {
       base_url: process.env.DEEPSEEK_BASE_URL || (pv === 'deepseek' ? 'https://api.deepseek.com' : null),
       model: process.env.REAL_AI_TEST_MODEL || (pv === 'deepseek' ? 'deepseek-chat' : null)
     };
-    return { conn, source: 'env-fallback', connectionId: conn.id };
+    return { ok: true, conn, source: 'env-fallback', connectionId: conn.id };
   }
-  return null;
+  return { ok: false, code: 'CONNECTION_NOT_CONFIGURED', detail: '无平台 Connection 且无 DEEPSEEK_API_KEY env' };
 }
 
 /**
@@ -279,24 +320,53 @@ function createDeterministicRequestPermission(log) {
 }
 
 // ---------------------------------------------------------------------------
-// R8 — Fixture 所有权（谁 create 谁在同一函数 try/finally cleanup）
+// R8/R2 — Fixture 所有权 + Cleanup Gate（谁 create 谁在同一函数 cleanup）
 // ---------------------------------------------------------------------------
 
 /**
- * Fixture 生命周期唯一合法模式：create 与 cleanup 在同一函数 try/finally。
- * 中途 throw（provider throws / model timeout / tool error）也不会泄漏 TEMP 目录。
+ * Fixture 生命周期唯一合法模式：create 与 cleanup 在同一函数。
+ *
+ * v2.9.0 Harness Safety Patch（R2 Cleanup Gate）：
+ *   - cleanup 失败 → 抛 REAL_AI_FIXTURE_CLEANUP_FAILED，**覆盖原 PASS**（不允许
+ *     「runtime PASS + cleanup FAIL → 仍 exit 0」）；同时保留原始 executionError。
+ *   - 返回 { result, cleanupResult, rootGone }，调用方据此计算最终 Gate：
+ *     finalPass = runtimePass && cleanupOk && 本 fixture root 已不存在。
+ *   - 并发友好（§注意并发）：只验证本次 fixture 唯一 root 已不存在；全局
+ *     leftover count 仅作诊断，不作为唯一 Proof。
  */
 async function withRealAiFixture(fn) {
   const { createRealAiFixture } = require('./real-ai-fixture');
   const fixture = createRealAiFixture();
+  let result;
+  let executionError = null;
   try {
-    return await fn(fixture);
-  } finally {
-    fixture.cleanup();
+    result = await fn(fixture);
+  } catch (e) {
+    executionError = e;
   }
+
+  const cleanupResult = fixture.cleanup();
+  let rootGone = false;
+  try { rootGone = !fs.existsSync(fixture.root); } catch { rootGone = false; }
+
+  if (!cleanupResult.ok || !rootGone) {
+    const err = new Error(
+      'REAL_AI_FIXTURE_CLEANUP_FAILED: fixture 清理失败（' +
+      (cleanupResult.error ? String(cleanupResult.error.message || cleanupResult.error) : 'root 仍存在') +
+      `） root=${fixture.root}`
+    );
+    err.code = 'REAL_AI_FIXTURE_CLEANUP_FAILED';
+    err.cleanupResult = cleanupResult;
+    err.rootGone = rootGone;
+    err.executionError = executionError; // 保留原始错误作为诊断
+    throw err;
+  }
+
+  if (executionError) throw executionError;
+  return { result, cleanupResult, rootGone, fixtureRoot: fixture.root };
 }
 
-/** TEMP 残留目录计数（R8 Proof：异常路径执行后应为 0）。 */
+/** TEMP 残留目录计数（仅诊断；并发下可能含其他 run 的目录，不作为唯一 Proof）。 */
 function countFixtureLeftovers() {
   try {
     return fs.readdirSync(os.tmpdir()).filter(f => f.startsWith(FIXTURE_PREFIX)).length;

@@ -1,5 +1,58 @@
 # Test Report — Agent Dev Platform（v2.9.1）
 
+## v2.9.1 — Dynamic Agent Closure Patch（2026-08-11）
+
+> **基线：** `ed19c06d5091bdd3dfd91f47fb0211f70a3c0e3b`，version 保持 `2.9.1`。
+> **Provider policy：** 本 Patch 仅 deterministic 验证，真实/付费 provider calls 为 0。
+
+### P0 Requirement Matrix
+
+| Requirement | Result | Automated proof |
+| --- | --- | --- |
+| R1 Main Agent Dynamic API Awareness | VERIFIED | `dynamicAgentPrompt.test.js` 构建真实 `buildSystemPrompt()`，锁定 `preferredAgentId` / `agentDefinitionId` / `inlineAgentDefinition`、最小 schema 与防滥用指引 |
+| R2 Dynamic Base Prompt Isolation | VERIFIED | Dynamic child system 包含 Runtime Safety Contract、Dynamic Agent Base、role marker；不包含“你是项目 Main Coding Agent” |
+| R3 Production Runtime Deterministic Proof | VERIFIED | 除 model 外使用 Built-in Registry、PermissionEngine、PathSecurity、MainAgentRuntime、Factory、AgentHub、RunBridge 与生产 `read_file` |
+
+R3 production smoke 真实执行 TEMP fixture 的 `src/example.js`：生产 `read_file` 内容进入 child 下一轮 context，finding 再进入 Parent 下一轮 context。`write_file` / `apply_patch` / `terminal_run` 对 read-only reviewer 不可见；通过生产 Registry 直接请求写入被 Dynamic PermissionEngine 拒绝，Parent `filesystem.write=deny` 不能被 child allow 扩权；另用生产 PermissionEngine 放行到工具层后，生产 PathSecurity 拒绝 `../outside.txt`。最终 source SHA256 不变，outside 文件不存在，instances / dynamic registry adapters / active timers 均为 0。
+
+### Executed gates
+
+```text
+Baseline npm test
+# tests 1521
+# pass 1520
+# fail 0
+# skipped 1
+
+Final npm test
+# tests 1524
+# pass 1523
+# fail 0
+# skipped 1
+
+npm run test:dynamic-agent
+# tests 9
+# pass 9
+# fail 0
+
+npm run test:dynamic-agent:production
+# tests 1
+# pass 1
+# fail 0
+
+npm run e2e
+65 passed / 0 failed
+
+npm run dist
+PASS — Agent Dev Platform Setup 2.9.1.exe + portable
+```
+
+Packaging verification also confirmed `app.asar`, explicit better-sqlite3 unpack, and identical Cline source/packaged totals (`26757` files / `252045005` bytes). No real DeepSeek or other paid provider session was run.
+
+Closure secret scan covered all 9 changed/new files for the required credential field names. Matches were pre-existing changelog/test-report history, security documentation, or the phrase `Parent authorization`; no credential value was introduced.
+
+---
+
 ## v2.9.1 — Dynamic Agent Framework（2026-08-11）
 
 > **基线：** `v2.9.0 / 09e0d87737b29e782ba6c4f74d8579cce61ef8fc`。

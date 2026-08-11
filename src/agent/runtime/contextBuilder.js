@@ -94,7 +94,10 @@ function toolResultToText(r) {
     return `- ${status} ${tool}: \`${r.command}\` exit=${r.exitCode}${errs}`;
   }
   if (r.path) {
-    return `- ${status} ${tool}: ${r.path}`;
+    const content = tool === 'read_file' && typeof r.content === 'string'
+      ? `\n\`\`\`text\n${truncate(r.content, 4000)}\n\`\`\``
+      : '';
+    return `- ${status} ${tool}: ${r.path}${content}`;
   }
   return `- ${status} ${tool}: ${r.summary || (r.ok ? '成功' : '失败')}`;
 }

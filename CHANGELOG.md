@@ -2,6 +2,15 @@
 
 ## v2.9.1 — Dynamic Agent Framework
 
+### Dynamic Agent Closure Patch
+
+- Exposed `preferredAgentId`, `agentDefinitionId`, and `inlineAgentDefinition`, the minimum inline schema, and anti-proliferation guidance in the real Main Agent system prompt.
+- Split prompt composition into platform `RUNTIME_SAFETY_CONTRACT`, Main Coding Agent instructions, and an independent `DYNAMIC_AGENT_BASE_PROMPT`; Dynamic children no longer inherit the Main Coding Agent identity.
+- Added a production deterministic smoke that keeps only the model fake while using the Built-in Tool Registry, production `PermissionEngine`, production `PathSecurity`, AgentHub/RunBridge, real `read_file`, Parent result consumption, and lifecycle cleanup.
+- Included bounded `read_file` content in the next AgentLoop model context so a specialist can consume the production tool result instead of seeing only its path.
+- Stabilized Windows packaging with `asar`, explicit better-sqlite3 unpack, and a fail-closed Cline runtime `afterPack` copy/verification hook.
+- Kept version `2.9.1`; this closure does not add Model Router behavior or make paid provider calls.
+
 - Added a versioned, serializable `AgentDefinition` contract with strict normalize/validate behavior and credential/runtime-object rejection.
 - Added reusable `AgentTemplate` compilation with monotonic read-only and deny/allow ceilings.
 - Added `AgentFactory`, ephemeral `AgentInstance` lifecycle, and a true Dynamic Native Adapter using independent role prompt, scoped tools, chained permissions, model policy, and budgets.

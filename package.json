@@ -20,6 +20,7 @@
     "test:real-ai:new-session": "node scripts/real-ai-new-session.js",
     "test:deterministic-orchestrator": "node scripts/deterministic-orchestrator-smoke.js",
     "test:dynamic-agent": "node scripts/run-tests.js dynamicAgent",
+    "test:dynamic-agent:production": "node scripts/run-tests.js dynamicAgentProduction",
     "icon": "node scripts/make-icon.js"
   },
   "dependencies": {
@@ -41,7 +42,10 @@
     "directories": {
       "output": "dist-electron"
     },
-    "asar": false,
+    "asar": true,
+    "asarUnpack": [
+      "node_modules/better-sqlite3/**/*"
+    ],
     "win": {
       "target": [
         {
@@ -82,11 +86,6 @@
       "!node_modules/playwright/**/*.zip",
       "!node_modules/playwright/.local-browsers/**"
     ],
-    "extraResources": [
-      {
-        "from": "build-runtime/cline-runtime",
-        "to": "cline-runtime"
-      }
-    ]
+    "afterPack": "./scripts/after-pack-cline-runtime.js"
   }
 }

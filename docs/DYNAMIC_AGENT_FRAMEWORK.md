@@ -79,6 +79,15 @@ CREATED -> REGISTERED -> RUNNING
 
 The Dynamic Native adapter uses the existing `runMainAgent -> AgentLoop` runtime, but injects the Definition's role and system prompt into the real model `system` context, installs a filtered `getTool()`, chains a restrictive permission engine to the parent engine, inherits or explicitly resolves the configured model, and maps budgets to existing loop/runtime limits.
 
+Prompt composition is role-specific:
+
+```text
+Main Agent    = Runtime Safety Contract + Main Coding Agent Base + Dynamic delegation API guide
+Dynamic Agent = Runtime Safety Contract + Dynamic Agent Base + Definition role prompt
+```
+
+The Dynamic Agent Base is a generic specialist contract: complete only the assigned child task, respect visible tools and effective permissions, and return a concise result to the Parent. It does not instruct the child to modify code, repair failures, run tests, or own the complete user goal. Those behaviors require an appropriate Definition role and effective policy.
+
 The platform safety contract is always prepended. A Definition prompt cannot replace workspace, permission, tool-policy, truthful-verification, or privilege-escalation rules.
 
 ## 6. Dynamic delegate
@@ -116,6 +125,6 @@ dynamicAgent:instance:list/dispose
 
 ## 9. Deterministic verification
 
-Run `npm run test:dynamic-agent`. The smoke replaces only the model with a deterministic adapter and uses production MainAgentRuntime, AgentLoop, MainAgentOrchestrator, AgentFactory, Dynamic Native Adapter, AgentHub, RunBridge, lifecycle, permissions, and tool resolution.
+Run `npm run test:dynamic-agent` for all Dynamic tests, or `npm run test:dynamic-agent:production` for the production-stack smoke alone. The latter replaces only the model with a deterministic adapter and uses production MainAgentRuntime, AgentLoop, MainAgentOrchestrator, AgentFactory, Dynamic Native Adapter, AgentHub, RunBridge, Built-in Tool Registry, PermissionEngine, PathSecurity, lifecycle, and tool resolution.
 
-It proves the custom marker reaches model system context, platform safety remains present, read tools are exposed, mutation tools are absent, a Child Run returns a finding, Main Agent consumes the finding on its next iteration, malicious prompt text causes no mutation, and the dynamic Registry/instance/timer counts return to zero.
+It executes production `read_file` against an isolated TEMP project and proves its content reaches the child model. It also proves the custom marker and Dynamic Base reach model system context without Main Coding Agent identity, mutation and terminal tools are absent, direct mutation is permission-denied, Parent deny cannot be widened, production PathSecurity rejects `../outside.txt`, a Child Run returns a finding, Main Agent consumes the finding on its next iteration, the source hash is unchanged, and Registry/instance/timer counts return to zero.

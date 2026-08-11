@@ -95,7 +95,20 @@ class NativeAgentAdapter extends BaseAgentAdapter {
   async startTask(task, context = {}) {
     if (!task || !task.goal) throw new Error('NativeAgentAdapter.startTask: task.goal 必填');
     if (!context.runManager) throw new Error('NativeAgentAdapter.startTask: context.runManager 必填');
-    if (!context.model) throw new Error('NativeAgentAdapter.startTask: context.model 必填');
+    // v2.9.0 Real Runtime Closure（R1）：context.model 必须是真实 Runtime ModelAdapter（带 decide()）。
+    // 禁止 truthy 弱检查：{ model, provider, connectionId } 这类 metadata object 不得冒充
+    // ModelAdapter；解析失败必须明确抛 NATIVE_MODEL_CONTEXT_UNRESOLVED。
+    if (!context.model || typeof context.model.decide !== 'function') {
+      const got = !context.model ? '空值' : (
+        typeof context.model === 'object'
+          ? `metadata object（keys: ${Object.keys(context.model).join(',')}，无 decide()）`
+          : typeof context.model
+      );
+      throw new Error(
+        'NATIVE_MODEL_CONTEXT_UNRESOLVED: NativeAgentAdapter.startTask 收到非法 context.model（' + got +
+        '）；必须是带 decide() 的 ProviderModelAdapter，禁止用元数据 object 冒充'
+      );
+    }
 
     const conversationId = context.conversationId || null;
     const projectRoot = task.projectRoot || context.projectRoot;
@@ -125,6 +138,7 @@ class NativeAgentAdapter extends BaseAgentAdapter {
       runManager: context.runManager,
       requestPermission: context.requestPermission,
       permissionEngine: context.permissionEngine || null,
+      pathSecurity: context.pathSecurity || null,
       limits: task.limits,
       verification: task.verification,
       requiredFiles: task.requiredFiles,

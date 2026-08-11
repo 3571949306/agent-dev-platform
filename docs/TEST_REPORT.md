@@ -500,3 +500,98 @@ npm run dist
 | 46 依赖漏洞 | 全部在 dev/build 依赖，无生产影响 | 低（dependabot 跟踪） |
 | WorkBuddy 端到端验证 | 需单独会话验证 | 不影响 Main Agent |
 | NSIS UI 回归 | electron-builder 版本差异 | 仅安装界面外观 |
+
+---
+
+## v2.9.0 — Real Runtime Smoke Closure（R1-R9）2026-08-11
+
+> 目标：真实 DeepSeek 驱动真实 Main Agent Runtime，完成最小但完整的
+> `delegate → reviewer → read → patch → test → complete`，全部生产组件，零 fake 旁路。
+> 本文件不含任何编造结果；以下全部为真实执行记录（含失败）。
+
+### 1. 本轮单元测试（npm test）
+
+```text
+# tests 1488
+# pass 1487
+# fail 0
+# skipped 1
+# duration_ms ~91000
+```
+
+相对上轮（1474）增量 **+14**：`nativeHubTopLevelFallback.test.js`（R1 A/B/C/D + 唯一性，6 用例）、
+`realAiSmoke.test.js` 重写（§5 连接优先级 / §6 model / R9 budget / R3 PathSecurity / R4 权限闸门 / R8 四条清理路径，16 用例）、
+`deterministicIntegration.test.js`（1 用例）。既有 1474 全部保留通过。
+
+### 2. Deterministic Integration（真实 DeepSeek 前置门，不消耗 API）
+
+`npm run test:deterministic-orchestrator`：**PASS**。
+FakeCodingModel（delegate → read_file → patch_file → run_tests → complete）+ 除 LLM 外全生产链路
+（MainAgentRuntime / AgentLoop / ActionExecutor / Built-in Tool Registry / PermissionEngine /
+PathSecurity / MainAgentOrchestrator / AgentHub / TestAgentAdapter reviewer / RunManager），
+在真实 TEMP fixture 上完成。全部检查项：
+
+| 检查 | 结果 |
+| --- | --- |
+| MODEL_ACTION(delegate) + orchestration.delegation.started 双层证据 | ✅ |
+| childAgentId = real-ai-fixture-reviewer | ✅ |
+| Child Result 进入下一轮 model context（iter 1 → 2，真实 runtime 证据） | ✅ |
+| 生产工具事件 read_file / apply_patch / terminal_run | ✅ |
+| test 文件 / package.json 未变；src/math.js 唯一 mutation | ✅ |
+| node test/math.test.js exit=0；Parent = completed | ✅ |
+| outside writes = 0；fixture 零残留 | ✅ |
+
+### 3. Real DeepSeek 真实执行记录（全部如实，含失败）
+
+| # | Connection | Model | 结果 | Provider calls（started/max） | 说明 |
+| --- | --- | --- | --- | --- | --- |
+| 1 | env-fallback | deepseek-chat | **PASS** | 6/6 | 首次完整闭环（当时 Store 因运行时 ABI 未加载） |
+| 2 | env-fallback | deepseek-chat | FAIL | 6/6 | 模型用 7 轮，第 7 次调用**发出前**被 REAL_AI_BUDGET_EXCEEDED 拒绝（started 未超 6） |
+| 3 | store-single-deepseek | deepseek-v4-flash | FAIL | 6/6 | 同上：默认模型 7 轮超预算；delegation/消费证据已出现 |
+| 4 | store-single-deepseek | deepseek-chat（REAL_AI_TEST_MODEL override） | **PASS** | 5/6 | §5 Store 链路全通：DPAPI 解密 → 平台绑定连接 → 完整闭环 |
+| 5 | store-single-deepseek | deepseek-v4-flash | FAIL | 6/6 | 诊断退出码时误触发（无效 CLI id 仍按 §5 落到 Store 唯一连接）；再次复现 v4-flash 预算超限 |
+
+**R5-R7 结论：VERIFIED_WITH_RETRY**（真实 AI 存在模型相关的预算失败，成功链路两次达成，
+其中一次完整走平台绑定的 Store Connection）。
+
+成功链路证据（#4，平台 Store 连接）：
+
+```text
+Delegation: MODEL_ACTION(delegate)=true ORCHESTRATION(delegation.started)=true → YES
+Child agent: real-ai-fixture-reviewer
+Child result consumed (real next-iteration context): YES (delegate@iter=1, consumed@iter=2)
+Production tools: read_file=true mutation=true terminal_test=true
+File diff: modified=[src/math.js] added=[] removed=[]
+Test file unchanged: YES; package.json unchanged: YES
+Tests (harness re-run): PASS (exit=0)
+Parent: completed
+Outside writes: 0/3 attempts succeeded
+Fixture leftovers: 0
+```
+
+### 4. E2E / Build
+
+- `npm run e2e`：**65/65 passed**（上轮基线 64/65 + 1 known Capability Routing flaky；本轮该 flaky 未复现，无新失败）。
+- `npm run dist`：**成功**（NSIS + portable，electron-builder 24.13.3 / electron 31.7.7）。
+
+### 5. Reliability Backlog（如实记录，不阻塞 P0）
+
+| 项 | 说明 | 处置 |
+| --- | --- | --- |
+| deepseek-v4-flash 预算超限 | 平台默认模型稳定需要 7 轮完成本 smoke（spec 固定 maxProviderCalls=6），3 次复现 | 预算计数正确（第 7 次调用发出前拒绝）；可选：REAL_AI_TEST_MODEL=deepseek-chat 运行，或后续版本按模型调整预算 |
+| Electron 退出码转发偶发丢失 | 一次 PASS 运行经 spawn 链返回 exit=1（内部 exitCode=0） | 已修：结果文件（REAL_AI_RESULT_FILE，§71 同款）作为权威退出码 |
+| `preparing → executing_tool` 非法迁移警告（P1） | 已修：状态映射链修正（READING_CONTEXT→requesting_model、TESTING→executing_tool），未放宽 RunManager | 本轮真实运行未再出现该警告 |
+
+### 6. Requirement Matrix（最终状态）
+
+| ID | Priority | Requirement | Proof | Status |
+| --- | --- | --- | --- | --- |
+| R1 | P0 | Native Model 必须是真正 Runtime ModelAdapter | nativeHubTopLevelFallback.test.js（A/B/C/D + 唯一性，6/6 PASS） | VERIFIED |
+| R2 | P0 | Real AI Smoke 使用真实 Built-in Tools | 成功链路工具事件 read_file/apply_patch/terminal_run 来自 src/tools/registry.js | VERIFIED |
+| R3 | P0 | 真实 PathSecurity | inside write allowed；3 种 outside 写法全部被拒，successfulOutsideWrites=0 | VERIFIED |
+| R4 | P0 | 真实 PermissionEngine | 生产实例 + scoped grants；deny scope 工具执行前被拒（单测 + 运行中 0 次越权） | VERIFIED |
+| R5 | P0 | 模型自发 delegate | MODEL_ACTION(delegate) + orchestration.delegation.started（childAgentId=reviewer） | VERIFIED_WITH_RETRY |
+| R6 | P0 | Child Result 真实消费 | delegate 后下一轮 model context 含 reviewer finding（真实 runtime 记录） | VERIFIED_WITH_RETRY |
+| R7 | P0 | 真实编码任务闭环 | 独立终验 8 条全满足（见 §3 成功链路证据） | VERIFIED_WITH_RETRY |
+| R8 | P0 | Fixture 无条件清理 | 4 条异常路径单测 + 全部真实运行 leftovers=0 | VERIFIED |
+| R9 | P0 | API Budget 准确 | attempts/started/succeeded/failed 分离；调用前预检；全部运行 started ≤ 6 | VERIFIED |

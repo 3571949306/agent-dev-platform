@@ -127,10 +127,14 @@ async function executeDelegate(ctx, action, args) {
         taskId: ctx.taskId,
         delegationPath: ctx.delegationPath || []
       });
+      // v2.9.0 Real Runtime Closure（R6）：Child Result 摘要必须进入 Main Agent 下一轮
+      // context（toolResultToText 会打印 summary），而不是只写 Blackboard 后假装已消费。
+      const childSummary = (result && (result.summary || (result.errors && result.errors[0]))) || '';
       return {
         ok: !!result.ok,
         tool: 'delegate',
         action,
+        summary: childSummary ? `child=${result.agentId || '?'} status=${result.status || '?'}: ${childSummary}` : undefined,
         data: { runId: result.runId, agentId: result.agentId, status: result.status, result },
         error: result.ok ? null : {
           code: `DELEGATE_${String(result.status || 'FAILED').toUpperCase()}`,
@@ -224,6 +228,29 @@ async function runTool(ctx, toolName, args, getTool, action, meta = {}) {
   const tool = typeof getTool === 'function' ? getTool(toolName) : null;
   if (!tool) {
     return { ok: false, tool: toolName, error: { code: 'TOOL_NOT_FOUND', message: `工具 ${toolName} 不可用` } };
+  }
+  // v2.9.0 Real Runtime Closure（R4）：生产 PermissionEngine 闸门。Main Agent 工具执行
+  // 前必须过权限评估：deny → 拒绝；ask → 走 requestPermission（无交互通道时 fail-safe 拒绝）。
+  if (ctx && ctx.permissionEngine) {
+    const scope = tool.permissionFor ? tool.permissionFor(args) : tool.permission;
+    if (scope) {
+      const verdict = ctx.permissionEngine.evaluate(scope, { taskId: ctx.taskId, projectId: ctx.projectId });
+      if (verdict === 'deny') {
+        return { ok: false, tool: toolName, action, error: { code: 'PERMISSION_DENIED', message: `权限被拒绝: ${scope}` } };
+      }
+      if (verdict === 'ask') {
+        let allowed = false;
+        if (typeof ctx.requestPermission === 'function') {
+          try {
+            const d = await ctx.requestPermission({ scope, tool: toolName, args, conversationId: ctx.conversationId });
+            allowed = !!(d && d.decision === 'allow');
+          } catch { allowed = false; }
+        }
+        if (!allowed) {
+          return { ok: false, tool: toolName, action, error: { code: 'PERMISSION_DENIED', message: `权限未批准（ask）: ${scope}` } };
+        }
+      }
+    }
   }
   let raw;
   try {

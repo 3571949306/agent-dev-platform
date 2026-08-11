@@ -70,6 +70,43 @@ function buildFixAddScript(opts = {}) {
 }
 
 /**
+ * 构建「先委派 reviewer 再修复 add 函数」的标准脚本（v2.9.0 Real Runtime Closure §7）。
+ * 顺序：delegate → read_file → patch_file → run_tests → complete
+ * 用于 Deterministic Integration：除 LLM 外全部生产链路。
+ * @param {object} opts { reviewerAgentId, file, command, brokenLine, fixedLine }
+ */
+function buildDelegateFixAddScript(opts = {}) {
+  const reviewerAgentId = opts.reviewerAgentId || 'real-ai-fixture-reviewer';
+  const file = opts.file || 'src/math.js';
+  const command = opts.command || 'node test/math.test.js';
+  const broken = opts.brokenLine || '  return a - b;';
+  const fixed = opts.fixedLine || '  return a + b;';
+  return [
+    {
+      type: 'delegate',
+      args: {
+        task: '检查 src/math.js 中的错误（只读，不修改任何文件）',
+        requiredCapabilities: ['review'],
+        preferredAgentId: reviewerAgentId,
+        readOnly: true
+      },
+      thought: '按要求先委派只读 reviewer 检查错误'
+    },
+    { type: 'read_file', args: { path: file }, thought: '阅读 reviewer 结果后自己读取 math.js' },
+    {
+      type: 'patch_file',
+      args: {
+        path: file,
+        patch: `@@ -1,3 +1,3 @@\n function add(a, b) {\n-${broken}\n+${fixed}\n }`
+      },
+      thought: '最小修改：把减法改成加法（不动测试文件）'
+    },
+    { type: 'run_tests', args: { command }, thought: '运行测试确认通过' },
+    { type: 'complete', args: { summary: '修复 add 函数，测试通过' } }
+  ];
+}
+
+/**
  * 构建「修复 add 函数」带 Repair Loop 的脚本（spec §28 Case 28）。
  * 第一次 patch 故意仍失败（改成乘法），第二次 patch 才正确（加法）。
  */
@@ -143,6 +180,7 @@ function delay(ms) { return new Promise(r => setTimeout(r, ms)); }
 module.exports = {
   createFakeCodingModel,
   buildFixAddScript,
+  buildDelegateFixAddScript,
   buildRepairLoopScript,
   buildPrematureCompleteScript,
   buildHangScript

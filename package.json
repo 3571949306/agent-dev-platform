@@ -16,6 +16,7 @@
     "pree2e": "npm run prepare-cline-runtime",
     "e2e": "playwright test",
     "test:real-ai:orchestrator": "node scripts/real-ai-orchestrator-smoke.js",
+    "test:deterministic-orchestrator": "node scripts/deterministic-orchestrator-smoke.js",
     "icon": "node scripts/make-icon.js"
   },
   "dependencies": {

@@ -30,6 +30,9 @@ const { NativeAgentAdapter } = require('../src/agents/adapters/nativeAgentAdapte
 const { NATIVE_MAIN } = require('../src/agents/manifests/builtinAgents');
 const { runMainAgent } = require('../src/agent/runtime/mainAgentRuntime');
 const toolRegistry = require('../src/tools/registry');
+// v2.9.0 Real Runtime Closure（R3）：contextFactory 的 pathSecurity 现在会真正传入
+// 工具层，禁止 fake allow-all；使用生产 PathSecurity。
+const pathSecurity = require('../src/security/pathSecurity');
 const { copyFixture, cleanup } = require('./fixtures/coding-agent/reset');
 
 function getTool(name) {
@@ -52,7 +55,7 @@ test('§16-17 AgentHub.start(native-main) → NativeAgentAdapter → runMainAgen
       store: null,
       buildProvider: () => FAKE_PROVIDER,
       resolveModel: () => ({ model: 'fake', provider: 'fake', connectionId: 'c' }),
-      pathSecurity: { isWithinAllowed: () => true, enforce: () => ({ ok: true }) },
+      pathSecurity,
       projectMutationLock: { acquireWrite: () => ({ ok: true }), acquireRead: () => ({ ok: true }), release: () => {} },
       emit: () => {},
       nativeModelContextResolver: createNativeModelContextResolver({

@@ -167,3 +167,61 @@ orchestration.run.before_complete / run.completed
 ## 13. Real AI Smoke（§74-99）
 
 `npm run test:real-ai:orchestrator`：真实 DeepSeek Main Agent → delegate → fixture reviewer → Blackboard → Main Agent 修复 → 测试通过。CI 无 credential 时 SKIP（§76），不 FAIL。
+
+## 14. Real Runtime Smoke Closure（v2.9.0 收口，R1-R9）
+
+> 目标：让真实 DeepSeek 驱动真实 Main Agent Runtime，完成一次最小但完整的
+> `delegate → reviewer → read → patch → test → complete`，全部走生产组件，禁止任何 fake 旁路。
+
+### 14.1 验证层次（不得互相替代）
+
+| 层次 | 含义 | 本轮状态 |
+| --- | --- | --- |
+| Provider connectivity verified | API 可达 / key 有效（testConnection / 首次 stream） | ✅ |
+| Real Main Agent verified | 真实模型驱动 MainAgentRuntime + AgentLoop + 生产工具完成编码 | ✅（deepseek-chat） |
+| Real Orchestrator verified | MODEL_ACTION(delegate) + orchestration.delegation.started 双层证据，Child Result 真实进入下一轮 context | ✅（deepseek-chat） |
+
+### 14.2 生产化改造（相对 Framework Closure Patch 的占位实现）
+
+- **R1 Native ModelAdapter**：`NativeAgentAdapter.startTask` 强校验 `typeof context.model.decide === 'function'`，
+  metadata object（{ model, provider, connectionId }）一律拒绝（`NATIVE_MODEL_CONTEXT_UNRESOLVED`）。
+  resolver 新增第 4 优先级：**已配置 Native Main Agent**（`store.agents.listNative()` 唯一 `is_main + api_connection_id`）
+  → `createProviderModelAdapter()`，覆盖 top-level / AgentHub fallback 场景（无 parentModelContext）；
+  0 个或 >1 个候选 → 明确失败，禁止静默选第一个 Connection。`executionContextFactory` 不再用元数据兑底。
+- **R2 生产工具**：Smoke 的 `getTool` 复用 `src/tools/registry.js`（Built-in Tools），删除 `getTool: () => null`。
+- **R3 PathSecurity**：删除 fake `isWithinAllowed: () => true`，改用生产 `createPathSecurity({cacheRoots})` +
+  TEMP fixture 作为 projectRoot；Harness 自动做确定性逃逸断言（`../outside.txt` 等 3 种写法必须全部被拒，
+  `successfulOutsideWrites = 0`）。
+- **R4 PermissionEngine**：删除 `permissionEngine: null`；生产 PermissionEngine + 仅限 TEMP 项目的权限上下文
+  （allow: filesystem.read/write、terminal.read/write、subagent；deny: outside_workspace、dangerous、computer、
+  browser、clipboard、network、mcp）。`actionExecutor.runTool` 新增权限闸门：deny → PERMISSION_DENIED；
+  ask → requestPermission，无交互通道时 fail-safe 拒绝。
+- **R5 模型自发 delegate**：双层证据（`mainAgent:action` type=delegate + `orchestration.delegation.started`
+  且 childAgentId = real-ai-fixture-reviewer），Harness 不得代发。
+- **R6 Child Result 真实消费**：修复 `agentHubBridge.normalizeResult` 字符串结果丢失、`agentLoop` summary 被
+  undefined 覆盖两个 bug；证据取自真实 runtime：delegate 之后某一轮 model context 必须包含 reviewer finding。
+  禁止 `blackboardConsumed = delegateObserved` 假证明。
+- **R7 独立终验 8 条**：test 文件 SHA256 未变 / package.json 未变 / src/math.js 是唯一 mutation（全目录快照对比）/
+  Harness 亲自 `node test/math.test.js` exit=0 / Parent Run completed / delegate observed / result consumed / outside writes=0。
+- **R8 Fixture 无条件清理**：`withRealAiFixture(fn)` —— create 与 cleanup 在同一函数 try/finally；
+  success / provider throws / model timeout / tool error 四条异常路径单测验证零残留。
+- **R9 Budget**：`modelCallAttempts / providerCallsStarted / providerCallsSucceeded / providerCallsFailed` 精确区分；
+  **调用前预检** `started >= max → REAL_AI_BUDGET_EXCEEDED`，第 N+1 次请求绝不发出（maxProviderCalls = 6）。
+
+### 14.3 执行入口与 Connection 解析（§5/§6）
+
+- `npm run test:real-ai:orchestrator`：plain node 下自动 re-exec 到 `electron . --real-ai-smoke`（main.js 门控模式）。
+  原因：better-sqlite3 为 Electron ABI，且平台 API Key 由 safeStorage（DPAPI + app 身份绑定熵）加密，
+  只有真实 App 身份能解密 —— §5 的 Store 优先级才真正生效。
+- Connection 优先级：CLI connectionId → REAL_AI_TEST_CONNECTION_ID → settings.realAiTestConnectionId
+  → Store 唯一可用 DeepSeek 连接 → env fallback（source=env-fallback，仅兑底，不覆盖平台绑定）。
+- Model：REAL_AI_TEST_MODEL override → Connection 默认 → 已配置 Native Main Agent 的 model（Store 为准）→ connection.models[0]；
+  不硬编码型号。
+- **Deterministic Integration 前置门**（`npm run test:deterministic-orchestrator`）：FakeCodingModel
+  （delegate → read → patch → run_tests → complete）+ 除 LLM 外全生产链路，不 PASS 则禁止烧真实 API。
+
+### 14.4 P1 Run State Consistency
+
+修复 `preparing → executing_tool` 非法迁移警告：**修映射链不放宽 RunManager** ——
+`mapToRunManagerState` 把 READING_CONTEXT 映为 `requesting_model`、TESTING 映为 `executing_tool`，
+全部 updateRun 落在合法迁移表内（preparing → requesting_model → executing_tool）。

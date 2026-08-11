@@ -97,6 +97,46 @@
 * 测试总盘面：单元测试 **1474 / 1473 PASS / 0 FAIL / 1 SKIP**（v2.8.2 的 1426 + v2.9.0 原 14 +
   Closure Patch +34 = 1474；相对 v2.8.2 净增 48）。
 
+### 十、Real Runtime Smoke Closure — 真实 DeepSeek 驱动真实 Main Agent Runtime 闭环（保持 v2.9.0）
+
+> 本节不是新功能版本：把上一节遗留的 Real AI Smoke 从「框架预留」升级为**真实生产链路闭环**：
+> 真实 DeepSeek → MainAgentRuntime → MODEL ACTION: delegate → Orchestrator → AgentHub →
+> real-ai-fixture-reviewer → Child Result 进入下一轮 context → read_file → patch → terminal_run(test) →
+> complete → Parent Run = completed。除 LLM 外全部生产组件，禁止任何 fake 旁路（R1-R9 Requirement Contract）。
+
+* **R1 Native ModelAdapter 真实解析**：`NativeAgentAdapter.startTask` 强校验 `typeof context.model.decide === 'function'`，
+  `{ model, provider, connectionId }` 元数据一律拒绝（NATIVE_MODEL_CONTEXT_UNRESOLVED）；`nativeModelContextResolver`
+  新增第 4 优先级「已配置 Native Main Agent」（`store.agents.listNative()` 唯一 `is_main + api_connection_id` →
+  `createProviderModelAdapter()`），覆盖 top-level / AgentHub fallback；歧义（0/多个）时明确失败，禁止静默选第一个
+  Connection；`executionContextFactory` 删除元数据兑底。新增 `test/nativeHubTopLevelFallback.test.js`（对抗场景 A-D + 唯一性，6 用例）。
+* **R2/R3/R4 生产化**：Smoke 的 `getTool` 改为生产 `src/tools/registry.js`；fake PathSecurity / null PermissionEngine 全部移除，
+  改用生产 `createPathSecurity({cacheRoots})` + 生产 `PermissionEngine`（仅限 TEMP 项目的 allow/deny 清单）；
+  `actionExecutor.runTool` 新增权限闸门（deny 拒绝 / ask 走 requestPermission，无交互通道 fail-safe 拒绝）；
+  Harness 自动做确定性逃逸断言（outside write 必须全部被拒，successfulOutsideWrites=0）。
+* **R5/R6 双层证据与真实消费**：delegate 必须同时有 MODEL_ACTION + `orchestration.delegation.started`；修复
+  `agentHubBridge.normalizeResult`（字符串 Child Result 丢失）与 `agentLoop`（summary 被 undefined 覆盖）两个阻断
+  真实消费的 bug；消费证据取自真实 runtime（delegate 后某轮 model context 含 reviewer finding），废除
+  `blackboardConsumed = delegateObserved` 假证明。
+* **R7/R8/R9**：独立终验 8 条（test/package.json SHA 未变、src/math.js 唯一 mutation、harness 亲自跑测试 exit=0 等）；
+  `withRealAiFixture` 保证 create/cleanup 同函数 try/finally，四条异常路径单测零残留；Budget 拆分
+  attempts/started/succeeded/failed，**调用前预检**，第 N+1 次 provider 请求绝不发出（maxProviderCalls=6）。
+* **Deterministic Integration 前置门**：新增 `npm run test:deterministic-orchestrator`（FakeCodingModel：
+  delegate → read → patch → run_tests → complete，除 LLM 外全生产链路 + 真实 TEMP fixture），不 PASS 禁止烧真实 API；
+  新增 `fakeCodingModel.buildDelegateFixAddScript`。
+* **执行入口与 Connection 解析（§5/§6）**：`npm run test:real-ai:orchestrator` 在 plain node 下自动 re-exec 到
+  `electron . --real-ai-smoke`（main.js 新增门控模式，含 REAL_AI_SMOKE_DRY_RUN 诊断）——better-sqlite3 为 Electron ABI
+  且 API Key 由 safeStorage（DPAPI + app 身份绑定熵）加密，只有真实 App 身份能解密；Connection 优先级：
+  CLI → REAL_AI_TEST_CONNECTION_ID → settings.realAiTestConnectionId → Store 唯一 DeepSeek 连接 → env fallback
+  （不覆盖平台绑定）；结果文件（REAL_AI_RESULT_FILE，§71 同款）作为权威退出码。
+* **P1 Run State Consistency**：修复 `preparing → executing_tool` 非法迁移警告 —— 修状态映射链（READING_CONTEXT→
+  requesting_model、TESTING→executing_tool），未放宽 RunManager 合法状态表。
+* **真实结果（如实记录，含失败）**：Deterministic Integration PASS；Real DeepSeek 5 次运行：2 次 PASS
+  （deepseek-chat；其中一次完整走平台 Store 连接，5/6 calls）+ 3 次 FAIL（deepseek-v4-flash 稳定 7 轮超出 spec 固定
+  6-call 预算，第 7 次调用发出前被拒，started 始终 ≤ 6）。R5-R7 = **VERIFIED_WITH_RETRY**，其余 R = VERIFIED。
+  详见 `docs/TEST_REPORT.md`（Real Runtime Smoke Closure 节）。
+* **测试总盘面**：单元测试 **1488 / 1487 PASS / 0 FAIL / 1 SKIP**（+14）；E2E **65/65**（上轮 known flaky 本轮未复现，无新失败）；
+  `npm run dist` 成功（NSIS + portable）。
+
 ## v2.8.2 — 2026-08-10
 
 > Canonical Path Security Hardening：彻底消除"字符串路径看似在 projectRoot 内，但真实文件

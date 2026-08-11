@@ -251,7 +251,9 @@ async function runAgentLoop(deps) {
 
       // 8. 观察结果 + 评估
       const ev = evaluateActionResult(action, result);
-      toolResults.push({ action, ...result, summary: result.stdoutSummary || result.stderrSummary });
+      // v2.9.0 Real Runtime Closure（R6）：delegate 的 Child Result 摘要（result.summary）
+      // 必须保留进 toolResults，才能进入下一轮 model context；不得被 undefined 覆盖。
+      toolResults.push({ action, ...result, summary: result.stdoutSummary || result.stderrSummary || result.summary });
 
       // 致命错误（权限拒绝 / 沙箱逃逸）
       if (ev.fatal) {

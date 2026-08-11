@@ -17,15 +17,37 @@
  *   1. task.modelOverride          显式 ProviderModelAdapter / connection 描述
  *   2. task.context.model          继承 model policy
  *   3. Native Agent 配置的 model   agent.api_connection_id / agent.model
- *   4. Native Agent 配置的 default connection/model
+ *   4. 已配置的 Native Main Agent（store.agents.listNative() is_main 且唯一
+ *      带 api_connection_id）→ createProviderModelAdapter()。用于 top-level /
+ *      AgentHub fallback 启动 native-main（无 parentModelContext 的真实场景）。
  *   5. Main Agent 当前 Model Context parentModelContext
  *   6. 明确失败
  */
 
 const { createProviderModelAdapter } = require('../runtime/providerModelAdapter');
 
+/**
+ * 从平台 Store 解析「唯一可解析的 Native Main Agent 配置」（v2.9.0 Real Runtime Closure）。
+ *
+ * 规则：store.agents.listNative() 中 is_main 且带 api_connection_id 的条目必须
+ * 恰好唯一；0 个或 >1 个都返回 null（由 resolver 落到明确失败，禁止静默选第一个
+ * Connection）。
+ *
+ * @param {object} store  平台 Store（需含 agents.listNative）
+ * @returns {object|null} native main agent DB entity（含 api_connection_id / model）
+ */
+function nativeMainAgentConfigFromStore(store) {
+  if (!store || !store.agents || typeof store.agents.listNative !== 'function') return null;
+  let candidates = [];
+  try {
+    candidates = store.agents.listNative().filter(a => a && a.is_main && a.api_connection_id);
+  } catch { return null; }
+  if (candidates.length !== 1) return null;
+  return candidates[0];
+}
+
 function createNativeModelContextResolver(deps) {
-  const { buildProvider, resolveModel, defaultTimeoutMs = 120000 } = deps || {};
+  const { buildProvider, resolveModel, defaultTimeoutMs = 120000, getNativeMainAgentConfig = null } = deps || {};
   if (typeof buildProvider !== 'function') {
     throw new Error('createNativeModelContextResolver: buildProvider 必填');
   }
@@ -84,9 +106,19 @@ function createNativeModelContextResolver(deps) {
       return adapterResult(agentLike, o.contextModel, 'inherited');
     }
 
-    // 3-4. 从 Native Agent 配置（api_connection_id / model）构建真实 ProviderModelAdapter
+    // 3. 从 Native Agent 配置（api_connection_id / model）构建真实 ProviderModelAdapter
     if (agentLike && (agentLike.api_connection_id || agentLike.model)) {
       return buildFromAgent(agentLike);
+    }
+
+    // 4. 已配置的 Native Main Agent（top-level / AgentHub fallback 场景，无 parentModelContext）。
+    //    仅当 store 中存在唯一 is_main + api_connection_id 配置时生效；
+    //    否则继续往下走并在第 6 步明确失败（禁止静默选第一个 Connection）。
+    if (typeof getNativeMainAgentConfig === 'function') {
+      const mainCfg = getNativeMainAgentConfig();
+      if (mainCfg && mainCfg.api_connection_id) {
+        return buildFromAgent(mainCfg);
+      }
     }
 
     // 5. Main Agent 当前 Model Context（直接 ProviderModelAdapter）
@@ -97,11 +129,11 @@ function createNativeModelContextResolver(deps) {
     // 6. 明确失败（禁止静默 fallback 到第一个 Connection）
     throw new Error(
       'NATIVE_MODEL_CONTEXT_UNRESOLVED: native agent 缺少 modelOverride / context.model / ' +
-      'api_connection_id 或 model / parentModelContext（禁止静默 fallback 到第一个 Connection）'
+      'api_connection_id 或 model / 已配置 Native Main Agent / parentModelContext（禁止静默 fallback 到第一个 Connection）'
     );
   }
 
   return { resolveNativeModelContext };
 }
 
-module.exports = { createNativeModelContextResolver };
+module.exports = { createNativeModelContextResolver, nativeMainAgentConfigFromStore };

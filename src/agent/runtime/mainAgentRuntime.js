@@ -53,7 +53,7 @@ function runMainAgent(opts) {
     goal, projectRoot, projectId,
     model, getTool, store, emit, runManager, requestPermission,
     limits, verification, requiredFiles, initialPlan,
-    timeoutMs, onToolResult
+    timeoutMs, onToolResult, pathSecurity
   } = opts;
 
   if (!runManager) throw new Error('runManager 必填');
@@ -77,6 +77,10 @@ function runMainAgent(opts) {
     store, emit, abortSignal: ac.signal,
     // 工具需要的字段
     permissionEngine: opts.permissionEngine || null,
+    // v2.9.0 Real Runtime Closure（R4）：工具权限闸门需要 requestPermission（'ask' 决策通道）
+    requestPermission: requestPermission || null,
+    // v2.9.0 Real Runtime Closure（R3）：per-run PathSecurity（cacheRoots）；未注入时工具用默认实例
+    pathSecurity: pathSecurity || null,
     // v2.9.0 §9 — MainAgentOrchestrator（delegate → AgentHub → Child Run → Blackboard）
     orchestrator: null   // 下方注入（如 AgentHub 可用）
   };
@@ -229,12 +233,22 @@ function emitTerminalEvent(emit, runId, result) {
   }
 }
 
-/** Main Agent 状态 → RunManager stage（runManager 用小写非终态名）。 */
+/**
+ * Main Agent 状态 → RunManager stage（runManager 用小写非终端态名）。
+ *
+ * v2.9.0 Real Runtime Closure（P1 Run State Consistency）：修正映射链，
+ * 保证每次 updateRun 都落在 RunManager 合法迁移表内：
+ *   preparing(PLANNING) → requesting_model(READING_CONTEXT) → executing_tool(EXECUTING/TESTING)
+ * 旧映射把 READING_CONTEXT 映为 'preparing'、TESTING 映为 'testing'，会产生
+ * preparing → executing_tool 的非法迁移警告（RunManager 合法表无此边，且
+ * 'testing' 从 requesting_model 不可达）。修映射链，不放宽 RunManager。
+ */
 function mapToRunManagerState(s) {
   const map = {
-    IDLE: 'preparing', PLANNING: 'preparing', READING_CONTEXT: 'preparing',
+    IDLE: 'preparing', PLANNING: 'preparing',
+    READING_CONTEXT: 'requesting_model',
     EXECUTING: 'executing_tool', WAITING_TOOL: 'executing_tool',
-    TESTING: 'testing', EVALUATING: 'executing_tool', REPAIRING: 'executing_tool',
+    TESTING: 'executing_tool', EVALUATING: 'executing_tool', REPAIRING: 'executing_tool',
     WAITING_PERMISSION: 'waiting_permission'
   };
   return map[s] || 'executing_tool';

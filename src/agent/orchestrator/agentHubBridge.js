@@ -71,9 +71,14 @@ function createAgentHubBridge(opts) {
 
   /**
    * 规范化 Child Result 为 AgentResult（§12）。
+   *
+   * v2.9.0 Real Runtime Closure（R6）：hub 的 lifecycleRun.result 可能是纯字符串
+   * （如 TestAgentAdapter.finishRun('completed', resultText)）；必须把字符串
+   * 结果当作 summary 保留，否则 Child Result 在规范化时被丢弃，Main Agent
+   * 永远看不到 reviewer 输出。
    */
   function normalizeResult(status, result, agentId, runId) {
-    const r = result || {};
+    const r = typeof result === 'string' ? { summary: result } : (result || {});
     return {
       ok: status === 'completed',
       agentId,

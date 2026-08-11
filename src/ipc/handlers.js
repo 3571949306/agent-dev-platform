@@ -86,7 +86,7 @@ const projectLock = createProjectMutationLock();
 //   hub.start 时 contextFactory.create(adapter, task, run, hubCtx) 补全 NativeAgentAdapter 必填字段。
 const _pathSecurity = require('../security/pathSecurity');
 const { createExecutionContextFactory, get: orchestratorGet } = require('../agent/orchestrator');
-const { createNativeModelContextResolver } = require('../agent/orchestrator/nativeModelContextResolver');
+const { createNativeModelContextResolver, nativeMainAgentConfigFromStore } = require('../agent/orchestrator/nativeModelContextResolver');
 const executionContextFactory = createExecutionContextFactory({
   runManager,
   getTool,
@@ -98,7 +98,14 @@ const executionContextFactory = createExecutionContextFactory({
   projectMutationLock: projectLock,
   emit,
   defaultModel: null,   // 由 nativeModelContextResolver 在 create 时按优先级解析（§8-17）
-  nativeModelContextResolver: createNativeModelContextResolver({ buildProvider, resolveModel: resolveModelFor })
+  // v2.9.0 Real Runtime Closure（R1 Scenario B）：top-level / AgentHub fallback 启动
+  // native-main 时无 parentModelContext，从平台 Store 的唯一 is_main + api_connection_id
+  // 配置解析真实 Connection + Model → createProviderModelAdapter()。
+  nativeModelContextResolver: createNativeModelContextResolver({
+    buildProvider,
+    resolveModel: resolveModelFor,
+    getNativeMainAgentConfig: () => nativeMainAgentConfigFromStore(store)
+  })
 });
 const agentHub = createAgentHub({ registry: agentRegistry, router: agentRouter, healthManager, lifecycleManager, eventNormalizer, runBridge, emit, projectLock, contextFactory: executionContextFactory });
 setAgentHub(agentHub);

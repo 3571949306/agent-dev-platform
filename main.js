@@ -19,6 +19,10 @@ let shutdownComplete = false;
 // renderer that throws on first paint.
 const SMOKE = process.argv.includes('--smoke');
 const INTEGRATION_SMOKE = process.argv.includes('--integration-smoke');
+// v2.9.0 Real Runtime Smoke Closure：--real-ai-smoke 在真实 App 主进程内跑 Real AI
+// Orchestrator Smoke（真实 app 身份 → safeStorage 可解密平台 Connection 密钥，
+// store 路径与生产完全一致）。不透传任何窗口/服务初始化。
+const REAL_AI_SMOKE = process.argv.includes('--real-ai-smoke');
 const smokeErrors = [];
 
 // --smoke-result-file=<path> : write the smoke outcome as JSON to a file so
@@ -51,6 +55,11 @@ async function bootstrap() {
 
   if (INTEGRATION_SMOKE) {
     await runIntegrationSmoke(userDataPath);
+    return;
+  }
+
+  if (REAL_AI_SMOKE) {
+    await runRealAiSmoke();
     return;
   }
 
@@ -92,6 +101,61 @@ async function runIntegrationSmoke(userDataPath) {
       console.error(`CLINE_PACKAGED_INTEGRATION_SMOKE_FAILED sidecar shutdown: ${stopped.error || 'child still present'}`);
     }
   }
+  app.exit(code);
+}
+
+/**
+ * v2.9.0 Real Runtime Smoke Closure — 在真实 App 主进程内跑 Real AI Smoke。
+ * 真实 app 身份保证：safeStorage（DPAPI + app 绑定熵）能解密平台 Connection 密钥，
+ * store.init(userData) 与生产同一 DB —— §5 Store Connection 优先级真正生效。
+ * connectionId 可经 --real-ai-connection=<id> 传入。
+ */
+async function runRealAiSmoke() {
+  // 诊断模式：REAL_AI_SMOKE_DRY_RUN=1 只验证 Store Connection 解析/解密，不消耗 API。
+  if (process.env.REAL_AI_SMOKE_DRY_RUN === '1') {
+    try {
+      const rt = require('./scripts/lib/real-ai-runtime');
+      const store = require('./src/db/store');
+      const r = rt.resolveRealAiConnection(null, { store });
+      if (!r) {
+        console.log('REAL_AI_SMOKE_DRY_RUN: NO_CONNECTION');
+        app.exit(2);
+      }
+      const m = rt.resolveSmokeModel({ conn: r.conn, store });
+      let host = null;
+      try { if (r.conn.base_url) host = new URL(r.conn.base_url).host; } catch { /* noop */ }
+      console.log(`REAL_AI_SMOKE_DRY_RUN: OK source=${r.source} connection=${r.conn.name} provider=${r.conn.provider} model=${m.model}(${m.source}) key_decrypted=${!!(r.conn.api_key)} host=${host || '-'}`);
+      app.exit(0);
+    } catch (e) {
+      console.log(`REAL_AI_SMOKE_DRY_RUN: ERR ${e.message}`);
+      app.exit(1);
+    }
+    return;
+  }
+  const arg = process.argv.find(a => a.startsWith('--real-ai-connection='));
+  const connectionId = arg ? arg.slice('--real-ai-connection='.length) : null;
+  // smoke 脚本读 process.argv[2] 作为 connectionId
+  process.argv = [process.execPath, path.join(__dirname, 'scripts', 'real-ai-orchestrator-smoke.js'), connectionId || ''];
+  // §71 同款：把结果写到 TEMP 文件，退出码/结果不依赖 stdio 转发链
+  // （guard 可经 REAL_AI_RESULT_FILE 预生成路径，已存在则复用）
+  const os = require('os');
+  if (!process.env.REAL_AI_RESULT_FILE) {
+    process.env.REAL_AI_RESULT_FILE = path.join(os.tmpdir(), `adp-real-ai-result-${process.pid}.json`);
+  }
+  const resultFile = process.env.REAL_AI_RESULT_FILE;
+  try {
+    const { main } = require('./scripts/real-ai-orchestrator-smoke');
+    await main();   // main() 内部 process.exit（PASS=0 / FAIL=1 / ENV=2 / SKIP=0）
+  } catch (e) {
+    console.log('REAL_AI_ORCHESTRATOR_SMOKE');
+    console.log('Status: FAIL');
+    console.log(`Reason: ${(e && e.code) || 'UNEXPECTED'}`);
+    console.log(`Message: ${e && e.message}`);
+    app.exit(1);
+  }
+  // 兑底（main 理论上必 exit）：以结果文件为准决定退出码
+  let code = 1;
+  try { code = JSON.parse(fs.readFileSync(resultFile, 'utf8')).exitCode ?? 1; } catch { /* keep 1 */ }
   app.exit(code);
 }
 

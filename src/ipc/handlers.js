@@ -54,6 +54,7 @@ const { setDynamicAgentRuntime } = require('../agents/dynamic/runtimeRegistry');
 const { createSkillRegistry, createSkillResolver, BUILTIN_SKILLS, setSkillRuntime } = require('../skills');
 const { createHookEngine, setHookRuntime } = require('../hooks');
 const { createWorkflowEngine } = require('../workflows');
+const { createGeneratorEngine } = require('../generator');
 const { createProviderModelAdapter } = require('../agent/runtime/providerModelAdapter');
 const {
   createModelCatalog,
@@ -203,6 +204,22 @@ const workflowEngine = createWorkflowEngine({
   createPermissionEngine: ({ projectId }) => new PermissionEngine({ store, projectId })
 });
 
+// v2.9.6 AI Generator Framework. This composes existing validators, registries,
+// model routing, and ProviderModelAdapter; it has no tool or execution runtime.
+const generatorEngine = createGeneratorEngine({
+  agentDefinitionStore: store.agentDefinitions,
+  skillRegistry,
+  hookEngine,
+  workflowRegistry: workflowEngine.registry,
+  agentRegistry,
+  modelCatalog,
+  listTools: platformToolNames,
+  getTool,
+  resolveRuntimeModel: runtimeModelResolver.resolveRuntimeModel,
+  draftStore: store.generatorDrafts,
+  auditStore: store.generatorAudit
+});
+
 // Register built-in adapters
 // v2.8.0 — 外部 Agent 会话落库后端（spec §110/§111）。DB 未就绪（隔离单测）时为 null → 纯内存。
 const sessionPersistence = (() => { try { return createDbSessionPersistence(store.externalAgentSessions); } catch { return null; } })();
@@ -260,7 +277,8 @@ async function shutdownServices() {
       ...dynamicAgentFactory.listInstances().map(instance => dynamicAgentFactory.disposeInstance(instance.instanceId)),
       ...workflowEngine.runtime.listRuns()
         .filter(run => !['COMPLETED', 'FAILED', 'CANCELLED'].includes(run.status))
-        .map(run => workflowEngine.runtime.cancel(run.workflowRunId))
+        .map(run => workflowEngine.runtime.cancel(run.workflowRunId)),
+      ...[...generatorEngine.service.active.keys()].map(draftId => generatorEngine.service.cancel(draftId))
     ]);
   })();
   return shutdownPromise;
@@ -1381,6 +1399,16 @@ function register(window) {
   ipcMain.handle('workflow:cancel', (e, workflowRunId) => workflowEngine.runtime.cancel(workflowRunId));
   ipcMain.handle('workflow:approve', (e, workflowRunId) => workflowEngine.runtime.approve(workflowRunId));
   ipcMain.handle('workflow:reject', (e, workflowRunId) => workflowEngine.runtime.reject(workflowRunId));
+
+  // v2.9.6 AI Generator: generation returns a durable draft immediately. Save
+  // and validate are provider-free and always cross the real validator boundary.
+  ipcMain.handle('generator:generate', (e, request) => generatorEngine.service.generate(request));
+  ipcMain.handle('generator:getDraft', (e, draftId) => generatorEngine.service.getDraft(draftId));
+  ipcMain.handle('generator:listDrafts', (e, limit) => generatorEngine.service.listDrafts(limit));
+  ipcMain.handle('generator:validate', (e, draftId) => generatorEngine.service.validate(draftId));
+  ipcMain.handle('generator:save', (e, draftId) => generatorEngine.service.save(draftId));
+  ipcMain.handle('generator:discard', (e, draftId) => generatorEngine.service.discard(draftId));
+  ipcMain.handle('generator:cancel', (e, draftId) => generatorEngine.service.cancel(draftId));
 
   // v2.7.1 — Project Mutation Lock IPC
   ipcMain.handle('lock:isBusy', (e, projectRoot) => projectLock.isBusy(projectRoot));

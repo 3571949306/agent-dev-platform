@@ -207,6 +207,48 @@ CREATE TABLE IF NOT EXISTS workflow_audit (
 );
 CREATE INDEX IF NOT EXISTS idx_workflow_audit_run ON workflow_audit(workflow_run_id, created_at);
 
+-- v2.9.6: AI Generator drafts are configuration previews, never executable Runs.
+CREATE TABLE IF NOT EXISTS generator_drafts (
+  draft_id TEXT PRIMARY KEY,
+  generation_id TEXT NOT NULL,
+  artifact_type TEXT NOT NULL,
+  status TEXT NOT NULL,
+  candidate_json TEXT,
+  validation_json TEXT NOT NULL DEFAULT '{}',
+  attempts INTEGER DEFAULT 0,
+  repair_count INTEGER DEFAULT 0,
+  selected_connection_id TEXT,
+  selected_model_id TEXT,
+  route_decision_id TEXT,
+  error_code TEXT,
+  error TEXT,
+  saved_artifact_id TEXT,
+  created_at TEXT,
+  updated_at TEXT,
+  terminal_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_generator_drafts_status ON generator_drafts(status, created_at);
+
+CREATE TABLE IF NOT EXISTS generator_audit (
+  audit_id TEXT PRIMARY KEY,
+  generation_id TEXT NOT NULL,
+  draft_id TEXT,
+  artifact_type TEXT,
+  status TEXT NOT NULL,
+  attempt_count INTEGER DEFAULT 0,
+  repair_count INTEGER DEFAULT 0,
+  route_decision_id TEXT,
+  selected_connection_id TEXT,
+  selected_model_id TEXT,
+  validation_codes_json TEXT NOT NULL DEFAULT '[]',
+  saved_artifact_id TEXT,
+  intent_hash TEXT,
+  intent_length INTEGER DEFAULT 0,
+  duration_ms INTEGER DEFAULT 0,
+  created_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_generator_audit_generation ON generator_audit(generation_id, created_at);
+
 CREATE TABLE IF NOT EXISTS agent_templates (
   id TEXT PRIMARY KEY,
   template_json TEXT NOT NULL,

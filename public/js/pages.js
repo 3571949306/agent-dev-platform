@@ -234,7 +234,7 @@ export async function open(page) {
   const body = $('#page-body');
   if (body) body.scrollTop = 0;
   $$('.topnav button').forEach(b => b.classList.toggle('active', b.dataset.page === page));
-  const title = { dashboard: '总览', connections: 'API 连接', agents: '智能体', mcp: 'MCP 服务器', skills: 'Skills', workflows: 'Workflows', diagnostics: '能力诊断', settings: '设置' }[page] || page;
+  const title = { dashboard: '总览', connections: 'API 连接', agents: '智能体', mcp: 'MCP 服务器', skills: 'Skills', workflows: 'Workflows', generator: 'AI Generator', diagnostics: '能力诊断', settings: '设置' }[page] || page;
   $('#page-title').textContent = title;
   body.innerHTML = '<div class="muted">加载中…</div>';
   try {
@@ -244,6 +244,7 @@ export async function open(page) {
     else if (page === 'mcp') await renderMcp(body);
     else if (page === 'skills') await renderSkills(body);
     else if (page === 'workflows') await renderWorkflows(body);
+    else if (page === 'generator') await renderGenerator(body);
     else if (page === 'diagnostics') await renderDiagnostics(body);
     else if (page === 'settings') await renderSettings(body);
   } catch (e) { body.innerHTML = `<div class="err">${esc(e.message)}</div>`; }
@@ -1853,6 +1854,92 @@ function mcpForm() {
 /* ------------------------------------------------------------------ */
 /* Workflows (v2.9.5 serial Workflow Engine)                           */
 /* ------------------------------------------------------------------ */
+async function renderGenerator(body) {
+  const [connections, drafts] = await Promise.all([api.connections(), api.generatorListDrafts(20)]);
+  const modelOptions = [];
+  for (const connection of connections.filter(item => item.enabled !== 0)) {
+    for (const model of connection.models || []) {
+      const modelId = typeof model === 'string' ? model : model.id;
+      if (modelId) modelOptions.push({ connectionId: connection.id, modelId, label: `${connection.name} / ${modelId}` });
+    }
+  }
+  body.innerHTML = `
+    <div class="card">
+      <h3>AI Generator</h3>
+      <p class="muted">Generates configuration drafts only. Generated ≠ validated; validated ≠ saved; saved ≠ executed.</p>
+      <div class="form-grid">
+        <label>Artifact Type<select id="generator-type"><option value="agent">Agent</option><option value="skill">Skill</option><option value="hook">Hook</option><option value="workflow">Workflow</option></select></label>
+        <label>Model<select id="generator-model"><option value="">Auto</option>${modelOptions.map(item => `<option value="${esc(JSON.stringify({ connectionId: item.connectionId, modelId: item.modelId }))}">${esc(item.label)}</option>`).join('')}</select></label>
+      </div>
+      <label>Natural Language Requirement<textarea id="generator-intent" rows="7" maxlength="12000" placeholder="Describe the configuration to generate..."></textarea></label>
+      <div class="actions"><button class="primary" id="generator-generate">Generate</button><button id="generator-regenerate" disabled>Regenerate</button><button id="generator-cancel" disabled>Cancel</button></div>
+    </div>
+    <div class="card">
+      <h3>Draft Preview</h3>
+      <div id="generator-meta" class="muted">${drafts.length ? 'Select Generate to create a new draft.' : 'No drafts yet.'}</div>
+      <pre id="generator-json" style="max-height:420px;overflow:auto">${drafts.length ? esc(JSON.stringify(drafts[0].candidate, null, 2)) : ''}</pre>
+      <div id="generator-errors"></div>
+      <div class="actions"><button class="primary" id="generator-save" disabled>Save</button><button id="generator-discard" disabled>Discard</button></div>
+    </div>`;
+
+  let currentDraft = null;
+  let lastRequest = null;
+  const renderDraft = draft => {
+    currentDraft = draft;
+    const selected = draft && draft.selectedModel;
+    $('#generator-meta').textContent = draft
+      ? `Status: ${draft.status} · attempts: ${draft.attempts || 0} · repairs: ${draft.repairCount || 0} · model: ${selected ? `${selected.connectionId} / ${selected.modelId}` : 'pending'}`
+      : 'No draft.';
+    $('#generator-json').textContent = draft && draft.candidate ? JSON.stringify(draft.candidate, null, 2) : '';
+    const errors = draft && draft.validation && draft.validation.errors || [];
+    $('#generator-errors').innerHTML = errors.length
+      ? `<div class="error-box">${errors.map(error => `<div>${esc(error.code)}: ${esc(error.message)}</div>`).join('')}</div>` : '';
+    const active = draft && ['GENERATING', 'VALIDATING', 'REPAIRING'].includes(draft.status);
+    $('#generator-save').disabled = !draft || draft.status !== 'READY';
+    $('#generator-discard').disabled = !draft || draft.status === 'SAVED' || draft.status === 'DISCARDED';
+    $('#generator-regenerate').disabled = !lastRequest || active;
+    $('#generator-cancel').disabled = !active;
+  };
+  const poll = async draftId => {
+    for (;;) {
+      const draft = await api.generatorGetDraft(draftId);
+      if (!draft || currentDraft && currentDraft.draftId !== draftId) return;
+      renderDraft(draft);
+      if (!['GENERATING', 'VALIDATING', 'REPAIRING'].includes(draft.status)) return;
+      await new Promise(resolve => setTimeout(resolve, 300));
+    }
+  };
+  const generate = async request => {
+    try {
+      lastRequest = request;
+      const draft = await api.generatorGenerate(request);
+      renderDraft(draft);
+      await poll(draft.draftId);
+    } catch (error) { toast(error.message, 'error'); }
+  };
+  $('#generator-generate').onclick = () => {
+    const intent = $('#generator-intent').value.trim();
+    if (!intent) return toast('Natural language requirement is required.', 'error');
+    const rawModel = $('#generator-model').value;
+    const explicitModel = rawModel ? JSON.parse(rawModel) : null;
+    return generate({
+      schemaVersion: 1,
+      artifactType: $('#generator-type').value,
+      intent,
+      mode: explicitModel ? 'explicit_model' : 'auto',
+      explicitModel,
+      context: { projectId: null, projectSummary: null }
+    });
+  };
+  $('#generator-regenerate').onclick = () => lastRequest && generate(lastRequest);
+  $('#generator-cancel').onclick = async () => { if (currentDraft) renderDraft(await api.generatorCancel(currentDraft.draftId)); };
+  $('#generator-save').onclick = async () => {
+    try { const result = await api.generatorSave(currentDraft.draftId); renderDraft(result.draft); toast('Definition saved (not enabled or executed).', 'ok'); }
+    catch (error) { toast(error.message, 'error'); renderDraft(await api.generatorGetDraft(currentDraft.draftId)); }
+  };
+  $('#generator-discard').onclick = async () => { if (currentDraft) renderDraft(await api.generatorDiscard(currentDraft.draftId)); };
+}
+
 async function renderWorkflows(body) {
   const [definitions, runs] = await Promise.all([api.workflowList(), api.workflowListRuns(30)]);
   const definitionRows = definitions.map(w => {

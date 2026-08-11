@@ -1,5 +1,17 @@
 # Changelog
 
+## v2.9.6 — AI Generator Framework
+
+- Added a strict, bounded `GeneratorRequest` with pre-provider secret detection and no permission, provider, tool implementation, runtime object, or executable authority fields.
+- Added a unified artifact adapter registry for Dynamic Agent, Skill, Hook, and Workflow configuration; every candidate passes the existing definition normalizer/validator plus live cross-reference and authority validation.
+- Added a canonical, secret-free capability catalog containing only public resource metadata; invented or disabled Tool, Skill, Hook handler, Agent, and Model references fail closed.
+- Integrated generation exclusively through the existing Model Router, RuntimeModelResolver, and ProviderModelAdapter. Auto routing is capability-based, explicit routing has no fallback, and the generator model has zero tools.
+- Added exact JSON-only parsing, configuration-only system rules, deterministic repair prompts, a maximum of two repair attempts (three provider attempts total), cancellation/timeout handling, and terminal late-result guards.
+- Added durable Generator drafts and sanitized audit. READY drafts require explicit save; save performs complete TOCTOU revalidation, never overwrites an existing ID, disables saved Skill/Hook/Workflow definitions, and never executes or grants authority.
+- Added minimal Generator IPC/API/GUI support for generate, preview, validate, explicit save, discard, cancel, regenerate, and automatic/explicit model selection.
+- Added deterministic/adversarial unit coverage and a real-component production A–J smoke proving selected model `generator-model-B` equals provider wire model, with zero Agent Runs, Workflow executions, Tool executions, permission grants, paid calls, and secret-input provider calls.
+- Added `docs/AI_GENERATOR_FRAMEWORK.md` documenting the invariants: Generated != Validated; Validated != Saved; Saved != Executed; AI may generate configuration but never authority.
+
 ## v2.9.5 — Workflow Engine
 
 - Added strict, versioned, JSON-only Workflow definitions for serial agent, tool, deterministic condition, and explicit approval steps; cycles, unknown dependencies/types, runtime objects, executable fields, and credential-bearing data fail closed.

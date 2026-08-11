@@ -1,4 +1,65 @@
-# Test Report — Agent Dev Platform（v2.9.3）
+# Test Report — Agent Dev Platform (v2.9.6)
+
+## v2.9.6 — AI Generator Framework (2026-08-11)
+
+Starting HEAD: `08a9e396f26d93a499ae2fa3b52e2e5b7da8d61b` (v2.9.5 FROZEN). The starting worktree was clean. Baseline unit was 1593 pass / 0 fail / 1 skip and baseline E2E was 65/65.
+
+| Requirement | Deterministic proof | Status |
+| --- | --- | --- |
+| R0 Baseline | Exact HEAD/version/status/diffs inspected; all baseline focused suites and E2E passed before edits | VERIFIED |
+| R1 GeneratorRequest | Strict keys/types/modes, 12K/16K bounds, credential-shaped input rejected before router/provider, zero secret provider calls | VERIFIED |
+| R2 Artifact Adapters | Registry covers Agent/Skill/Hook/Workflow and reuses all four real normalizers/validators; authority fields rejected | VERIFIED |
+| R3 Capability / References | Canonical shuffle x100, secret-free public metadata only; invented/disabled Tool, Skill, handler, Agent, and Model references fail closed | VERIFIED |
+| R4 Model Router | Real ModelCatalog/ModelRouter/RuntimeModelResolver/ProviderModelAdapter; selected `generator-model-B` equals provider wire; explicit missing has zero fallback calls | VERIFIED |
+| R5 Structured Generation | Configuration-only system rules and exact one-object JSON parsing; prose/fences/multiple JSON/non-object output rejected | VERIFIED |
+| R6 Validation / Repair | Real validator remains final authority; maximum two repairs and three total provider attempts; exhaustion persists FAILED | VERIFIED |
+| R7 Draft / Save Boundary | No Registry write before explicit save; validate/save make zero provider calls; save-time TOCTOU and collision fail closed; cancellation terminal; no execution/grant | VERIFIED |
+| R8 Audit / Production | Sanitized hash/length-only intent audit and real-component scenarios A–J with fake network only | VERIFIED |
+
+Production proof:
+
+```text
+Natural language -> Generator Service -> Artifact Adapter
+-> Model Router -> ProviderModelAdapter -> fake network provider
+-> exact JSON -> real Definition validator -> reference/authority validator
+-> GeneratorDraft READY -> explicit Save -> real Registry
+
+selected model: generator-model-B
+provider wire model: generator-model-B
+selection == wire: YES
+Agent Runs: 0
+Workflow executions: 0
+Tool executions: 0
+Permission grants: 0
+Paid provider calls: 0
+Secret-input provider calls: 0
+```
+
+Focused generator verification: 13/13 unit proofs and 1/1 production proof. Full regression after implementation: 1607 pass / 0 fail / 1 skip (1608 total).
+
+Final serialized release gates:
+
+```text
+npm test: 1607 pass / 0 fail / 1 skip (1608 total)
+npm run test:dynamic-agent: 9/9
+npm run test:dynamic-agent:production: 1/1
+npm run test:model-router: 11/11
+npm run test:model-router:production: 1/1
+npm run test:skill: 27/27
+npm run test:skill:production: 4/4
+npm run test:hook: 10/10
+npm run test:hook:production: 1/1
+npm run test:workflow: 15/15
+npm run test:workflow:production: 1/1
+npm run test:generator: 13/13
+npm run test:generator:production: 1/1
+npm run e2e: 65/65
+npm run dist: PASS — Windows NSIS + portable 2.9.6 artifacts
+paid provider calls: 0
+```
+
+The framework enforces: Generated != Validated; Validated != Saved; Saved != Executed. AI may generate configuration and may never generate authority.
+
 
 ## v2.9.3 — Skill Engine（2026-08-11）
 

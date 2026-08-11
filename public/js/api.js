@@ -117,6 +117,15 @@ export const api = {
   workflowApprove: (workflowRunId) => call('workflow:approve', workflowRunId),
   workflowReject: (workflowRunId) => call('workflow:reject', workflowRunId),
 
+  // v2.9.6 AI Generator drafts (generation never saves or executes).
+  generatorGenerate: (request) => call('generator:generate', request),
+  generatorGetDraft: (draftId) => call('generator:getDraft', draftId),
+  generatorListDrafts: (limit) => call('generator:listDrafts', limit),
+  generatorValidate: (draftId) => call('generator:validate', draftId),
+  generatorSave: (draftId) => call('generator:save', draftId),
+  generatorDiscard: (draftId) => call('generator:discard', draftId),
+  generatorCancel: (draftId) => call('generator:cancel', draftId),
+
   // agents
   agents: () => call('agents:list'),
   agentGet: (id) => call('agents:get', id),

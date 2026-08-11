@@ -1135,6 +1135,92 @@ const workflowAudit = {
   }
 };
 
+function generatorDraftFromRow(row) {
+  return row ? {
+    draftId: row.draft_id,
+    generationId: row.generation_id,
+    artifactType: row.artifact_type,
+    status: row.status,
+    candidate: p(row.candidate_json, null),
+    validation: p(row.validation_json, { valid: false, errors: [], warnings: [] }),
+    attempts: row.attempts || 0,
+    repairCount: row.repair_count || 0,
+    selectedModel: row.selected_connection_id || row.selected_model_id ? {
+      connectionId: row.selected_connection_id,
+      modelId: row.selected_model_id
+    } : null,
+    routeDecisionId: row.route_decision_id,
+    errorCode: row.error_code,
+    error: row.error,
+    savedArtifactId: row.saved_artifact_id,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    terminalAt: row.terminal_at
+  } : null;
+}
+
+const generatorDrafts = {
+  create(input) {
+    const t = input.createdAt || now();
+    db().prepare(
+      'INSERT INTO generator_drafts ' +
+      '(draft_id,generation_id,artifact_type,status,candidate_json,validation_json,attempts,repair_count,selected_connection_id,selected_model_id,route_decision_id,error_code,error,saved_artifact_id,created_at,updated_at,terminal_at) ' +
+      'VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)'
+    ).run(input.draftId, input.generationId, input.artifactType, input.status,
+      input.candidate === null || input.candidate === undefined ? null : j(input.candidate),
+      j(input.validation || { valid: false, errors: [], warnings: [] }), input.attempts || 0,
+      input.repairCount || 0, input.selectedModel && input.selectedModel.connectionId || null,
+      input.selectedModel && input.selectedModel.modelId || null, input.routeDecisionId || null,
+      input.errorCode || null, input.error || null, input.savedArtifactId || null,
+      t, input.updatedAt || t, input.terminalAt || null);
+    return generatorDrafts.get(input.draftId);
+  },
+  get(draftId) {
+    return generatorDraftFromRow(db().prepare('SELECT * FROM generator_drafts WHERE draft_id=?').get(draftId));
+  },
+  list(limit = 100) {
+    return db().prepare('SELECT * FROM generator_drafts ORDER BY created_at DESC LIMIT ?').all(limit).map(generatorDraftFromRow);
+  },
+  update(draftId, patch) {
+    const current = generatorDrafts.get(draftId);
+    if (!current) return null;
+    const next = { ...current, ...(patch || {}), updatedAt: patch && patch.updatedAt || now() };
+    db().prepare(
+      'UPDATE generator_drafts SET status=?,candidate_json=?,validation_json=?,attempts=?,repair_count=?,' +
+      'selected_connection_id=?,selected_model_id=?,route_decision_id=?,error_code=?,error=?,saved_artifact_id=?,updated_at=?,terminal_at=? WHERE draft_id=?'
+    ).run(next.status, next.candidate === null || next.candidate === undefined ? null : j(next.candidate),
+      j(next.validation || { valid: false, errors: [], warnings: [] }), next.attempts || 0,
+      next.repairCount || 0, next.selectedModel && next.selectedModel.connectionId || null,
+      next.selectedModel && next.selectedModel.modelId || null, next.routeDecisionId || null,
+      next.errorCode || null, next.error || null, next.savedArtifactId || null,
+      next.updatedAt, next.terminalAt || null, draftId);
+    return generatorDrafts.get(draftId);
+  }
+};
+
+const generatorAudit = {
+  create(input) {
+    db().prepare(
+      'INSERT INTO generator_audit ' +
+      '(audit_id,generation_id,draft_id,artifact_type,status,attempt_count,repair_count,route_decision_id,selected_connection_id,selected_model_id,validation_codes_json,saved_artifact_id,intent_hash,intent_length,duration_ms,created_at) ' +
+      'VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)'
+    ).run(input.auditId, input.generationId, input.draftId || null, input.artifactType || null,
+      input.status, input.attemptCount || 0, input.repairCount || 0, input.routeDecisionId || null,
+      input.selectedConnectionId || null, input.selectedModelId || null,
+      j(input.validationCodes || []), input.savedArtifactId || null, input.intentHash || null,
+      input.intentLength || 0, input.durationMs || 0, input.createdAt || now());
+    return generatorAudit.get(input.auditId);
+  },
+  get(auditId) {
+    const row = db().prepare('SELECT * FROM generator_audit WHERE audit_id=?').get(auditId);
+    return row ? { ...row, validation_codes: p(row.validation_codes_json, []) } : null;
+  },
+  list(limit = 100) {
+    return db().prepare('SELECT * FROM generator_audit ORDER BY created_at DESC LIMIT ?').all(limit)
+      .map(row => ({ ...row, validation_codes: p(row.validation_codes_json, []) }));
+  }
+};
+
 // ---------- v1 JSON migration ----------
 function migrateFromJson(jsonPath) {
   if (!jsonPath || !require('fs').existsSync(jsonPath)) return false;
@@ -1195,5 +1281,6 @@ module.exports = {
   externalAgentSessions, externalAgentAuthStates, agentDefinitions, agentTemplates, modelRouteDecisions,
   skillDefinitions, hookDefinitions, hookInvocations,
   workflowDefinitions, workflowExecutions, workflowStepExecutions, workflowAudit,
+  generatorDrafts, generatorAudit,
   migrateFromJson
 };

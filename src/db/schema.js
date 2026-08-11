@@ -95,6 +95,21 @@ CREATE TABLE IF NOT EXISTS agents (
   updated_at TEXT
 );
 
+-- v2.9.1: persistent definitions/templates only. Runtime instances remain in-memory.
+CREATE TABLE IF NOT EXISTS agent_definitions (
+  id TEXT PRIMARY KEY,
+  definition_json TEXT NOT NULL,
+  created_at TEXT,
+  updated_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS agent_templates (
+  id TEXT PRIMARY KEY,
+  template_json TEXT NOT NULL,
+  created_at TEXT,
+  updated_at TEXT
+);
+
 CREATE TABLE IF NOT EXISTS external_agents (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL,

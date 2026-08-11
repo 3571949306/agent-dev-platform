@@ -1,4 +1,51 @@
-# Test Report — Agent Dev Platform（v2.9.0）
+# Test Report — Agent Dev Platform（v2.9.1）
+
+## v2.9.1 — Dynamic Agent Framework（2026-08-11）
+
+> **基线：** `v2.9.0 / 09e0d87737b29e782ba6c4f74d8579cce61ef8fc`。
+> **验证原则：** 只记录真实执行结果；真实 AI 仅运行 dry-run，provider calls 为 0。
+
+### Requirement Matrix
+
+| Requirement | Result | Evidence |
+| --- | --- | --- |
+| R1 Definition schema / validation | VERIFIED | schema v1；非法 runtime、lifetime、model、tool、函数值与 credential-like 字段均 fail-closed |
+| R2 Template compilation / policy ceiling | VERIFIED | allow 取交集、deny 取并集、read-only 单调收紧，不能越过 parent/platform ceiling |
+| R3 Runtime factory / native delegation | VERIFIED | MainAgentRuntime → Orchestrator → Factory → DynamicNativeAgentAdapter → AgentHub → AgentResult |
+| R4 Lifecycle / resource cleanup | VERIFIED | run/session/manual 生命周期；100 次 create/dispose 后 live instances、registered adapters、timers 均为 0 |
+| R5 Prompt / result consumption | VERIFIED | 自定义 marker 到达 child system prompt，平台 Runtime Safety Contract 始终在前；child summary 回流 parent context |
+| R6 Permission / isolation / limits | VERIFIED | read-only mutation 拒绝、parent ceiling 生效、`canDelegate=false` 拒绝二次委派、单 root 上限 8 |
+| R7 Persistence / CRUD | VERIFIED | definition/template SQLite CRUD 与重启持久化；instance 不持久化；in-use definition 删除失败 |
+| R8 Compatibility / release gates | VERIFIED | built-in unit、E2E、Windows dist 均通过；无新依赖、无真实 provider call |
+
+### Executed gates
+
+```text
+npm test
+# tests 1521
+# pass 1520
+# fail 0
+# skipped 1
+
+npm run test:dynamic-agent
+# tests 6
+# pass 6
+# fail 0
+
+npm run e2e
+65 passed / 0 failed
+
+npm run dist
+PASS — NSIS + portable Windows artifacts
+
+npm run test:real-ai:dry-run
+Status: DRY_RUN
+Provider calls: 0
+```
+
+Secret scan covered all 26 changed/new source, test, documentation, and package files for `api_key`, `Authorization`, `Bearer`, `Cookie`, `password`, `access_token`, and `refresh_token`. All matches were schema/secure-storage compatibility code, rejection rules, documentation, or placeholder test data; no credential value was introduced.
+
+---
 
 ## v2.9.0 — Unified Main Agent Orchestrator（2026-08-10）
 

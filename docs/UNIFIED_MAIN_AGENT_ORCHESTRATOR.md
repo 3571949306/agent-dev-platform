@@ -5,6 +5,12 @@
 > 在现有三套 Runtime（General Chat / Main Coding / AgentHub）之上建立统一编排层，
 > 实现 Main Agent → delegate → AgentHub → Child Run → Blackboard → Main Agent 真正闭环。
 
+## v2.9.1 Dynamic Agent extension
+
+v2.9.1 keeps this orchestrator as the only Main Agent delegation path. When `delegate` contains `agentDefinitionId` or `inlineAgentDefinition`, the orchestrator validates or loads the Definition, asks `AgentFactory` for an ephemeral runtime instance, registers only that instance adapter in AgentHub, and then uses the existing `AgentHubBridge.startChildTask()` flow. The returned `AgentResult` enters Blackboard and the next Main Agent model context; `run` lifetime cleanup occurs in `finally`.
+
+Definitions and templates are persistent configuration, not Registry entries. The Registry still contains runtime adapters only. See `docs/DYNAMIC_AGENT_FRAMEWORK.md` for the schema, security ceilings, lifecycle, persistence, and deterministic proof.
+
 ## 1. 架构定位
 
 v2.8.2 及以前存在三套独立 Runtime，未形成统一 Main Agent：

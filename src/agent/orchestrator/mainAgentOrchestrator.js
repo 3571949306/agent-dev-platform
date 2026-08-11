@@ -30,10 +30,18 @@ function createMainAgentOrchestrator(opts) {
   const o = opts || {};
   const hub = o.hub;
   const parentRunId = o.parentRunId || null;
+  const rootRunId = o.rootRunId || parentRunId;
   const parentAgentId = o.parentAgentId || 'native-main';
   const projectRoot = o.projectRoot || null;
   const projectId = o.projectId || null;
   const externalEmit = o.emit || null;
+  const dynamicAgentFactory = o.dynamicAgentFactory || null;
+  const definitionStore = o.definitionStore || null;
+  const parentModelAdapter = o.parentModelAdapter || null;
+  const parentPermissionEngine = o.parentPermissionEngine || null;
+  const parentCanDelegate = o.parentCanDelegate !== false;
+  const parentPolicy = o.parentPolicy || null;
+  const getTool = o.getTool || null;
 
   const blackboard = createBlackboard();
   const childRunTracker = createChildRunTracker();
@@ -77,6 +85,45 @@ function createMainAgentOrchestrator(opts) {
    * @returns {Promise<object>} AgentResult（§12）
    */
   async function delegate(delegateArgs, options) {
+    let dynamicInstance = null;
+    let dynamicDefinition = null;
+    const wantsDynamic = !!(delegateArgs.inlineAgentDefinition || delegateArgs.agentDefinitionId);
+    if (wantsDynamic) {
+      if (!parentCanDelegate) {
+        return { ok: false, status: 'failed', agentId: null, runId: null, errors: ['PERMISSION_DENIED'], errorCode: 'PERMISSION_DENIED' };
+      }
+      if (!dynamicAgentFactory) {
+        return { ok: false, status: 'failed', agentId: null, runId: null, errors: ['DYNAMIC_AGENT_FACTORY_UNAVAILABLE'], errorCode: 'DYNAMIC_AGENT_FACTORY_UNAVAILABLE' };
+      }
+      try {
+        if (delegateArgs.agentDefinitionId) {
+          dynamicDefinition = definitionStore && typeof definitionStore.get === 'function'
+            ? definitionStore.get(delegateArgs.agentDefinitionId)
+            : null;
+          if (!dynamicDefinition) {
+            return { ok: false, status: 'failed', agentId: null, runId: null, errors: ['DYNAMIC_AGENT_DEFINITION_NOT_FOUND'], errorCode: 'DYNAMIC_AGENT_DEFINITION_NOT_FOUND' };
+          }
+        } else {
+          dynamicDefinition = delegateArgs.inlineAgentDefinition;
+        }
+        dynamicInstance = dynamicAgentFactory.createInstance(dynamicDefinition, {
+          parentRunId,
+          rootRunId: (options && options.rootRunId) || rootRunId,
+          parentModelAdapter,
+          parentPermissionEngine,
+          parentPolicy,
+          getTool,
+          emit: externalEmit
+        });
+        dynamicAgentFactory.registerInstance(dynamicInstance.instanceId, hub);
+      } catch (error) {
+        return {
+          ok: false, status: 'failed', agentId: null, runId: null,
+          errors: [String(error.message || error)], errorCode: error.code || 'DYNAMIC_AGENT_CREATE_FAILED'
+        };
+      }
+    }
+
     const taskInput = {
       goal: delegateArgs.goal || delegateArgs.task || '',
       taskType: delegateArgs.taskType || 'generic',
@@ -84,8 +131,8 @@ function createMainAgentOrchestrator(opts) {
       projectRoot,
       requiredCapabilities: delegateArgs.requiredCapabilities || delegateArgs.required || [],
       preferredCapabilities: delegateArgs.preferredCapabilities || delegateArgs.preferred || [],
-      preferredAgentId: delegateArgs.preferredAgentId || delegateArgs.agentId || null,
-      readOnly: delegateArgs.readOnly === true,
+      preferredAgentId: dynamicInstance ? dynamicInstance.adapterId : (delegateArgs.preferredAgentId || delegateArgs.agentId || null),
+      readOnly: dynamicInstance ? dynamicInstance.definition.permissionPolicy.readOnly : delegateArgs.readOnly === true,
       permissions: delegateArgs.permissions || {},
       expectedOutput: delegateArgs.expectedOutput || null,
       verificationRequirements: delegateArgs.verificationRequirements || [],
@@ -98,14 +145,21 @@ function createMainAgentOrchestrator(opts) {
     };
     const { ok, task, error, errorCode } = createAgentTask(taskInput);
     if (!ok) {
+      if (dynamicInstance) await dynamicAgentFactory.disposeInstance(dynamicInstance.instanceId);
       return { ok: false, status: 'failed', agentId: null, runId: null, errors: [error], errorCode };
     }
 
-    eventBus.emit(ORCHESTRATION_EVENT.DELEGATION_BEFORE, { parentRunId, goal: task.goal });
-    const result = await bridge.startChildTask(task, options);
-    eventBus.emit(result.ok ? ORCHESTRATION_EVENT.DELEGATION_COMPLETED : ORCHESTRATION_EVENT.DELEGATION_FAILED,
-      { parentRunId, agentId: result.agentId, runId: result.runId, status: result.status });
-    return result;
+    try {
+      eventBus.emit(ORCHESTRATION_EVENT.DELEGATION_BEFORE, { parentRunId, goal: task.goal });
+      const result = await bridge.startChildTask(task, options);
+      eventBus.emit(result.ok ? ORCHESTRATION_EVENT.DELEGATION_COMPLETED : ORCHESTRATION_EVENT.DELEGATION_FAILED,
+        { parentRunId, agentId: result.agentId, runId: result.runId, status: result.status });
+      return result;
+    } finally {
+      if (dynamicInstance && dynamicInstance.lifetime === 'run') {
+        await dynamicAgentFactory.disposeInstance(dynamicInstance.instanceId);
+      }
+    }
   }
 
   /**

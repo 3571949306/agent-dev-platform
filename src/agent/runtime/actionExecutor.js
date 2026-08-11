@@ -116,6 +116,14 @@ async function executeAction(ctx, action, getTool) {
  * @returns {Promise<object>} Tool Result
  */
 async function executeDelegate(ctx, action, args) {
+  if (ctx && ctx.canDelegate === false) {
+    return {
+      ok: false,
+      tool: 'delegate',
+      action,
+      error: { code: 'PERMISSION_DENIED', message: 'Dynamic Agent delegation is disabled by policy', retryable: false }
+    };
+  }
   // v2.9.0 §7A 修复：优先用 orchestrator（如注入）走完整闭环
   //   Orchestrator → AgentHubBridge → AgentHub.route/start → Child Run → wait → Blackboard
   //   含 delegationPath/depth、fallback policy、no-bypass、Blackboard 写入。

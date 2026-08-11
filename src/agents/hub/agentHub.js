@@ -117,6 +117,10 @@ function createAgentHub(opts = {}) {
     return registry.register(adapter);
   }
 
+  function unregister(agentId) {
+    return registry.unregister(agentId);
+  }
+
   /**
    * 检测所有 Agent（委托给 registry.detectAll）。
    * @returns {Promise<Map>} id -> { available, version, path }
@@ -451,6 +455,7 @@ function createAgentHub(opts = {}) {
 
   return {
     register,
+    unregister,
     detect,
     health,
     route,

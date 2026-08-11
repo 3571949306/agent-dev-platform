@@ -70,7 +70,13 @@ async function runAgentLoop(deps) {
       // RunManager 统一使用小写终态名（completed/failed/cancelled/timeout），
       // 之前误把 status 映射成大写 'COMPLETED' 会被 RunManager 当作未知终态拒绝，
       // 导致 run 记录从未真正进入终态，后续 late finishRun('failed') 反而能覆盖。
-      try { runManager.finishRun(runId, status, { source: 'mainAgentLoop', ...extra }); } catch { /* Late Result Guard */ }
+      try {
+        runManager.finishRun(runId, status, {
+          source: 'mainAgentLoop',
+          ...extra,
+          message: extra.message || extra.summary || null
+        });
+      } catch { /* Late Result Guard */ }
     }
     return { status, ...extra };
   };

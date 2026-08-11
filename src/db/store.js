@@ -738,6 +738,63 @@ const externalAgentAuthStates = {
   list() { return db().prepare('SELECT * FROM external_agent_auth_states ORDER BY agent_id').all(); }
 };
 
+// ---------- v2.9.1 dynamic agent definitions/templates ----------
+const agentDefinitions = {
+  create(input) {
+    const { normalizeAgentDefinition } = require('../agents/dynamic/agentDefinition');
+    const definition = normalizeAgentDefinition(input);
+    const t = now();
+    db().prepare('INSERT INTO agent_definitions (id,definition_json,created_at,updated_at) VALUES (?,?,?,?)')
+      .run(definition.id, j(definition), t, t);
+    return agentDefinitions.get(definition.id);
+  },
+  get(id) {
+    const row = db().prepare('SELECT * FROM agent_definitions WHERE id=?').get(id);
+    return row ? p(row.definition_json, null) : null;
+  },
+  list() {
+    return db().prepare('SELECT * FROM agent_definitions ORDER BY created_at').all()
+      .map(row => p(row.definition_json, null)).filter(Boolean);
+  },
+  update(id, patch) {
+    const current = agentDefinitions.get(id);
+    if (!current) return null;
+    const { normalizeAgentDefinition } = require('../agents/dynamic/agentDefinition');
+    const definition = normalizeAgentDefinition(Object.assign({}, current, patch || {}, { id }));
+    db().prepare('UPDATE agent_definitions SET definition_json=?,updated_at=? WHERE id=?')
+      .run(j(definition), now(), id);
+    return agentDefinitions.get(id);
+  },
+  remove(id, options = {}) {
+    if (options.inUse) {
+      const error = new Error('AGENT_DEFINITION_IN_USE');
+      error.code = 'AGENT_DEFINITION_IN_USE';
+      throw error;
+    }
+    return db().prepare('DELETE FROM agent_definitions WHERE id=?').run(id).changes > 0;
+  }
+};
+
+const agentTemplates = {
+  create(input) {
+    const { normalizeAgentTemplate } = require('../agents/dynamic/agentTemplate');
+    const template = normalizeAgentTemplate(input);
+    const t = now();
+    db().prepare('INSERT INTO agent_templates (id,template_json,created_at,updated_at) VALUES (?,?,?,?)')
+      .run(template.id, j(template), t, t);
+    return agentTemplates.get(template.id);
+  },
+  get(id) {
+    const row = db().prepare('SELECT * FROM agent_templates WHERE id=?').get(id);
+    return row ? p(row.template_json, null) : null;
+  },
+  list() {
+    return db().prepare('SELECT * FROM agent_templates ORDER BY created_at').all()
+      .map(row => p(row.template_json, null)).filter(Boolean);
+  },
+  remove(id) { return db().prepare('DELETE FROM agent_templates WHERE id=?').run(id).changes > 0; }
+};
+
 // ---------- v1 JSON migration ----------
 function migrateFromJson(jsonPath) {
   if (!jsonPath || !require('fs').existsSync(jsonPath)) return false;
@@ -795,5 +852,6 @@ module.exports = {
   projects, connections, models, prompts, skills, agents, externalAgents,
   conversations, messages, events, tasks, runs, agentMessages, tools, mcpServers,
   memories, checkpoints, fileChanges, usage, modelCalls, permissionGrants, audit, permissionDecisions, settings, agentPrefs, extAgentConfigs,
-  externalAgentSessions, externalAgentAuthStates, migrateFromJson
+  externalAgentSessions, externalAgentAuthStates, agentDefinitions, agentTemplates,
+  migrateFromJson
 };

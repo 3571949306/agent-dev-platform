@@ -1,5 +1,17 @@
 # Changelog
 
+## v2.9.1 — Dynamic Agent Framework
+
+- Added a versioned, serializable `AgentDefinition` contract with strict normalize/validate behavior and credential/runtime-object rejection.
+- Added reusable `AgentTemplate` compilation with monotonic read-only and deny/allow ceilings.
+- Added `AgentFactory`, ephemeral `AgentInstance` lifecycle, and a true Dynamic Native Adapter using independent role prompt, scoped tools, chained permissions, model policy, and budgets.
+- Extended Main Agent structured delegation with `agentDefinitionId` and `inlineAgentDefinition`; dynamic children always run through AgentHub and return `AgentResult` to the next Main Agent iteration.
+- Added automatic `run`-lifetime cancellation/disposal/unregistration, bounded running disposal, eight-active-instances-per-root guard, and nested delegation default deny.
+- Added persistent `agent_definitions` / `agent_templates` CRUD and minimal `dynamicAgent:*` IPC without changing the legacy `agents` or runtime-only AgentRegistry semantics.
+- Added `npm run test:dynamic-agent` production-chain deterministic smoke and adversarial tests for invalid definitions, prompt/tool authenticity, read-only/parent ceilings, malicious prompt, nested delegation, ninth-instance rejection, 100-cycle cleanup, restart semantics, secrets, and in-use deletion.
+- Made Cline sidecar preparation idempotent when its manifest, lockfile hash, SDK version, and bundled Node version already match, keeping repeated Windows release builds deterministic.
+- Added `docs/DYNAMIC_AGENT_FRAMEWORK.md`; Dynamic Agent remains distinct from an external provider, persistent process, AI Agent Generator, or v2.9.2 Model Router.
+
 ## v2.9.0 — 2026-08-11（Real AI Harness Safety Patch，保持 v2.9.0，冻结框架）
 
 > 本轮不是新功能版本：只关闭 Real AI Test Harness 的 3 个安全缺口，完成后冻结

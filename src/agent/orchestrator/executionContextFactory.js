@@ -47,6 +47,26 @@ function createExecutionContextFactory(runtimeDeps) {
     const isNative = transport === 'native';
 
     if (isNative) {
+      if (agent && agent.dynamicAgent === true) {
+        if (!agent.modelAdapter || typeof agent.modelAdapter.decide !== 'function') {
+          throw new Error('DYNAMIC_AGENT_MODEL_UNRESOLVED: runtime ModelAdapter missing');
+        }
+        return Object.assign(base, {
+          runManager: deps.runManager || null,
+          model: agent.modelAdapter,
+          modelAdapter: agent.modelAdapter,
+          provider: agent.modelAdapter,
+          getTool: name => agent.getTool(name),
+          store: deps.store || null,
+          requestPermission: deps.requestPermission || null,
+          permissionEngine: deps.permissionEngine || null,
+          pathSecurity: deps.pathSecurity || null,
+          projectMutationLock: deps.projectMutationLock || null,
+          abortSignal: task.abortSignal || null,
+          events: deps.emit || base.emit || null,
+          agentName: agent.definition.name
+        });
+      }
       // §8-17: Native Hub Model Context 真修复（Gap 1）。
       // 优先用 shared resolver 产出真实 ProviderModelAdapter（带 decide），
       // 优先级：modelOverride → context.model → agent api_connection_id/model

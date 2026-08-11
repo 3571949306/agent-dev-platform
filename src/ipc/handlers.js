@@ -48,6 +48,9 @@ const { ClaudeCodeAgentAdapter } = require('../agents/adapters/claudeCodeAgentAd
 const { createOpenCodeServerManager } = require('../agents/integrations/opencode/serverManager');
 const { createDbSessionPersistence } = require('../agents/session/externalAgentSessionManager');
 const { createProjectMutationLock } = require('../security/projectMutationLock');
+const { createAgentFactory } = require('../agents/dynamic/agentFactory');
+const { setDynamicAgentRuntime } = require('../agents/dynamic/runtimeRegistry');
+const { createProviderModelAdapter } = require('../agent/runtime/providerModelAdapter');
 
 const mcpManager = new McpManager();
 const browser = createBrowserTools();
@@ -109,6 +112,21 @@ const executionContextFactory = createExecutionContextFactory({
 });
 const agentHub = createAgentHub({ registry: agentRegistry, router: agentRouter, healthManager, lifecycleManager, eventNormalizer, runBridge, emit, projectLock, contextFactory: executionContextFactory });
 setAgentHub(agentHub);
+const dynamicAgentFactory = createAgentFactory({
+  getTool,
+  emit,
+  resolveExplicitModel(modelPolicy) {
+    const agent = {
+      id: `dynamic-model-${modelPolicy.connectionId}`,
+      name: 'Dynamic Agent',
+      api_connection_id: modelPolicy.connectionId,
+      model: modelPolicy.model,
+      max_tokens: 4096
+    };
+    return createProviderModelAdapter({ buildProvider, agent, resolveModel: resolveModelFor, timeoutMs: 120000 });
+  }
+});
+setDynamicAgentRuntime(dynamicAgentFactory, store.agentDefinitions);
 
 // Register built-in adapters
 // v2.8.0 — 外部 Agent 会话落库后端（spec §110/§111）。DB 未就绪（隔离单测）时为 null → 纯内存。
@@ -163,7 +181,8 @@ async function shutdownServices() {
     await Promise.allSettled([
       clineAdapter.dispose(),
       openCodeAdapter.dispose(),
-      openHandsAdapter.dispose()
+      openHandsAdapter.dispose(),
+      ...dynamicAgentFactory.listInstances().map(instance => dynamicAgentFactory.disposeInstance(instance.instanceId))
     ]);
   })();
   return shutdownPromise;
@@ -1156,6 +1175,31 @@ function register(window) {
     return { ok: true, observation: orch.getObservation(), snapshot: orch.blackboard.snapshot() };
   });
   ipcMain.handle('hub:result', async (e, runId) => agentHub.result(runId));
+
+  // v2.9.1 — persistent definitions/templates and ephemeral runtime instances.
+  ipcMain.handle('dynamicAgent:def:list', () => store.agentDefinitions.list());
+  ipcMain.handle('dynamicAgent:def:create', (e, definition) => store.agentDefinitions.create(definition));
+  ipcMain.handle('dynamicAgent:def:update', (e, id, patch) => store.agentDefinitions.update(id, patch));
+  ipcMain.handle('dynamicAgent:def:delete', (e, id) => store.agentDefinitions.remove(id, {
+    inUse: dynamicAgentFactory.isDefinitionInUse(id)
+  }));
+  ipcMain.handle('dynamicAgent:template:list', () => store.agentTemplates.list());
+  ipcMain.handle('dynamicAgent:template:create', (e, template) => store.agentTemplates.create(template));
+  ipcMain.handle('dynamicAgent:template:delete', (e, id) => store.agentTemplates.remove(id));
+  ipcMain.handle('dynamicAgent:instance:list', () => dynamicAgentFactory.listInstances().map(instance => ({
+    instanceId: instance.instanceId,
+    definitionId: instance.definitionId,
+    templateId: instance.templateId,
+    adapterId: instance.adapterId,
+    parentRunId: instance.parentRunId,
+    rootRunId: instance.rootRunId,
+    status: instance.status,
+    lifetime: instance.lifetime,
+    createdAt: instance.createdAt,
+    startedAt: instance.startedAt,
+    terminalAt: instance.terminalAt
+  })));
+  ipcMain.handle('dynamicAgent:instance:dispose', (e, instanceId) => dynamicAgentFactory.disposeInstance(instanceId));
 
   // v2.7.1 — Project Mutation Lock IPC
   ipcMain.handle('lock:isBusy', (e, projectRoot) => projectLock.isBusy(projectRoot));

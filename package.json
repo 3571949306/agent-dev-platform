@@ -1,6 +1,6 @@
 {
   "name": "agent-dev-platform",
-  "version": "2.9.0",
+  "version": "2.9.1",
   "description": "Agent Dev Platform - 本地 AI Agent IDE（智能体开发环境）：Coding Agent / 多 Agent 调度 / API 管理 / Computer Use / MCP / 外部 Agent 聚合",
   "main": "main.js",
   "scripts": {
@@ -19,6 +19,7 @@
     "test:real-ai:dry-run": "node scripts/real-ai-orchestrator-smoke.js --dry-run",
     "test:real-ai:new-session": "node scripts/real-ai-new-session.js",
     "test:deterministic-orchestrator": "node scripts/deterministic-orchestrator-smoke.js",
+    "test:dynamic-agent": "node scripts/run-tests.js dynamicAgent",
     "icon": "node scripts/make-icon.js"
   },
   "dependencies": {

@@ -82,7 +82,9 @@ function runMainAgent(opts) {
     // v2.9.0 Real Runtime Closure（R3）：per-run PathSecurity（cacheRoots）；未注入时工具用默认实例
     pathSecurity: pathSecurity || null,
     // v2.9.0 §9 — MainAgentOrchestrator（delegate → AgentHub → Child Run → Blackboard）
-    orchestrator: null   // 下方注入（如 AgentHub 可用）
+    orchestrator: null,   // 下方注入（如 AgentHub 可用）
+    canDelegate: opts.canDelegate !== false,
+    delegationPath: Array.isArray(opts.delegationPath) ? opts.delegationPath.slice() : []
   };
 
   // v2.9.0 §9 — 创建 Orchestrator 并注册（打通 delegate → AgentHub 闭环）
@@ -94,11 +96,19 @@ function runMainAgent(opts) {
     const { createMainAgentOrchestrator, register, unregister } = require('../orchestrator');
     _unregister = unregister;
     const { getAgentHub } = require('../../agents/hub/agentHub');
+    const dynamicRuntime = require('../../agents/dynamic/runtimeRegistry').getDynamicAgentRuntime();
     const _hub = getAgentHub();
     if (_hub) {
       _orch = createMainAgentOrchestrator({
-        hub: _hub, parentRunId: runId, parentAgentId: agentId || 'native-main',
-        projectRoot, projectId, emit
+        hub: _hub, parentRunId: runId, rootRunId: opts.rootRunId || runId, parentAgentId: agentId || 'native-main',
+        projectRoot, projectId, emit,
+        dynamicAgentFactory: opts.dynamicAgentFactory || dynamicRuntime.factory || null,
+        definitionStore: opts.definitionStore || dynamicRuntime.definitionStore || null,
+        parentModelAdapter: model,
+        parentPermissionEngine: opts.permissionEngine || null,
+        parentCanDelegate: opts.canDelegate !== false,
+        parentPolicy: opts.parentPolicy || null,
+        getTool
       });
       _orch.start(goal);
       register(runId, _orch);
@@ -147,6 +157,8 @@ function runMainAgent(opts) {
       const systemPrompt = buildSystemPrompt({
         projectName: opts.projectName,
         projectRoot,
+        dynamicRole: opts.dynamicRole,
+        dynamicRolePrompt: opts.dynamicSystemPrompt,
         blackboardSummary: '',
         planSummary: ''
       });

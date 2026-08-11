@@ -155,12 +155,32 @@ function stageRuntime(manifest, nodeDirectory) {
   fs.renameSync(STAGING, TARGET);
 }
 
+function stagedRuntimeIsCurrent(manifest) {
+  try {
+    const stagedManifest = JSON.parse(fs.readFileSync(path.join(TARGET, 'runtime-manifest.json'), 'utf8'));
+    if (JSON.stringify(stagedManifest) !== JSON.stringify(manifest)) return false;
+    const sourceLock = sha256(path.join(SOURCE, 'package-lock.json'));
+    const stagedLock = sha256(path.join(TARGET, 'sidecar', 'package-lock.json'));
+    if (sourceLock !== stagedLock) return false;
+    const sdkPackage = JSON.parse(fs.readFileSync(path.join(TARGET, 'sidecar', 'node_modules', '@cline', 'sdk', 'package.json'), 'utf8'));
+    if (sdkPackage.version !== manifest.cline.sdkVersion) return false;
+    const version = spawnSync(path.join(TARGET, 'node', 'node.exe'), ['--version'], { encoding: 'utf8', shell: false, windowsHide: true });
+    return version.status === 0 && version.stdout.trim() === `v${manifest.node.version}`;
+  } catch {
+    return false;
+  }
+}
+
 async function main() {
   if (process.platform !== 'win32' || process.arch !== 'x64') fail('CLINE_PLATFORM_UNSUPPORTED', 'Cline bundled runtime preparation currently supports Windows x64 only');
   const manifest = JSON.parse(fs.readFileSync(MANIFEST_PATH, 'utf8'));
   if (manifest.node.platform !== 'win32' || manifest.node.arch !== 'x64') fail('CLINE_RUNTIME_MANIFEST_INVALID', 'Runtime manifest target is not Windows x64');
   validateOfficialUrl(manifest.node.downloadUrl);
   validateOfficialUrl(manifest.node.shasumsUrl);
+  if (stagedRuntimeIsCurrent(manifest)) {
+    process.stdout.write(`ClineCore sidecar already prepared: Node ${manifest.node.version}, @cline/sdk ${manifest.cline.sdkVersion}\n`);
+    return;
+  }
   const archive = await ensureNodeArchive(manifest);
   const nodeDirectory = extractNode(archive, manifest.node.version);
   stageRuntime(manifest, nodeDirectory);

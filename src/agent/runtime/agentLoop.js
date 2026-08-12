@@ -301,7 +301,7 @@ async function runAgentLoop(deps) {
       if (typeof deps.onToolResult === 'function') {
         try { deps.onToolResult(action, result); } catch { /* non-fatal */ }
       }
-      safeEmit(emit, EVENTS.TOOL_RESULT, { runId, tool: result.tool, ok: result.ok, summary: result.stdoutSummary || result.stderrSummary || (result.ok ? '成功' : '失败') });
+      safeEmit(emit, EVENTS.TOOL_RESULT, { runId, tool: result.tool, ok: result.ok, summary: result.stdoutSummary || result.stderrSummary || (result.ok ? '成功' : '失败'), error: result.error && { code: result.error.code, message: result.error.message } });
 
       // 8. 观察结果 + 评估
       const ev = evaluateActionResult(action, result);

@@ -76,20 +76,27 @@ function evaluateActionResult(action, result) {
     };
   }
 
-  // v2.9.8 R6-C — Child 真实进入执行却未成功（timeout/failed/cancelled）绝不允许被静默吞掉：
-  // 进入 repair 通道并把失败记入 blackboard 未解决问题，完成策略会拒绝
-  // 「假装 Child 成功」的 complete；模型可修复/重试，否则以 repair 上限诚实失败。
-  // 区分于策略/守卫拦截（HOOK_BLOCKED、PERMISSION_DENIED、DELEGATE_START_FAILED 等）：
-  // 那些是「Child 从未启动」的工具反馈，父 Agent 观察后自行决策（与其他工具失败同语义）。
-  if (action && action.type === 'delegate' && result && result.ok === false
-      && result.error && /^DELEGATE_(TIMEOUT|FAILED|CANCELLED|INTERRUPTED|UNAVAILABLE)$/.test(result.error.code || '')) {
-    return {
-      needsRepair: true,
-      repairReason: `委派任务失败: ${result.error.code}（${result.error.message || ''}）`,
-      isTestFailure: false,
-      fatal: false,
-      fatalReason: ''
-    };
+  // v2.9.8 R3 — 委派失败分类：
+  //  - Pre-start 失败（DYNAMIC_AGENT_DEFINITION_NOT_FOUND、SELF_DELEGATION_BLOCKED、
+  //    DELEGATION_DEPTH_EXCEEDED、PROJECT_LOCKED、PERMISSION_DENIED、HOOK_BLOCKED、
+  //    DELEGATE_START_FAILED、NO_AVAILABLE_AGENT 等）是「Child 从未启动」的工具反馈，
+  //    保持普通 tool feedback 语义，不得进入 repair。
+  //  - Executed-child 失败：Child 真实启动并到达 unsuccessful terminal（timeout/
+  //    failed/cancelled/interrupted），才进入 repair 通道。
+  // 通过 data.runId != null 且 data.status 在 terminal 失败集合中来判定属于 executed-child failure。
+  if (action && action.type === 'delegate' && result && result.ok === false) {
+    const isExecutedChild = !!result.data && result.data.runId != null &&
+      ['timeout', 'failed', 'cancelled', 'interrupted'].includes(result.data.status);
+    if (isExecutedChild) {
+      const code = result.error && result.error.code;
+      return {
+        needsRepair: true,
+        repairReason: `委派任务失败: ${code || result.data.status}（${(result.error && result.error.message) || ''}）`,
+        isTestFailure: false,
+        fatal: false,
+        fatalReason: ''
+      };
+    }
   }
 
   return { needsRepair: false, repairReason: '', isTestFailure: false, fatal: false, fatalReason: '' };

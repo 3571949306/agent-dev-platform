@@ -206,6 +206,7 @@ function createAgentHubBridge(opts) {
       taskId: agentTask.context && agentTask.context.taskId,
       parentRunId,
       parentAgentId,
+      rootRunId: agentTask.rootRunId || parentRunId,
       delegationPath: agentTask.delegationPath,
       readOnly: agentTask.readOnly
     };

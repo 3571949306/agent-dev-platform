@@ -154,15 +154,35 @@ async function executeDelegateCore(ctx, action, args) {
   //   含 delegationPath/depth、fallback policy、no-bypass、Blackboard 写入。
   if (ctx && ctx.orchestrator && typeof ctx.orchestrator.delegate === 'function') {
     try {
+      // v2.9.8 R3 — Preserve original delegate error identity：
+      // Orchestrator 返回的 result 已经携带明确 errorCode（DYNAMIC_AGENT_DEFINITION_NOT_FOUND、
+      // SELF_DELEGATION_BLOCKED、DELEGATION_DEPTH_EXCEEDED、PROJECT_LOCKED、PERMISSION_DENIED 等）。
+      // 这些是「Child 从未启动」的 pre-start 失败，必须保持原始 error code，不得统一重写为
+      // DELEGATE_FAILED。只有 Child 真实启动并到达失败终态时才使用 DELEGATE_* 系列 code。
       const result = await ctx.orchestrator.delegate(args || {}, {
         abortSignal: ctx.abortSignal,
         conversationId: ctx.conversationId,
         taskId: ctx.taskId,
         delegationPath: ctx.delegationPath || []
       });
-      // v2.9.0 Real Runtime Closure（R6）：Child Result 摘要必须进入 Main Agent 下一轮
-      // context（toolResultToText 会打印 summary），而不是只写 Blackboard 后假装已消费。
       const childSummary = (result && (result.summary || (result.errors && result.errors[0]))) || '';
+
+      // Pre-start policy/configuration failure：保持 errorCode 原样
+      if (result && result.ok === false && result.errorCode) {
+        return {
+          ok: false,
+          tool: 'delegate',
+          action,
+          summary: childSummary ? `child=${result.agentId || '?'} status=${result.status || '?'}: ${childSummary}` : undefined,
+          data: { runId: result.runId, agentId: result.agentId, status: result.status, result },
+          error: {
+            code: result.errorCode,
+            message: (result.errors && result.errors[0]) || result.summary || 'delegate 未完成',
+            retryable: ['TIMEOUT', 'UNAVAILABLE'].includes(result.errorCode) || result.errorCode === 'DELEGATE_TIMEOUT' || result.errorCode === 'DELEGATE_UNAVAILABLE'
+          }
+        };
+      }
+
       return {
         ok: !!result.ok,
         tool: 'delegate',

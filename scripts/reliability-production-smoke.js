@@ -35,7 +35,8 @@ const suites = [
   { filter: 'reliabilityCancellation', label: 'reliabilityCancellation' },
   { filter: 'reliabilityLimits', label: 'reliabilityLimits' },
   { filter: 'reliabilityAudit', label: 'reliabilityAudit' },
-  { filter: 'projectMutationLock', label: 'projectMutationLock' }
+  { filter: 'projectMutationLock', label: 'projectMutationLock' },
+  { filter: 'reliabilityClosure', label: 'reliabilityClosure' }
 ];
 
 const outputBySuite = {};
@@ -86,7 +87,15 @@ const proof = {
   r2NonGitTruth: /ok \d+ - R2 non-git truthfulness/.test(outputBySuite.reliabilityWorktree),
   // R3/R4
   r3StaleWrite: /ok \d+ - R3 concurrent edit: stale write is rejected/.test(outputBySuite.reliabilityFileMutation),
-  r4RepairLoop: /ok \d+ - R4 Scenario C: real repair loop/.test(outputBySuite.reliabilityVerification)
+  r4RepairLoop: /ok \d+ - R4 Scenario C: real repair loop/.test(outputBySuite.reliabilityVerification),
+  // v2.9.8 Final Closure Patch R1-R5
+  terminalTruth: outputBySuite.reliabilityClosure.includes('R1_TERMINAL_TRUTH timeout=timeout cancel=cancelled'),
+  lockReleaseAfterDescendants: outputBySuite.reliabilityClosure.includes('R4_NESTED_DELEGATION rootRunIdShared=YES locksAfterTree=0'),
+  prestartDelegateFailuresPreserved: outputBySuite.reliabilityClosure.includes('R3_PRESTART_IDENTITY')
+    && outputBySuite.reliabilityClosure.includes('errorCode=DYNAMIC_AGENT_DEFINITION_NOT_FOUND'),
+  nestedDelegationLockReentrancy: outputBySuite.reliabilityClosure.includes('R4_NESTED_DELEGATION rootRunIdShared=YES'),
+  providerTimeoutAbort: outputBySuite.reliabilityClosure.includes('R5_PROVIDER_ABORT observed=true')
+    && outputBySuite.reliabilityClosure.includes('lateResultIgnored=YES')
 };
 
 const allOutput = Object.values(outputBySuite).join('\n');

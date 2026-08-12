@@ -329,8 +329,10 @@ function runMainAgent(opts) {
         } catch { /* non-fatal */ }
       }
 
-      // 推送终态事件（runManager.finishRun 已在 loop 内调用，这里补发 GUI 专用事件）
-      emitTerminalEvent(emit, runId, result);
+      // 推送终态事件（以 RunManager terminal truth 为准，一个 Run 只发一次 terminal event）
+      const finalRun = runManager.getRun(runId);
+      const terminalStatus = finalRun && finalRun.status ? finalRun.status : (result && result.status);
+      emitTerminalEvent(emit, runId, { ...result, status: terminalStatus });
     } catch (e) {
       const isAbort = ctx.abortSignal.aborted || /\babort/i.test(e.message || '');
       const status = isAbort ? 'cancelled' : (/超时|timed?out/i.test(e.message || '') ? 'timeout' : 'failed');
@@ -345,17 +347,29 @@ function runMainAgent(opts) {
         });
       } catch { /* run_end observers cannot alter terminal truth */ }
       if (timeoutTimer) clearTimeout(timeoutTimer);
-      if (opts.unregisterAbort) opts.unregisterAbort(conversationId);
-      // v2.9.8 R7 — 终态后释放项目写锁（完成/取消/失败/超时统一路径，锁绝不陪葬）
+
+      // v2.9.8 R2 — Parent lock must outlive owned descendants：先取消/等待所有 child，
+      //  再释放项目锁，最后才解注册 abort/runtime bookkeeping。
+      if (_orch) {
+        try {
+          // 级联取消所有 running child（不等待 dispose 内部再取消）
+          await _orch.cancelAllChildren(async (childRunId) => {
+            try { await _orch.cancelChild(childRunId); } catch { /* noop */ }
+          });
+        } catch { /* noop */ }
+        // bounded 等待 descendant cleanup（最大 5 秒）
+        try { await waitDescendantCleanup(_orch, 5000); } catch { /* noop */ }
+        try { await _orch.dispose(); } catch { /* noop */ }
+        try { if (_unregister) _unregister(runId); } catch { /* noop */ }
+      }
+
+      // v2.9.8 R7/R2 — 终态后释放项目写锁（完成/取消/失败/超时统一路径，锁绝不陪葬）
       if (projectLockHeld) {
         try { projectMutationLock.release(runId); } catch { /* noop */ }
         projectLockHeld = false;
       }
-      // §78-85: Orchestrator 生命周期收口 — dispose（清 child/timer/listener）+ unregister（避免 registry 泄漏）
-      if (_orch) {
-        try { await _orch.dispose(); } catch { /* noop */ }
-        try { if (_unregister) _unregister(runId); } catch { /* noop */ }
-      }
+
+      if (opts.unregisterAbort) opts.unregisterAbort(conversationId);
     }
   })();
 
@@ -416,6 +430,26 @@ function mapToRunManagerState(s) {
 function mapToRunManagerTerminal(s) {
   return { completed: 'completed', failed: 'failed', cancelled: 'cancelled', timeout: 'timeout' }[s] || 'failed';
 }
+
+/**
+ * v2.9.8 R2 — Bounded descendant cleanup wait。
+ * 等待 orchestrator 下属的所有 child run 进入终态，最大等待 timeoutMs。
+ * 用于保证 root project lock 在任意 owned descendant 仍能 mutate 之前不会释放。
+ */
+async function waitDescendantCleanup(orchestrator, timeoutMs) {
+  if (!orchestrator || !orchestrator.childRunTracker) return;
+  const tracker = orchestrator.childRunTracker;
+  const deadline = Date.now() + timeoutMs;
+  const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+  while (Date.now() < deadline) {
+    const children = tracker.getChildren && tracker.getChildren(orchestrator.parentRunId);
+    if (!children || children.length === 0) return;
+    const allTerminal = children.every(childId => tracker.isTerminal(childId));
+    if (allTerminal) return;
+    await sleep(10);
+  }
+}
+
 function lim0() { return 10 * 60 * 1000; }
 
 module.exports = { runMainAgent, EVENTS, states };

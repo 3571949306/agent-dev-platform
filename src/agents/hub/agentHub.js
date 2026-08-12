@@ -188,15 +188,16 @@ function createAgentHub(opts = {}) {
     });
 
     // v2.7.1 — Project Mutation Lock：在 adapter.startTask 之前获取锁
-    // v2.9.8 R7 — 委派重入：父 Run 已持有该 projectRoot 写锁时，其委派 Child 在父锁
-    // 之下执行（不重复获取、也不释放父锁）。其他 Run（含其他父的 Child）仍严格互斥。
+    // v2.9.8 R4 — 委派重入使用 rootRunId：同一 Root Run Tree 下的所有委派（Main/Child/Grandchild）
+    // 共享同一把 project lock，而不是仅比较 immediate parent。伪造 rootRunId 不可行，
+    // 因为它必须从真实 RunManager lineag / Orchestrator identity 传递而来。
     let lockAcquired = false;
     if (projectLock && task.projectRoot) {
       const holder = typeof projectLock.getLockHolder === 'function'
         ? projectLock.getLockHolder(task.projectRoot)
         : null;
-      const parentHoldsLock = !!(task.parentRunId && holder && holder.runId === task.parentRunId);
-      if (!parentHoldsLock) {
+      const sameRootTree = !!(task.rootRunId && holder && holder.runId === task.rootRunId);
+      if (!sameRootTree) {
         const isWrite = needsWriteLock(task);
         const lockResult = isWrite
           ? projectLock.acquireWrite(task.projectRoot, runId, agentId)

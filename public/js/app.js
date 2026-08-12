@@ -9,6 +9,7 @@ import * as files from './files.js';
 import * as pages from './pages.js';
 import { initOrchestration } from './orchestration.js';
 import * as theme from './theme.js';
+import * as palette from './palette.js';
 
 async function boot() {
   // v2.9.9 Phase B（B2/B31）— apply persisted appearance as early as possible.
@@ -22,6 +23,7 @@ async function boot() {
 
   panels.init();
   wireShell();
+  palette.init(); // v2.9.9 Phase B（B24/B25）— 命令面板 + 全局快捷键
   initOrchestration(); // v2.9.0 — 编排 Run Tree / Delegation Card（隔离激活）
   onEvent(ev => {
     try { chat.handleEvent(ev); } catch (err) { console.error('event error', err, ev); }

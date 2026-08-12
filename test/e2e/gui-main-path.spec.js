@@ -430,3 +430,26 @@ test('10) 外观：主题/密度切换生效并持久化', async () => {
   const fatals = pageErrors.filter(e => /Cannot read|TypeError|ReferenceError|is not defined/.test(e));
   expect(fatals).toEqual([]);
 });
+
+// v2.9.9 Phase B（B24/B25）— 命令面板：真实唤起 / 过滤 / 执行 / Esc 关闭。
+test('11) 命令面板：Ctrl+Shift+P 唤起、过滤、执行、Esc 关闭', async () => {
+  await page.keyboard.press('Control+Shift+P');
+  await page.waitForSelector('#cmd-palette:not(.hidden)', { timeout: 5000 });
+  await expect(page.locator('#cp-input')).toBeFocused();
+  // 命令列表非空
+  await expect(page.locator('#cp-list .cp-item').first()).toBeVisible();
+  // 过滤：输入「设置」应只剩打开设置
+  await page.fill('#cp-input', '设置');
+  await expect(page.locator('#cp-list')).toContainText('打开 设置');
+  // Enter 执行首个匹配 → 打开设置页，面板关闭
+  await page.keyboard.press('Enter');
+  await expect(page.locator('#cmd-palette')).toBeHidden({ timeout: 5000 });
+  await expect(page.locator('#page-title')).toHaveText('设置', { timeout: 5000 });
+  // 再次唤起，用 Esc 关闭（不执行）
+  await page.keyboard.press('Control+Shift+P');
+  await page.waitForSelector('#cmd-palette:not(.hidden)', { timeout: 5000 });
+  await page.keyboard.press('Escape');
+  await expect(page.locator('#cmd-palette')).toBeHidden({ timeout: 5000 });
+  const fatals = pageErrors.filter(e => /Cannot read|TypeError|ReferenceError|is not defined/.test(e));
+  expect(fatals).toEqual([]);
+});

@@ -113,6 +113,46 @@ function normalizeOpts(opts) {
   return { timeoutMs: opts.timeoutMs == null ? NODE_TIMEOUT : opts.timeoutMs, signal: opts.signal || null };
 }
 
+// ---------------------------------------------------------------------------
+// v2.9.8 R5 — Bounded Transient Failure Recovery.
+//
+// 可靠不等于无限重试：每个 decision 最多 2 次 provider 尝试（初始 + 1 次重试）。
+// 仅当（1）请求未被取消、（2）错误被分类为瞬态可重试、（3）仍有有界额度时才重试。
+// 超时与用户 abort 永不重试；重试前等待 200ms（abort 可立即打断等待）。
+// ---------------------------------------------------------------------------
+const MAX_ATTEMPTS = 2;
+const RETRY_DELAY_MS = 200;
+const RETRYABLE_STATUS = new Set([408, 429, 500, 502, 503, 504]);
+const ATTEMPTS = Symbol.for('adp.httpAttempts');
+
+/** 瞬态网络错误分类（连接重置 / 传输层瞬态失败）。abort/timeout 不可重试。 */
+function isRetryableNetworkError(err) {
+  if (!err || isAbortError(err) || isTimeoutError(err)) return false;
+  const m = String(err.message || '');
+  const cause = err.cause || null;
+  const cm = cause ? String(cause.message || '') + ' ' + String(cause.code || '') : '';
+  return /fetch failed|socket hang up|network socket disconnected|other side closed/i.test(m)
+    || /ECONNRESET|ECONNREFUSED|ECONNABORTED|ETIMEDOUT|EPIPE|EAI_AGAIN|UND_ERR_SOCKET|UND_ERR_CONNECT/i.test(m + ' ' + cm);
+}
+
+async function retryDelay(link) {
+  const deadline = Date.now() + RETRY_DELAY_MS;
+  while (Date.now() < deadline) {
+    if (link.signal.aborted) return;
+    await new Promise(r => setTimeout(r, 25));
+  }
+}
+
+function attachAttempts(resp, attempts) {
+  try { Object.defineProperty(resp, ATTEMPTS, { value: attempts, enumerable: false, configurable: true }); } catch { /* noop */ }
+  return resp;
+}
+
+/** 该响应经历的 provider 尝试次数（可观测的重试元数据）。 */
+function attemptsOf(resp) {
+  return resp && resp[ATTEMPTS] ? resp[ATTEMPTS] : 1;
+}
+
 function authHeaders(conn) {
   const h = { 'Content-Type': 'application/json' };
   const skipAuth = conn.provider === 'local' || conn.provider === 'ollama';
@@ -153,23 +193,42 @@ function releaseResponse(resp) {
 /**
  * Low-level request. Pass `conn = null` to skip the default Bearer auth headers
  * (Anthropic uses x-api-key and must not receive a stray Authorization header).
+ *
+ * v2.9.8 R5：有界瞬态重试——最多 MAX_ATTEMPTS 次尝试（初始 + 1 次重试），
+ * 仅对 RETRYABLE_STATUS 与瞬态网络错误生效；取消 / 超时 / 其他错误不重试。
  */
 async function request(url, init, conn, opts) {
   const { timeoutMs, signal } = normalizeOpts(opts);
   const link = linkSignals(timeoutMs, signal);
   const base = conn ? authHeaders(conn) : { 'Content-Type': 'application/json' };
-  try {
-    const resp = await fetch(url, {
-      ...init,
-      headers: { ...base, ...(init.headers || {}) },
-      signal: link.signal
-    });
-    // The link stays alive: the body may still be streaming and must remain
-    // abortable. streamSSE()/releaseResponse() disposes it.
-    return attachLink(resp, link);
-  } catch (err) {
-    link.dispose();
-    throw normalizeAbort(err, link);
+  let attempt = 0;
+  const canRetry = () => attempt < MAX_ATTEMPTS && !link.externallyAborted && !link.timedOut && !(link.signal.aborted);
+  for (;;) {
+    attempt += 1;
+    try {
+      const resp = await fetch(url, {
+        ...init,
+        headers: { ...base, ...(init.headers || {}) },
+        signal: link.signal
+      });
+      // HTTP 408/429/5xx：瞬态服务端错误 → 有界重试（响应体尚未消费，安全）
+      if (!resp.ok && RETRYABLE_STATUS.has(resp.status) && canRetry()) {
+        try { resp.body && resp.body.cancel && Promise.resolve(resp.body.cancel()).catch(() => {}); } catch { /* noop */ }
+        await retryDelay(link);
+        continue;
+      }
+      // The link stays alive: the body may still be streaming and must remain
+      // abortable. streamSSE()/releaseResponse() disposes it.
+      return attachAttempts(attachLink(resp, link), attempt);
+    } catch (err) {
+      const normalized = normalizeAbort(err, link);
+      if (isRetryableNetworkError(normalized) && canRetry()) {
+        await retryDelay(link);
+        continue;
+      }
+      link.dispose();
+      throw normalized;
+    }
   }
 }
 
@@ -311,6 +370,10 @@ module.exports = {
   throwIfAborted,
   isAbortError,
   isTimeoutError,
+  isRetryableNetworkError,
+  attemptsOf,
+  MAX_ATTEMPTS,
+  RETRYABLE_STATUS,
   AbortError,
   TimeoutError,
   NODE_TIMEOUT

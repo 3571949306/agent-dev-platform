@@ -198,7 +198,7 @@ function analyzeGit(args, signals) {
       ? 'git reset --hard（不可逆丢弃工作区改动）'
       : 'git reset（可能丢失未提交改动）');
   } else if (sub === 'clean') {
-    const force = hasCombinedFlag(rest, 'f') || hasFlag(rest, '--force');
+    const force = hasFlag(rest, '-f') || hasCombinedFlag(rest, 'f') || hasFlag(rest, '--force');
     if (force) {
       signals.isGitDestructive = true;
       signals.matchedPatterns.push(`git clean ${flagStr || '-f'}（删除未跟踪文件）`);
@@ -208,7 +208,15 @@ function analyzeGit(args, signals) {
     signals.matchedPatterns.push('git checkout（可能覆盖工作区改动）');
   } else if (sub === 'restore') {
     signals.isGitDestructive = true;
-    signals.matchedPatterns.push('git restore（可能丢弃工作区改动）');
+    signals.matchedPatterns.push('git restore（可能丢弃工作区/暂存区改动）');
+  } else if (sub === 'stash') {
+    // v2.9.8 R1：stash 会把用户未提交改动从工作区搬走（含 pop/drop/apply 变体），
+    // 属于对用户工作区的隐藏变异，必须进入高风险确认路径。
+    signals.isGitDestructive = true;
+    signals.matchedPatterns.push(`git stash ${flagStr || ''}（搬走用户未提交改动）`.replace(/\s+/g, ' ').trim());
+  } else if (sub === 'switch' && (hasFlag(rest, '-f') || hasFlag(rest, '--force') || hasFlag(rest, '--discard-changes') || hasCombinedFlag(rest, 'f'))) {
+    signals.isGitDestructive = true;
+    signals.matchedPatterns.push('git switch -f（强制切换丢弃工作区改动）');
   } else if (sub === 'branch' && hasFlag(rest, '-D')) {
     signals.isGitDestructive = true;
     signals.matchedPatterns.push('git branch -D（强制删除分支）');

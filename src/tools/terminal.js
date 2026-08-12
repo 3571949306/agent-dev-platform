@@ -6,6 +6,7 @@
 const { spawn } = require('child_process');
 const path = require('path');
 const { guard, PathGuardError } = require('../security/pathguard');
+const { analyzeCommandRisk } = require('../security/commandRiskAnalyzer');
 
 function ok(data) { return { ok: true, data }; }
 function fail(code, message, retryable = false) { return { ok: false, error: { code, message, retryable } }; }
@@ -17,6 +18,22 @@ const DANGEROUS = [
   />\s*\\\\\.\\\\\w+:?/i, /\btruncate\b/i, /\bmkfs\b/i
 ];
 function isDangerous(cmd) { return DANGEROUS.some(re => re.test(cmd)); }
+
+/**
+ * v2.9.8 R1 — Destructive Git Guard：除旧的正则清单外，统一用 CommandRiskAnalyzer
+ * 结构化识别破坏性命令（git reset / clean 强删 / checkout / restore / stash /
+ * switch 强切、递归删除、Windows 破坏性命令）。识别结果映射到 terminal.dangerous
+ * 权限域，由现有 PermissionEngine 高风险确认路径裁决（默认 ask；无批准通道时 fail-safe 拒绝）。
+ */
+function riskSignals(cmd) {
+  try { return analyzeCommandRisk({ command: cmd, platform: process.platform }); }
+  catch { return null; }
+}
+function isHighRisk(cmd) {
+  if (isDangerous(cmd)) return true;
+  const signals = riskSignals(cmd);
+  return !!(signals && (signals.isGitDestructive || signals.isRecursiveDelete || signals.isPowerShellDestructive));
+}
 
 function killTree(pid) {
   if (process.platform === 'win32') {
@@ -120,7 +137,7 @@ async function runCommand(ctx, command, cwd, timeoutMs, usePowershell, runId, ab
 const tools = [
   {
     name: 'terminal_run', description: '在项目中执行 shell 命令（npm install/build/test 等），输出流式返回。', risk_level: 'high', permission: 'terminal.write',
-    permissionFor(args) { return isDangerous(args.command || '') ? 'terminal.dangerous' : 'terminal.write'; },
+    permissionFor(args) { return isHighRisk(args.command || '') ? 'terminal.dangerous' : 'terminal.write'; },
     input_schema: {
       type: 'object',
       properties: {
@@ -156,4 +173,4 @@ const tools = [
   }
 ];
 
-module.exports = { tools, terminalManager, isDangerous, killTree, runCommand };
+module.exports = { tools, terminalManager, isDangerous, isHighRisk, killTree, runCommand };

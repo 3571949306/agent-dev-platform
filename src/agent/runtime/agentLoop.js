@@ -29,6 +29,15 @@ const { evaluate } = require('./completionPolicy');
 const { buildContext, compact, runSummary } = require('./contextBuilder');
 const { createCheckpoint, trackFileChange, listChangedFiles, changedFilesSummary } = require('./checkpoint');
 const { addFact, addProblem, resolveProblemsMatching, addImportantFile, update: bbUpdate } = require('./blackboard');
+
+// v2.9.8 R4 — 完成裁决的诊断问题（「完成策略未满足: ...」）只为反馈模型而存在：
+// 每次重新评估 / 新鲜测试通过后必须清除，否则旧裁决文本会永久污染
+// unresolvedErrors，把本可完成的 run 顶成 AGENT_REPAIR_LIMIT。
+const COMPLETION_POLICY_PROBLEM_PREFIX = '完成策略未满足';
+function clearCompletionPolicyProblems(blackboard) {
+  if (!blackboard || !Array.isArray(blackboard.problems)) return;
+  blackboard.problems = blackboard.problems.filter(p => !String(p).startsWith(COMPLETION_POLICY_PROBLEM_PREFIX));
+}
 const { composeSystemPromptWithHookContext } = require('./prompts/mainCodingAgent');
 const { dispatchRuntimeHook } = require('../../hooks/runtimeDispatch');
 
@@ -64,6 +73,9 @@ async function runAgentLoop(deps) {
   let lastTestResult = null;
   let checkpointCreated = false;
   let terminalReached = false;
+  // v2.9.8 R4 — Verification Freshness：每次成功的文件变异递增；测试/验证结果
+  // 记录其对应的 seq，完成裁决要求验证不早于最后一次变异。
+  let mutationSeq = 0;
 
   const finish = (status, extra = {}) => {
     if (terminalReached) return null;
@@ -185,15 +197,21 @@ async function runAgentLoop(deps) {
       // 5. complete Action → 完成策略评估
       if (action.type === 'complete') {
         setState('EVALUATING');
+        // v2.9.8 R4：上一轮裁决记录的「完成策略未满足」问题只服务于诊断反馈，
+        // 重新评估前必须清除，否则旧裁决文本会污染 unresolvedErrors 形成死循环。
+        if (typeof clearCompletionPolicyProblems === 'function') clearCompletionPolicyProblems(blackboard);
         // 运行 required verification（若未运行）
-        const verificationResults = await runVerification(deps, ctx, verification, emit, runId, getTool);
+        const verificationResults = await runVerification(deps, ctx, verification, emit, runId, getTool, mutationSeq);
         const unresolvedErrors = blackboard.problems.slice();
         const completionCtx = {
           plan, blackboard,
           changedFiles: listChangedFiles(ctx).map(f => f.path),
           verification: verificationResults,
           unresolvedErrors,
-          requiredFiles
+          requiredFiles,
+          // v2.9.8 R4：新鲜度裁决输入
+          mutationSeq,
+          latestTest: lastTestResult
         };
         const verdict = evaluate(completionCtx);
         if (verdict.satisfied) {
@@ -210,7 +228,7 @@ async function runAgentLoop(deps) {
         setState('REPAIRING');
         counters.repairRounds++;
         safeEmit(emit, EVENTS.REPAIR_START, { runId, round: counters.repairRounds, reason: '完成策略未满足: ' + verdict.reasons.join('; ') });
-        addProblem(blackboard, '完成策略未满足: ' + verdict.missing.join(', '));
+        addProblem(blackboard, COMPLETION_POLICY_PROBLEM_PREFIX + ': ' + verdict.missing.join(', '));
         if (counters.repairRounds > limits.maxRepairRounds) {
           return finish('failed', { errorCode: 'AGENT_REPAIR_LIMIT', error: '完成策略未满足且已达修复上限', summary: verdict.reasons.join('; ') });
         }
@@ -249,6 +267,8 @@ async function runAgentLoop(deps) {
 
       // 记录文件修改到 checkpoint
       if (isMutatingAction(action) && result.ok) {
+        // v2.9.8 R4：成功的文件变异推进 mutationSeq（旧验证随之过期）
+        mutationSeq++;
         const filePath = action.args && action.args.path;
         if (filePath) {
           trackFileChange(ctx, filePath, null, null, result.diff || '', runId);
@@ -261,7 +281,11 @@ async function runAgentLoop(deps) {
       // 测试结果
       if (isTestAction(action)) {
         lastTestResult = testStatusFromResult(action, result);
-        if (lastTestResult) bbUpdate(blackboard, { latestTestStatus: lastTestResult });
+        if (lastTestResult) {
+          // v2.9.8 R4：测试 PASS 只对执行时的代码状态有效——记录对应 mutationSeq
+          lastTestResult.seq = mutationSeq;
+          bbUpdate(blackboard, { latestTestStatus: lastTestResult });
+        }
         const passed = result.ok && result.passed !== false;
         safeEmit(emit, EVENTS.TEST_RESULT, { runId, command: action.args && action.args.command, passed, summary: result.stderrSummary || result.stdoutSummary, errors: result.errors });
         safeEmit(emit, EVENTS.TIMELINE, { runId, entry: passed ? timelineEntry('test-pass', '测试通过', action.args && action.args.command) : timelineEntry('test-fail', '测试失败', action.args && action.args.command) });
@@ -275,6 +299,11 @@ async function runAgentLoop(deps) {
 
       // 8. 观察结果 + 评估
       const ev = evaluateActionResult(action, result);
+      // v2.9.8 R4：新一轮观察到的非测试问题出现时，清除上一轮完成裁决的诊断问题
+      // （它们的使命是反馈给模型，不应永久滞留 blackboard 阻塞后续完成）。
+      if (ev.needsRepair && !ev.isTestFailure && typeof clearCompletionPolicyProblems === 'function') {
+        clearCompletionPolicyProblems(blackboard);
+      }
       // v2.9.0 Real Runtime Closure（R6）：delegate 的 Child Result 摘要（result.summary）
       // 必须保留进 toolResults，才能进入下一轮 model context；不得被 undefined 覆盖。
       toolResults.push({ action, ...result, summary: result.stdoutSummary || result.stderrSummary || result.summary });
@@ -312,6 +341,8 @@ async function runAgentLoop(deps) {
           resolveProblemsMatching(blackboard, '测试命令失败');
           resolveProblemsMatching(blackboard, '测试未通过');
         }
+        // v2.9.8 R4：新鲜测试 PASS 同时清除旧的完成裁决诊断问题（重新验证已发生）。
+        if (typeof clearCompletionPolicyProblems === 'function') clearCompletionPolicyProblems(blackboard);
         if (cmd && !blackboard.completed.includes(cmd)) {
           blackboard.completed.push(String(cmd).slice(0, 200));
           blackboard.completed = blackboard.completed.slice(-50);
@@ -327,15 +358,16 @@ async function runAgentLoop(deps) {
   }
 }
 
-/** 运行 verification 命令清单（complete 时）。 */
-async function runVerification(deps, ctx, verification, emit, runId, getTool) {
+/** 运行 verification 命令清单（complete 时）。mutationSeq 用于新鲜度标记。 */
+async function runVerification(deps, ctx, verification, emit, runId, getTool, mutationSeq) {
   const out = [];
   for (const v of verification) {
     if (v.type !== 'command') continue;
     const action = { type: 'run_tests', args: { command: v.command }, thought: 'verification: ' + v.command };
     const result = await executeAction(ctx, action, getTool);
     const passed = result.ok && result.passed !== false;
-    const vr = { ...v, lastResult: { passed, exitCode: result.exitCode, command: v.command } };
+    // v2.9.8 R4：验证结果绑定执行时的代码状态 seq
+    const vr = { ...v, lastResult: { passed, exitCode: result.exitCode, command: v.command, seq: Number.isFinite(mutationSeq) ? mutationSeq : undefined } };
     out.push(vr);
     safeEmit(emit, EVENTS.TEST_RESULT, { runId, command: v.command, passed, summary: result.stderrSummary || result.stdoutSummary, errors: result.errors, required: v.required });
     if (v.required && !passed) {

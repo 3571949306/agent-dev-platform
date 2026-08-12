@@ -181,12 +181,18 @@ function tryHunkAt(lines, hunk, startIdx) {
 const tools = [
   {
     name: 'apply_patch', description: '用统一 diff（@@ -a,b +c,d @@）修改文件，比整文件覆盖更安全。失败会返回精确位置以便重试。', risk_level: 'high', permission: 'filesystem.write',
-    input_schema: { type: 'object', properties: { path: { type: 'string', description: '文件路径（相对项目根）' }, patch: { type: 'string', description: '统一 diff 文本' }, record_change: { type: 'boolean', default: true } }, required: ['path', 'patch'] },
+    input_schema: { type: 'object', properties: { path: { type: 'string', description: '文件路径（相对项目根）' }, patch: { type: 'string', description: '统一 diff 文本' }, expected_sha256: { type: 'string', description: '可选：基于本 run 真实读取的观察哈希，不一致则拒绝写入' }, record_change: { type: 'boolean', default: true } }, required: ['path', 'patch'] },
     async exec(ctx, args) {
       try {
+        const { atomicWriteFile, observeFile, checkStaleWrite } = require('./filesystem');
         const abs = guardCanonical(ctx, args.path);
         let before = null;
         if (fs.existsSync(abs)) before = await fsp.readFile(abs, 'utf8');
+        // v2.9.8 R3：已有文件的 stale-write 保护（外部并发修改 → fail-closed）
+        if (before !== null) {
+          const stale = checkStaleWrite(ctx, abs, before, args.expected_sha256);
+          if (!stale.ok) return stale;
+        }
         const beforeLines = (before || '').split(/\r?\n/);
         let newLines;
         try { newLines = applyToLines(beforeLines, args.patch); }
@@ -194,8 +200,9 @@ const tools = [
         const after = newLines.join('\n');
         // §66 execution-time recheck immediately before mutation
         recheckMutationTarget(ctx, args.path);
-        await fsp.mkdir(path.dirname(abs), { recursive: true });
-        await fsp.writeFile(abs, after, 'utf8');
+        // v2.9.8 R3：原子替换（同目录 temp → rename），失败不留下半个文件
+        await atomicWriteFile(ctx, abs, after);
+        observeFile(ctx, abs, after);
         if (args.record_change !== false && ctx.store) {
           const d = diff(before || '', after);
           ctx.store.fileChanges.create({ projectId: ctx.projectId, taskId: ctx.taskId, agentId: ctx.agentId, path: args.path, before, after, diff: d });

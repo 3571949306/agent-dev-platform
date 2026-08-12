@@ -348,7 +348,11 @@ function emitTerminalEvent(emit, runId, result) {
   const changed = result.changedFiles || [];
   const tests = result.tests || [];
   if (result.status === 'completed') {
-    safeEmit(emit, EVENTS.RUN_COMPLETED, { runId, summary: result.summary, changedFiles: changed, tests });
+    // v2.9.8 R4：verificationStatus 真话（PASS/FAIL/NOT_AVAILABLE）随完成事件可观测
+    safeEmit(emit, EVENTS.RUN_COMPLETED, {
+      runId, summary: result.summary, changedFiles: changed, tests,
+      verificationStatus: (result.completion && result.completion.verificationStatus) || 'NOT_AVAILABLE'
+    });
   } else if (result.status === 'failed') {
     safeEmit(emit, EVENTS.RUN_FAILED, { runId, error: result.error, errorCode: result.errorCode });
   } else if (result.status === 'cancelled') {

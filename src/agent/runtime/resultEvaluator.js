@@ -81,11 +81,15 @@ function evaluateActionResult(action, result) {
 
 /**
  * 把测试结果转成 blackboard 的 latestTestStatus。
+ * v2.9.8 R4：exitCode 必须显式判 0 —— 非零退出码是 truthy 数字，旧逻辑
+ * `result.ok && result.passed !== false` 会把 exit=1 误判为 PASS（假验证）。
  */
 function testStatusFromResult(action, result) {
   if (!isTestAction(action) || !result) return null;
+  const hasExitCode = result.exitCode !== undefined && result.exitCode !== null;
+  const passed = hasExitCode ? result.exitCode === 0 : (result.ok && result.passed !== false);
   return {
-    passed: result.ok && result.passed !== false,
+    passed,
     command: action.args && action.args.command,
     exitCode: result.exitCode,
     summary: result.stderrSummary || result.stdoutSummary || '',

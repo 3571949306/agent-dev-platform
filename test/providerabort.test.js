@@ -63,152 +63,195 @@ function isAbort(err) {
   return !!err && (err.aborted === true || err.name === 'AbortError' || /abort/i.test(err.message || ''));
 }
 
+/**
+ * v2.9.8 Reliability — test contract fixes (root-cause closure of REAL_FLAKE):
+ *
+ * 1. The request promise gets a no-op catch at creation. Before this, an early
+ *    rejection (e.g. transient loopback connect failure) surfaced as an
+ *    unhandledRejection attributed to whatever subtest happened to be running,
+ *    masking the true failure mode.
+ * 2. Loopback connect failures BEFORE the abort is issued are fixture-precondition
+ *    errors (Windows socket churn), not abort-contract violations. The scenario
+ *    is retried bounded (3 attempts); once `phase.aborted` is true no retry ever
+ *    happens, so the abort contract itself stays strictly enforced.
+ * 3. The latency contract is measured from abort issuance to rejection, not from
+ *    request start. Total elapsed included fixture connect + waitFor scheduling,
+ *    which made the 2s wall-clock budget flaky under unrelated load.
+ */
+function guarded(p) { p.catch(() => {}); return p; }
+
+function isTransientFixtureFailure(err) {
+  const m = String((err && err.message) || '');
+  return /fetch failed|ECONNREFUSED|ECONNRESET|EPIPE|socket hang up|UND_ERR/i.test(m)
+    || /超时等待：服务端收到请求/.test(m);
+}
+
+async function withFixtureRetry(scenario, attempts = 3) {
+  let lastErr = null;
+  for (let i = 0; i < attempts; i++) {
+    const phase = { aborted: false };
+    try { return await scenario(phase); }
+    catch (err) {
+      lastErr = err;
+      if (phase.aborted || !isTransientFixtureFailure(err)) throw err;
+    }
+  }
+  throw lastErr;
+}
+
 // ---------------------------------------------------------------- OpenAI Chat
-test('P0-1 OpenAI Chat: 服务端挂起不发任何 chunk 时，abort 仍能在 2 秒内中断', async () => {
+test('P0-1 OpenAI Chat: 服务端挂起不发任何 chunk 时，abort 仍能在 2 秒内中断', () => withFixtureRetry(async (phase) => {
   const srv = stalledServer();
   const base = await srv.listen();
   try {
     const provider = getProvider({ provider: 'openai', base_url: base + '/v1', api_key: 'k', models: ['m1'] });
     const ac = new AbortController();
-    const t0 = Date.now();
-    const p = provider.streamResponse({ model: 'm1', messages: [{ role: 'user', content: 'hi' }], signal: ac.signal });
+    const p = guarded(provider.streamResponse({ model: 'm1', messages: [{ role: 'user', content: 'hi' }], signal: ac.signal }));
 
     await waitFor(() => srv.state.headersSent > 0, 3000, '服务端收到请求');
+    const tAbort = Date.now();
+    phase.aborted = true;
     ac.abort();
 
     await assert.rejects(p, e => isAbort(e), '中断应抛出 AbortError');
-    const elapsed = Date.now() - t0;
-    assert.ok(elapsed < 2000, `abort 应在 2 秒内返回，实际 ${elapsed}ms`);
+    assert.ok(Date.now() - tAbort < 2000, `abort 应在 2 秒内返回，实际 ${Date.now() - tAbort}ms`);
 
     // The decisive assertion: the socket really went away on the server side.
     await waitFor(() => srv.state.closed > 0, 2000, '服务端观察到连接关闭');
   } finally { await srv.close(); }
-});
+}));
 
-test('P0-1 OpenAI Chat: 已发部分 SSE 后 abort，同样立即中断', async () => {
+test('P0-1 OpenAI Chat: 已发部分 SSE 后 abort，同样立即中断', () => withFixtureRetry(async (phase) => {
   const srv = stalledServer({ preamble: 'data: {"choices":[{"delta":{"content":"部分"}}]}\n\n' });
   const base = await srv.listen();
   try {
     const provider = getProvider({ provider: 'openai', base_url: base + '/v1', api_key: 'k' });
     const ac = new AbortController();
     let got = '';
-    const p = provider.streamResponse({
+    const p = guarded(provider.streamResponse({
       model: 'm1', messages: [{ role: 'user', content: 'hi' }], signal: ac.signal,
       onChunk: t => { got += t; }
-    });
+    }));
     await waitFor(() => got.length > 0, 3000, '收到首个 chunk');
-    const t0 = Date.now();
+    const tAbort = Date.now();
+    phase.aborted = true;
     ac.abort();
     await assert.rejects(p, e => isAbort(e));
-    assert.ok(Date.now() - t0 < 2000);
+    assert.ok(Date.now() - tAbort < 2000);
     assert.strictEqual(got, '部分');
   } finally { await srv.close(); }
-});
+}));
 
-test('P0-1 OpenAI Chat: 连响应头都不返回时，abort 也能中断', async () => {
+test('P0-1 OpenAI Chat: 连响应头都不返回时，abort 也能中断', () => withFixtureRetry(async (phase) => {
   const srv = stalledServer({ silentHeaders: true });
   const base = await srv.listen();
   try {
     const provider = getProvider({ provider: 'openai', base_url: base + '/v1', api_key: 'k' });
     const ac = new AbortController();
-    const p = provider.streamResponse({ model: 'm1', messages: [{ role: 'user', content: 'hi' }], signal: ac.signal });
+    const p = guarded(provider.streamResponse({ model: 'm1', messages: [{ role: 'user', content: 'hi' }], signal: ac.signal }));
     await waitFor(() => srv.state.requests > 0, 3000, '服务端收到请求');
-    const t0 = Date.now();
+    const tAbort = Date.now();
+    phase.aborted = true;
     ac.abort();
     await assert.rejects(p, e => isAbort(e));
-    assert.ok(Date.now() - t0 < 2000);
+    assert.ok(Date.now() - tAbort < 2000);
   } finally { await srv.close(); }
-});
+}));
 
-test('P0-1 OpenAI Chat: 请求发出前信号已 abort 则立即失败，不发起连接', async () => {
+test('P0-1 OpenAI Chat: 请求发出前信号已 abort 则立即失败，不发起连接', () => withFixtureRetry(async (phase) => {
   const srv = stalledServer();
   const base = await srv.listen();
   try {
     const provider = getProvider({ provider: 'openai', base_url: base + '/v1', api_key: 'k' });
     const ac = new AbortController();
     ac.abort();
+    phase.aborted = true;
     await assert.rejects(
       provider.streamResponse({ model: 'm1', messages: [{ role: 'user', content: 'hi' }], signal: ac.signal }),
       e => isAbort(e)
     );
     assert.strictEqual(srv.state.requests, 0, '不应该发出任何请求');
   } finally { await srv.close(); }
-});
+}));
 
 // ----------------------------------------------------------- OpenAI Responses
-test('P0-1 OpenAI Responses: 挂起的 /responses 可被 abort 中断', async () => {
+test('P0-1 OpenAI Responses: 挂起的 /responses 可被 abort 中断', () => withFixtureRetry(async (phase) => {
   const srv = stalledServer();
   const base = await srv.listen();
   try {
     const provider = getProvider({ provider: 'openai-responses', base_url: base + '/v1', api_key: 'k' });
     const ac = new AbortController();
-    const t0 = Date.now();
-    const p = provider.streamResponse({ model: 'm1', messages: [{ role: 'user', content: 'hi' }], signal: ac.signal });
+    const p = guarded(provider.streamResponse({ model: 'm1', messages: [{ role: 'user', content: 'hi' }], signal: ac.signal }));
     await waitFor(() => srv.state.headersSent > 0, 3000, '服务端收到请求');
+    const tAbort = Date.now();
+    phase.aborted = true;
     ac.abort();
     await assert.rejects(p, e => isAbort(e));
-    assert.ok(Date.now() - t0 < 2000);
+    assert.ok(Date.now() - tAbort < 2000);
     await waitFor(() => srv.state.closed > 0, 2000, '服务端观察到连接关闭');
   } finally { await srv.close(); }
-});
+}));
 
 // ------------------------------------------------------------------ Anthropic
-test('P0-1 Anthropic: 挂起的 /messages 可被 abort 中断', async () => {
+test('P0-1 Anthropic: 挂起的 /messages 可被 abort 中断', () => withFixtureRetry(async (phase) => {
   const srv = stalledServer();
   const base = await srv.listen();
   try {
     const provider = getProvider({ provider: 'anthropic', base_url: base + '/v1', api_key: 'k' });
     const ac = new AbortController();
-    const t0 = Date.now();
-    const p = provider.streamResponse({ model: 'claude-3-5-sonnet-latest', messages: [{ role: 'user', content: 'hi' }], signal: ac.signal });
+    const p = guarded(provider.streamResponse({ model: 'claude-3-5-sonnet-latest', messages: [{ role: 'user', content: 'hi' }], signal: ac.signal }));
     await waitFor(() => srv.state.headersSent > 0, 3000, '服务端收到请求');
+    const tAbort = Date.now();
+    phase.aborted = true;
     ac.abort();
     await assert.rejects(p, e => isAbort(e));
-    assert.ok(Date.now() - t0 < 2000);
+    assert.ok(Date.now() - tAbort < 2000);
     await waitFor(() => srv.state.closed > 0, 2000, '服务端观察到连接关闭');
   } finally { await srv.close(); }
-});
+}));
 
 // --------------------------------------------------------------------- Ollama
-test('P0-1 Ollama: 挂起的 /api/chat（NDJSON）可被 abort 中断', async () => {
+test('P0-1 Ollama: 挂起的 /api/chat（NDJSON）可被 abort 中断', () => withFixtureRetry(async (phase) => {
   const srv = stalledServer({ ndjson: true });
   const base = await srv.listen();
   try {
     const provider = getProvider({ provider: 'ollama', base_url: base });
     const ac = new AbortController();
-    const t0 = Date.now();
-    const p = provider.streamResponse({ model: 'qwen2.5:7b', messages: [{ role: 'user', content: 'hi' }], signal: ac.signal });
+    const p = guarded(provider.streamResponse({ model: 'qwen2.5:7b', messages: [{ role: 'user', content: 'hi' }], signal: ac.signal }));
     await waitFor(() => srv.state.headersSent > 0, 3000, '服务端收到请求');
+    const tAbort = Date.now();
+    phase.aborted = true;
     ac.abort();
     await assert.rejects(p, e => isAbort(e));
-    assert.ok(Date.now() - t0 < 2000);
+    assert.ok(Date.now() - tAbort < 2000);
     await waitFor(() => srv.state.closed > 0, 2000, '服务端观察到连接关闭');
   } finally { await srv.close(); }
-});
+}));
 
 // ---------------------------------------------------------- External HTTP agent
-test('P0-3 HTTP External Agent: abort 返回 cancelled 而不是 failed', async () => {
+test('P0-3 HTTP External Agent: abort 返回 cancelled 而不是 failed', () => withFixtureRetry(async (phase) => {
   const srv = stalledServer();
   const base = await srv.listen();
   try {
     const ac = new AbortController();
-    const t0 = Date.now();
-    const p = runHttpAgent(
+    const p = guarded(runHttpAgent(
       { name: 'HTTP Agent', adapter_type: 'http', config: { endpoint: base + '/run', timeoutMs: 60000 } },
       '干活', { signal: ac.signal }
-    );
+    ));
     await waitFor(() => srv.state.headersSent > 0, 3000, '服务端收到请求');
+    const tAbort = Date.now();
+    phase.aborted = true;
     ac.abort();
     const raw = await p;
-    assert.ok(Date.now() - t0 < 2000);
+    assert.ok(Date.now() - tAbort < 2000);
     const res = JSON.parse(raw);
     assert.strictEqual(res.status, 'cancelled');
     assert.ok(res.errors.join('').includes('停止'));
   } finally { await srv.close(); }
-});
+}));
 
 // -------------------------------------------------------------------- Timeout
-test('P1-8 超时与用户中断可区分：超时报 timeout 而不是 aborted', async () => {
+test('P1-8 超时与用户中断可区分：超时报 timeout 而不是 aborted', () => withFixtureRetry(async () => {
   const srv = stalledServer();
   const base = await srv.listen();
   try {
@@ -220,7 +263,7 @@ test('P1-8 超时与用户中断可区分：超时报 timeout 而不是 aborted'
     );
     assert.ok(Date.now() - t0 < 2500);
   } finally { await srv.close(); }
-});
+}));
 
 test('P1-8 linkSignals：外部 abort 与超时合并后互不干扰', async () => {
   const { linkSignals } = require('../src/providers/http');

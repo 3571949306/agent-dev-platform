@@ -1,18 +1,26 @@
 'use strict';
 /**
- * v2.6.0 Main Agent Runtime — Checkpoint Manager（spec §16）。
+ * v2.9.8 Real Project Reliability — Checkpoint Truthfulness（R2）。
  *
- * 每次主要文件修改前建立 Checkpoint（基于 Git stash，不强制自动 commit）。
- * 至少保存：changed files / original content hash / new content hash / timestamp / runId。
- * 用户可撤销本次 Agent 修改。
+ * Observable contract:
+ *  - Checkpoint CREATE is NON-MUTATING: HEAD unchanged, real Git index unchanged,
+ *    worktree bytes unchanged, `git status` unchanged, untracked files unchanged.
+ *    Implementation: temporary GIT_INDEX_FILE + `git add -A` + `git write-tree` +
+ *    `git commit-tree` + a namespaced ref `refs/adp-checkpoints/<id>`. Only
+ *    additive object and ref writes happen; `git stash push` is never used.
+ *  - Checkpoint RESTORE is EXACT: restore(checkpoint_id) restores that
+ *    checkpoint's snapshot (never "pop latest stash"). Restore is destructive,
+ *    so an emergency checkpoint is created first and the original state stays
+ *    recoverable even if the restore fails halfway.
+ *  - Non-Git projects get CHECKPOINT_UNSUPPORTED — no fake "snapshot created".
  *
- * 复用现有 src/tools/checkpoint.js 的 git stash 能力与 file_changes 表，
- * 不重复造第二套 checkpoint。
+ * trackFileChange / listChangedFiles / changedFilesSummary 保持 v2.6.0 语义不变。
  */
 
 const crypto = require('crypto');
 const fs = require('fs');
 const fsp = require('fs/promises');
+const os = require('os');
 const path = require('path');
 
 function hashContent(content) {
@@ -20,42 +28,152 @@ function hashContent(content) {
   return crypto.createHash('sha256').update(String(content)).digest('hex').slice(0, 16);
 }
 
+function isGitRepo(root) {
+  try { return root && fs.existsSync(path.join(root, '.git')); } catch { return false; }
+}
+
+function checkpointRef(id) {
+  return `refs/adp-checkpoints/${id}`;
+}
+
 /**
- * 创建一个 Run 级 Checkpoint。
+ * 非变异快照：把当前工作区（含未跟踪、非 ignore 文件）固化成一个 Git 对象树 +
+ * 命名空间 ref。不触碰 HEAD / 真实 index / 工作区字节 / git status。
+ * @param {string} projectRoot
+ * @param {string} id checkpoint id
+ * @returns {Promise<{ok:boolean, ref?, commit?, code?, message?}>}
+ */
+async function snapshotGitProject(projectRoot, id) {
+  const { execGit } = require('./gitHelper');
+  const tmpIndex = path.join(os.tmpdir(), `adp-checkpoint-index-${crypto.randomUUID()}`);
+  const env = { GIT_INDEX_FILE: tmpIndex };
+  try {
+    // 1. 临时 index 里暂存全部（含 untracked 非 ignore）内容——只写 blob 对象与临时 index
+    const add = await execGit(projectRoot, ['add', '-A'], { env });
+    if (add.code !== 0) return { ok: false, code: 'CHECKPOINT_SNAPSHOT_FAILED', message: (add.err || '').trim() || `git add failed (${add.code})` };
+    // 2. 写树（仍是纯对象写入）
+    const tree = await execGit(projectRoot, ['write-tree'], { env });
+    if (tree.code !== 0 || !tree.out.trim()) return { ok: false, code: 'CHECKPOINT_SNAPSHOT_FAILED', message: (tree.err || '').trim() || 'git write-tree failed' };
+    const treeSha = tree.out.trim();
+    // 3. commit-tree：有 HEAD 则挂为 parent（仅对象，不移动任何分支/HEAD）
+    const head = await execGit(projectRoot, ['rev-parse', '--verify', 'HEAD']);
+    const commitArgs = ['commit-tree', treeSha, '-m', `agent-checkpoint ${id}`];
+    if (head.code === 0 && head.out.trim()) commitArgs.splice(1, 0, '-p', head.out.trim());
+    const commit = await execGit(projectRoot, commitArgs);
+    if (commit.code !== 0 || !commit.out.trim()) return { ok: false, code: 'CHECKPOINT_SNAPSHOT_FAILED', message: (commit.err || '').trim() || 'git commit-tree failed' };
+    const commitSha = commit.out.trim();
+    // 4. 命名空间 ref（不影响 HEAD / 分支 / status）——restore 用它精确定位
+    const ref = checkpointRef(id);
+    const updateRef = await execGit(projectRoot, ['update-ref', ref, commitSha]);
+    if (updateRef.code !== 0) return { ok: false, code: 'CHECKPOINT_SNAPSHOT_FAILED', message: (updateRef.err || '').trim() || 'git update-ref failed' };
+    return { ok: true, ref, commit: commitSha };
+  } finally {
+    try { fs.rmSync(tmpIndex, { force: true }); } catch { /* best effort */ }
+  }
+}
+
+/**
+ * 精确恢复某个 checkpoint：内容 == 快照时刻状态。
+ * 先创建 emergency checkpoint（原状态可恢复），再落盘。
+ * @returns {Promise<{ok:boolean, restored?, emergencyCheckpointId?, code?, message?}>}
+ */
+async function restoreGitProject(projectRoot, checkpointId) {
+  const { execGit } = require('./gitHelper');
+  if (!checkpointId || typeof checkpointId !== 'string') {
+    return { ok: false, code: 'CHECKPOINT_ID_REQUIRED', message: 'checkpoint_id 必填（禁止忽略 id 弹最新 stash）' };
+  }
+  const ref = checkpointRef(checkpointId);
+  const verify = await execGit(projectRoot, ['rev-parse', '--verify', ref]);
+  if (verify.code !== 0 || !verify.out.trim()) {
+    return { ok: false, code: 'CHECKPOINT_NOT_FOUND', message: `检查点不存在: ${checkpointId}` };
+  }
+  const commitSha = verify.out.trim();
+
+  // Restore 是破坏性动作：先固化当前状态，失败中途也能恢复原状。
+  const emergencyId = `emergency-${crypto.randomUUID()}`;
+  const emergency = await snapshotGitProject(projectRoot, emergencyId);
+  if (!emergency.ok) {
+    return { ok: false, code: 'RESTORE_ABORTED_NO_EMERGENCY', message: '无法创建 emergency checkpoint，restore 拒绝执行（fail-closed）' };
+  }
+
+  const tmpIndex = path.join(os.tmpdir(), `adp-checkpoint-restore-index-${crypto.randomUUID()}`);
+  const env = { GIT_INDEX_FILE: tmpIndex };
+  try {
+    // 1. 快照文件清单（-z：NUL 分隔，安全处理任意文件名）
+    const ls = await execGit(projectRoot, ['ls-tree', '-r', '--name-only', '-z', commitSha]);
+    if (ls.code !== 0) return { ok: false, code: 'RESTORE_FAILED', message: (ls.err || '').trim() || 'git ls-tree failed', emergencyCheckpointId: emergencyId };
+    const snapshotFiles = new Set(ls.out.split('\0').map(s => s.trim()).filter(Boolean));
+
+    // 2. 把快照内容写回工作区（临时 index read-tree + checkout-index）
+    const readTree = await execGit(projectRoot, ['read-tree', commitSha], { env });
+    if (readTree.code !== 0) return { ok: false, code: 'RESTORE_FAILED', message: (readTree.err || '').trim() || 'git read-tree failed', emergencyCheckpointId: emergencyId };
+    const checkout = await execGit(projectRoot, ['checkout-index', '-a', '-f'], { env });
+    if (checkout.code !== 0) return { ok: false, code: 'RESTORE_FAILED', message: (checkout.err || '').trim() || 'git checkout-index failed', emergencyCheckpointId: emergencyId };
+
+    // 3. 删除「快照之后新增、且不在快照内」的非 ignore 文件（ignored 文件不动）
+    const walk = (dir, out = []) => {
+      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        if (entry.name === '.git') continue;
+        const abs = path.join(dir, entry.name);
+        if (entry.isDirectory()) walk(abs, out);
+        else out.push(path.relative(projectRoot, abs).replace(/\\/g, '/'));
+      }
+      return out;
+    };
+    for (const rel of walk(projectRoot)) {
+      if (snapshotFiles.has(rel)) continue;
+      const ignore = await execGit(projectRoot, ['check-ignore', '-q', '--', rel]);
+      if (ignore.code === 0) continue; // ignored 文件不属于快照语义，保留
+      try { await fsp.unlink(path.join(projectRoot, rel)); } catch { /* already gone */ }
+    }
+
+    // 4. 真实 index 同步为恢复后的工作区状态（restore 的正当变异）
+    const resync = await execGit(projectRoot, ['add', '-A']);
+    if (resync.code !== 0) return { ok: false, code: 'RESTORE_FAILED', message: (resync.err || '').trim() || 'index resync failed', emergencyCheckpointId: emergencyId };
+
+    return { ok: true, restored: checkpointId, emergencyCheckpointId: emergencyId };
+  } finally {
+    try { fs.rmSync(tmpIndex, { force: true }); } catch { /* best effort */ }
+  }
+}
+
+/**
+ * 创建一个 Run 级 Checkpoint（NON-MUTATING）。
  * @param {object} ctx runCtx（projectRoot, projectId, taskId, store, emit）
  * @param {object} opts { note, runId }
- * @returns {Promise<{ checkpointId, kind, stash? }>}
+ * @returns {Promise<{ checkpointId, kind, ref?, unsupported?, reason? }>}
  */
 async function createCheckpoint(ctx, opts = {}) {
   const id = (opts.runId || 'run') + '-' + Date.now().toString(36);
   const root = ctx.projectRoot;
-  const isGit = fs.existsSync(path.join(root, '.git'));
 
-  if (isGit) {
-    // 复用 git stash（与 src/tools/checkpoint.js 一致）
-    const { execGit } = require('./gitHelper');
-    const ref = await execGit(root, ['stash', 'push', '-u', '-m', `agent-checkpoint-${id}`]);
+  if (isGitRepo(root)) {
+    const snap = await snapshotGitProject(root, id);
+    if (!snap.ok) {
+      // 快照失败绝不假装成功，也不允许退化为 stash（stash 会变异用户工作区）
+      return { checkpointId: null, kind: 'failed', unsupported: false, reason: snap.code, message: snap.message };
+    }
     if (ctx.store && ctx.store.checkpoints) {
       try {
         ctx.store.checkpoints.create({
           projectId: ctx.projectId, taskId: ctx.taskId,
-          kind: 'git', ref: { id, stash: (ref.out || '').trim().split('\n')[0], note: opts.note || '', runId: opts.runId || '' }
+          kind: 'git', ref: { id, ref: snap.ref, commit: snap.commit, note: opts.note || '', runId: opts.runId || '' }
         });
       } catch { /* non-fatal */ }
     }
-    return { checkpointId: id, kind: 'git', stash: (ref.out || '').trim().split('\n')[0] };
+    return { checkpointId: id, kind: 'git', ref: snap.ref };
   }
 
-  // 非 Git：记录 manifest（仅标记，不做全量快照）
+  // 非 Git：没有真实快照能力 → 明确 CHECKPOINT_UNSUPPORTED，不返回“快照已创建”
   if (ctx.store && ctx.store.checkpoints) {
     try {
       ctx.store.checkpoints.create({
         projectId: ctx.projectId, taskId: ctx.taskId,
-        kind: 'manifest', ref: { id, note: opts.note || '非 Git 项目：仅记录检查点标记', runId: opts.runId || '' }
+        kind: 'unsupported', ref: { id, note: opts.note || '非 Git 项目：不支持真实快照', runId: opts.runId || '' }
       });
     } catch { /* non-fatal */ }
   }
-  return { checkpointId: id, kind: 'manifest' };
+  return { checkpointId: null, kind: 'unsupported', unsupported: true, reason: 'CHECKPOINT_UNSUPPORTED' };
 }
 
 /**
@@ -142,5 +260,6 @@ async function readFile(root, relPath) {
 
 module.exports = {
   createCheckpoint, trackFileChange, listChangedFiles, changedFilesSummary,
-  readFile, hashContent
+  readFile, hashContent,
+  snapshotGitProject, restoreGitProject, isGitRepo, checkpointRef
 };

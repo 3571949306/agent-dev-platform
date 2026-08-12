@@ -12,6 +12,7 @@
 const fs = require('fs');
 const fsp = require('fs/promises');
 const path = require('path');
+const crypto = require('crypto');
 const pathSecurityMod = require('../security/pathSecurity');
 const { PathSecurityError, CODE } = pathSecurityMod;
 
@@ -76,7 +77,74 @@ async function safeRead(ctx, absPath) {
   }
   const buf = await fsp.readFile(absPath);
   if (looksBinary(buf)) return fail('BINARY_FILE', '检测到二进制文件，无法作为文本读取', false);
-  return ok({ content: buf.toString('utf8'), size: stat.size });
+  const content = buf.toString('utf8');
+  // v2.9.8 R3：真实读取证据——记录观察哈希，供后续 stale-write 保护。
+  observeFile(ctx, absPath, content);
+  return ok({ content, size: stat.size });
+}
+
+// ---------------------------------------------------------------------------
+// v2.9.8 R3 — Atomic File Mutation + Concurrent Change Protection
+//
+// 观察账本（per-run）：真实 read 证据的 sha256。模型无法凭空生成有效 token：
+// expected_sha256 必须能在本 run 的真实读取记录中找到，否则拒绝。
+// ---------------------------------------------------------------------------
+function sha256Hex(content) {
+  return crypto.createHash('sha256').update(content == null ? '' : content).digest('hex');
+}
+
+function observationLedger(ctx) {
+  if (!ctx || typeof ctx !== 'object') return null;
+  if (!ctx._fileObservations) ctx._fileObservations = new Map();
+  return ctx._fileObservations;
+}
+
+function observeFile(ctx, absPath, content) {
+  const ledger = observationLedger(ctx);
+  if (!ledger) return;
+  ledger.set(String(absPath).toLowerCase(), { sha256: sha256Hex(content), at: Date.now() });
+}
+
+/**
+ * stale-write 保护：写入前比对磁盘真实内容与本 run 的观察证据。
+ * - 提供了 expected_sha256：必须是本 run 真实读取过的哈希（防模型凭空生成），
+ *   且与磁盘当前内容一致；
+ * - 未提供但存在观察记录：磁盘内容必须与最后一次观察一致（外部修改 → fail-closed）。
+ */
+function checkStaleWrite(ctx, absPath, currentContent, expectedSha) {
+  const ledger = observationLedger(ctx);
+  const observed = ledger ? ledger.get(String(absPath).toLowerCase()) : null;
+  const currentSha = sha256Hex(currentContent);
+  if (expectedSha) {
+    if (!observed || observed.sha256 !== expectedSha) {
+      return fail('EXPECTED_HASH_NOT_OBSERVED', 'expected_sha256 不是本 run 真实读取证据（禁止凭空生成 hash）', false);
+    }
+  }
+  if (observed && observed.sha256 !== currentSha) {
+    return fail('FILE_CHANGED_SINCE_READ', '文件在读取后被外部修改，拒绝基于旧内容覆盖（请重新读取）', true);
+  }
+  return { ok: true, sha256: currentSha };
+}
+
+/**
+ * 原子写入：同目录 temp → 完整写入 → rename 替换。
+ * 写失败绝不留下 truncate 后的半个原文件。
+ * ctx.__testWriteFault：仅测试可用的故障注入点（在最终替换前触发）。
+ */
+async function atomicWriteFile(ctx, absPath, content) {
+  const dir = path.dirname(absPath);
+  await fsp.mkdir(dir, { recursive: true });
+  const tmp = path.join(dir, `.${path.basename(absPath)}.adp-tmp-${crypto.randomUUID()}`);
+  try {
+    await fsp.writeFile(tmp, content == null ? '' : content, 'utf8');
+    if (ctx && typeof ctx.__testWriteFault === 'function') {
+      await ctx.__testWriteFault(absPath, tmp); // 故障注入：最终替换前失败
+    }
+    await fsp.rename(tmp, absPath);
+  } catch (err) {
+    try { await fsp.rm(tmp, { force: true }); } catch { /* best effort */ }
+    throw err;
+  }
 }
 
 const tools = [
@@ -142,27 +210,43 @@ const tools = [
     async exec(ctx, args) {
       try {
         const abs = guardCanonical(ctx, args.path);
-        if (fs.existsSync(abs)) return fail('FILE_EXISTS', `${args.path} 已存在，请使用 write_file 覆盖或先删除`);
         // §66 execution-time recheck before mutation
         recheckMutationTarget(ctx, args.path);
         await fsp.mkdir(path.dirname(abs), { recursive: true });
-        await fsp.writeFile(abs, args.content || '', 'utf8');
+        // v2.9.8 R3：exclusive create（O_CREAT|O_EXCL）——消除 exists-check 与写入之间的 TOCTOU
+        let fh;
+        try {
+          fh = await fsp.open(abs, fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_WRONLY, 0o666);
+        } catch (e) {
+          if (e && e.code === 'EEXIST') return fail('FILE_EXISTS', `${args.path} 已存在，请使用 write_file 覆盖或先删除`);
+          throw e;
+        }
+        try { await fh.writeFile(args.content || '', 'utf8'); } finally { await fh.close(); }
+        observeFile(ctx, abs, args.content || '');
         return ok({ created: args.path });
       } catch (e) { return e instanceof PathSecurityError ? fail(compatCode(e.code), e.message) : fail('CREATE_FAILED', e.message); }
     }
   },
   {
-    name: 'write_file', description: '写入/覆盖文件（整文件）。', risk_level: 'medium', permission: 'filesystem.write',
-    input_schema: { type: 'object', properties: { path: { type: 'string' }, content: { type: 'string' }, record_change: { type: 'boolean', description: '是否记录到 file_changes（默认 true）' } }, required: ['path', 'content'] },
+    name: 'write_file', description: '写入/覆盖文件（整文件；原子替换 + stale-write 保护）。', risk_level: 'medium', permission: 'filesystem.write',
+    input_schema: { type: 'object', properties: { path: { type: 'string' }, content: { type: 'string' }, expected_sha256: { type: 'string', description: '可选：基于本 run 真实读取的观察哈希，不一致则拒绝写入' }, record_change: { type: 'boolean', description: '是否记录到 file_changes（默认 true）' } }, required: ['path', 'content'] },
     async exec(ctx, args) {
       try {
         const abs = guardCanonical(ctx, args.path);
         let before = null;
         if (fs.existsSync(abs)) before = await fsp.readFile(abs, 'utf8');
+        // v2.9.8 R3：已有文件的 stale-write 保护（外部并发修改 → fail-closed）
+        if (before !== null) {
+          const stale = checkStaleWrite(ctx, abs, before, args.expected_sha256);
+          if (!stale.ok) return stale;
+        } else if (args.expected_sha256) {
+          return fail('EXPECTED_HASH_NOT_OBSERVED', '目标文件不存在，expected_sha256 无真实读取证据', false);
+        }
         // §66 execution-time recheck immediately before mutation
         recheckMutationTarget(ctx, args.path);
-        await fsp.mkdir(path.dirname(abs), { recursive: true });
-        await fsp.writeFile(abs, args.content || '', 'utf8');
+        // v2.9.8 R3：原子替换（同目录 temp → rename），失败不留下半个文件
+        await atomicWriteFile(ctx, abs, args.content || '');
+        observeFile(ctx, abs, args.content || '');
         if (args.record_change !== false && ctx.store) {
           const { diff } = require('./patch');
           const d = diff(before || '', args.content);
@@ -174,8 +258,8 @@ const tools = [
     }
   },
   {
-    name: 'move_file', description: '移动/重命名文件或目录。', risk_level: 'high', permission: 'filesystem.delete',
-    input_schema: { type: 'object', properties: { source: { type: 'string' }, destination: { type: 'string' } }, required: ['source', 'destination'] },
+    name: 'move_file', description: '移动/重命名文件或目录（目标已存在时默认失败）。', risk_level: 'high', permission: 'filesystem.delete',
+    input_schema: { type: 'object', properties: { source: { type: 'string' }, destination: { type: 'string' }, replace: { type: 'boolean', description: '目标已存在时是否显式允许覆盖（默认 false）' } }, required: ['source', 'destination'] },
     async exec(ctx, args) {
       try {
         // §79: source 与 destination 都必须 canonical inside
@@ -185,14 +269,18 @@ const tools = [
         recheckMutationTarget(ctx, args.source);
         recheckMutationTarget(ctx, args.destination);
         await fsp.mkdir(path.dirname(b), { recursive: true });
+        // v2.9.8 R3：destination 碰撞不得静默毁掉未知用户文件
+        if (fs.existsSync(b) && args.replace !== true) {
+          return fail('DESTINATION_EXISTS', `${args.destination} 已存在，移动被拒绝（显式 replace=true 才允许覆盖）`, false);
+        }
         await fsp.rename(a, b);
         return ok({ moved: args.source, to: args.destination });
       } catch (e) { return e instanceof PathSecurityError ? fail(compatCode(e.code), e.message) : fail('MOVE_FAILED', e.message); }
     }
   },
   {
-    name: 'copy_file', description: '复制文件。', risk_level: 'medium', permission: 'filesystem.write',
-    input_schema: { type: 'object', properties: { source: { type: 'string' }, destination: { type: 'string' } }, required: ['source', 'destination'] },
+    name: 'copy_file', description: '复制文件（目标已存在时默认失败）。', risk_level: 'medium', permission: 'filesystem.write',
+    input_schema: { type: 'object', properties: { source: { type: 'string' }, destination: { type: 'string' }, replace: { type: 'boolean', description: '目标已存在时是否显式允许覆盖（默认 false）' } }, required: ['source', 'destination'] },
     async exec(ctx, args) {
       try {
         // §80: source 与 destination 都必须 canonical inside
@@ -201,7 +289,14 @@ const tools = [
         recheckMutationTarget(ctx, args.source);
         recheckMutationTarget(ctx, args.destination);
         await fsp.mkdir(path.dirname(b), { recursive: true });
-        await fsp.copyFile(a, b);
+        // v2.9.8 R3：COPYFILE_EXCL —— 目标已存在时 fail，除非显式 replace
+        const flags = args.replace === true ? 0 : fs.constants.COPYFILE_EXCL;
+        try {
+          await fsp.copyFile(a, b, flags);
+        } catch (e) {
+          if (e && e.code === 'EEXIST') return fail('DESTINATION_EXISTS', `${args.destination} 已存在，复制被拒绝（显式 replace=true 才允许覆盖）`, false);
+          throw e;
+        }
         return ok({ copied: args.source, to: args.destination });
       } catch (e) { return e instanceof PathSecurityError ? fail(compatCode(e.code), e.message) : fail('COPY_FAILED', e.message); }
     }
@@ -222,4 +317,4 @@ const tools = [
   }
 ];
 
-module.exports = { tools };
+module.exports = { tools, atomicWriteFile, observeFile, checkStaleWrite, sha256Hex };

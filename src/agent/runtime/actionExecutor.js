@@ -10,8 +10,7 @@
  * stdout/stderr 有长度上限，防止 Context 被巨大日志撑爆（§11）。
  */
 
-const { isDangerous } = require('../../tools/terminal');
-const { gitDestructive } = require('../../tools/git');
+const { isHighRisk } = require('../../tools/terminal');
 const { getAgentHub } = require('../../agents/hub/agentHub');
 const { dispatchRuntimeHook } = require('../../hooks/runtimeDispatch');
 
@@ -89,10 +88,11 @@ async function executeAction(ctx, action, getTool) {
     return { ok: false, tool: type, error: { code: 'UNKNOWN_ACTION', message: `未知 action 类型: ${type}` } };
   }
 
-  // 危险命令分级（§12）：High Risk 必须确认。这里只标记，实际权限由 permissionEngine 处理。
+  // 危险命令分级（§12 / v2.9.8 R1）：High Risk 必须确认。这里只标记，
+  // 实际权限由 permissionEngine 的 terminal.dangerous 域裁决。
   if (type === 'run_command' || type === 'run_tests') {
     const cmd = args.command || '';
-    if (isDangerous(cmd) || gitDestructive(cmd)) {
+    if (isHighRisk(cmd)) {
       // 权限引擎会拦截；这里在结果里标注风险等级供诊断
       return await runTool(ctx, toolName, args, getTool, action, { highRisk: true });
     }

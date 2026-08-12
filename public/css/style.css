@@ -94,12 +94,20 @@ body { background: var(--bg); color: var(--text); font-family: var(--sans); font
 .topbar-status .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--green); }
 .topbar-status .dot.busy { background: var(--yellow); animation: pulse 1s infinite; }
 @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .3; } }
-.topnav { margin-left: auto; display: flex; gap: 4px; }
-.topnav button { background: transparent; border: 1px solid transparent; color: var(--text-dim); padding: 5px 10px; border-radius: 6px; cursor: pointer; font-size: 12px; }
-.topnav button:hover, .topnav button.active { background: var(--bg3); color: var(--text); }
 
 /* ---------- layout ---------- */
 #body { flex: 1; display: flex; min-height: 0; }
+
+/* v2.9.9 Phase B（B1）— Activity Bar：左侧窄活动栏。
+   position:relative + z-index 高于 .page-overlay（z-index:50），
+   否则打开管理页时 overlay 会盖住活动栏导致不可点。 */
+#activity-bar { width: 46px; flex: none; display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 8px 0; background: var(--bg2); border-right: 1px solid var(--border); overflow-y: auto; position: relative; z-index: 60; }
+#activity-bar .ab-spacer { flex: 1; min-height: 6px; }
+#activity-bar .abtn { width: 34px; height: 34px; display: flex; align-items: center; justify-content: center; background: transparent; border: none; border-radius: 8px; color: var(--text-dim); cursor: pointer; position: relative; }
+#activity-bar .abtn:hover { background: var(--bg3); color: var(--text); }
+#activity-bar .abtn.active { background: var(--bg3); color: var(--text); box-shadow: inset 2px 0 0 var(--accent); }
+#activity-bar .ab-ico { font-size: 17px; line-height: 1; }
+
 #left { width: 250px; background: var(--bg2); border-right: 1px solid var(--border); display: flex; flex-direction: column; flex: none; }
 .left-tabs, .bottom-tabs { display: flex; border-bottom: 1px solid var(--border); flex: none; }
 .ltab, .btab { flex: 1; background: transparent; border: none; color: var(--text-dim); padding: 8px 6px; cursor: pointer; font-size: 12px; border-bottom: 2px solid transparent; }

@@ -163,6 +163,10 @@ export const api = {
   // runtime
   send: (conversationId, agentId, message) => call('agent:send', { conversationId, agentId, message }),
   stop: (conversationId) => call('agent:stop', { conversationId }),
+  // v2.9.9 Phase B（#1）— canonical Main Agent product entry（ProductEntry Main）。
+  // 主聊天框选中 is_main 平台主智能体时走这条；legacy/external/general chat 仍用 send/stop。
+  mainRun: (b) => call('mainAgent:run', b),
+  mainStop: (b) => call('mainAgent:stop', b),
   permissionRespond: (reqId, decision, range) => call('agent:permission-response', { reqId, decision, range }),
 
   // panels

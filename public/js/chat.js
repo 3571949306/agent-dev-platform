@@ -275,14 +275,21 @@ export async function send() {
 
   msgsEl().appendChild(userBubble(text));
   input.value = '';
-  // runId 以主进程 agent:send 返回的为准（本地不预生成，避免终态防重入误判）
+  // runId 以主进程返回的为准（本地不预生成，避免终态防重入误判）
   startRun(state.conv.id);
   startWatchdog(state.conv.id);
   statusLine('准备中…');
   scrollBottom();
 
+  // v2.9.9 Phase B（#1）— canonical Main Agent product entry：
+  // 选中的是平台主智能体（is_main 且非 external）时，主产品入口进入
+  // mainAgent:run → MainAgentService → runMainAgent → Orchestrator → Model Router → ProviderModelAdapter。
+  // legacy/external/general chat 仍用 agent:send（兼容保留，不再决定主编码体验）。
+  const isCanonicalMain = agent.is_main === true && agent.type !== 'external';
   try {
-    const result = await api.send(state.conv.id, agentId, text);
+    const result = isCanonicalMain
+      ? await api.mainRun({ conversationId: state.conv.id, agentId, goal: text })
+      : await api.send(state.conv.id, agentId, text);
     // 主进程返回 runId，更新跟踪（终态防重入依赖它）
     const tracked = activeRuns.get(state.conv.id);
     if (result && result.runId && tracked) tracked.runId = result.runId;
@@ -350,7 +357,13 @@ function showPreflightBlock(code, ctx = {}) {
 
 export async function stop() {
   if (!state.conv) return;
-  await api.stop(state.conv.id);
+  // v2.9.9 Phase B（#7）— canonical Main 的 Stop 必须走 mainAgent:stop：
+  // Abort → children cancellation → descendant quiescence → Project Lock release → RunManager cancelled。
+  // legacy/external 仍用 agent:stop。路由判据与 send() 保持一致。
+  const agent = state.agents.find(a => a.id === state.agentId);
+  const isCanonicalMain = !!(agent && agent.is_main === true && agent.type !== 'external');
+  if (isCanonicalMain) await api.mainStop({ conversationId: state.conv.id });
+  else await api.stop(state.conv.id);
   toast('已发送停止指令', 'warn');
 }
 
@@ -842,12 +855,10 @@ function handleMainAgentEvent(ev, mine) {
     }
 
     case 'mainAgent:assistantText': {
-      // 智能体文本（最终总结/思考） → 渲染为气泡
+      // v2.9.9 Phase B（#4）简洁聊天：中间 thought_summary 不作为永久 Chat 气泡，
+      // 进入 Run Timeline 作为短状态文本；最终回复以 runCompleted / finish 的 summary 为准。
       if (ev.text) {
-        const sl = $('#status-line');
-        const b = assistantBubble(ev.text);
-        if (sl) msgsEl().insertBefore(b, sl); else msgsEl().appendChild(b);
-        scrollBottom();
+        panels.addTimelineEntry(ev.runId, { kind: 'info', icon: '💭', text: truncate(ev.text, 160), detail: '', t: Date.now() });
       }
       break;
     }

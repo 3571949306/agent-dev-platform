@@ -17,20 +17,29 @@
         <button id="btn-project" class="pill">未打开项目</button>
       </div>
       <div class="topbar-status"><span class="dot" id="status-dot"></span><span id="status-text">就绪</span></div>
-      <nav class="topnav">
-        <button data-page="dashboard">总览</button>
-        <button data-page="connections">API 连接</button>
-        <button data-page="agents">智能体</button>
-        <button data-page="mcp">MCP</button>
-        <button data-page="skills">Skills</button>
-        <button data-page="workflows">Workflows</button>
-        <button data-page="generator">AI Generator</button>
-        <button data-page="diagnostics">能力诊断</button>
-        <button data-page="settings">设置</button>
-      </nav>
     </header>
 
     <div id="body">
+      <!-- v2.9.9 Phase B（B1）— Activity Bar：左侧窄活动栏，替代顶部横向堆叠的 Framework 页面。
+           每个按钮用 aria-label + title 保留可达/可测试名称。 -->
+      <nav id="activity-bar" aria-label="活动栏">
+        <button class="abtn" data-act="chat" aria-label="对话" title="对话"><span class="ab-ico">💬</span></button>
+        <button class="abtn" data-act="files" aria-label="文件" title="文件"><span class="ab-ico">📁</span></button>
+        <button class="abtn" data-act="runs" aria-label="运行" title="运行"><span class="ab-ico">⚡</span></button>
+        <div class="ab-spacer"></div>
+        <button class="abtn" data-page="agents" aria-label="智能体" title="智能体"><span class="ab-ico">🤖</span></button>
+        <button class="abtn" data-page="workflows" aria-label="Workflows" title="Workflows"><span class="ab-ico">🔀</span></button>
+        <button class="abtn" data-page="generator" aria-label="AI Generator" title="AI Generator"><span class="ab-ico">✨</span></button>
+        <button class="abtn" data-page="skills" aria-label="Skills" title="Skills"><span class="ab-ico">🧠</span></button>
+        <button class="abtn" data-act="computer" aria-label="电脑控制" title="电脑控制"><span class="ab-ico">🖥️</span></button>
+        <button class="abtn" data-page="connections" aria-label="API 连接" title="API 连接"><span class="ab-ico">🔌</span></button>
+        <button class="abtn" data-page="mcp" aria-label="MCP" title="MCP"><span class="ab-ico">🧩</span></button>
+        <button class="abtn" data-page="diagnostics" aria-label="能力诊断" title="能力诊断"><span class="ab-ico">🩺</span></button>
+        <button class="abtn" data-page="dashboard" aria-label="总览" title="总览"><span class="ab-ico">📊</span></button>
+        <div class="ab-spacer"></div>
+        <button class="abtn" data-page="settings" aria-label="设置" title="设置"><span class="ab-ico">⚙️</span></button>
+      </nav>
+
       <aside id="left">
         <div class="left-tabs">
           <button class="ltab active" data-ltab="chats">对话</button>

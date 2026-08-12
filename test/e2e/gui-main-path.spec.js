@@ -199,6 +199,37 @@ async function setMainModel(model, extra = {}) {
   }, { model, extra });
 }
 
+// v2.9.9 Phase B（#1/#8）— 主编码智能体（is_main）默认走 canonical mainAgent:run；
+// 旧用例（文本回复/fail/hang/timeout）改用 legacy 通用助手（非 is_main）走 agent:send。
+const GENERAL_AGENT_NAME = '通用助手';
+async function getAgentIdByName(name) {
+  return await page.evaluate(async (n) => {
+    const r = await window.api.invoke('agents:list');
+    const agents = r && r.data ? r.data : r;
+    const a = (Array.isArray(agents) ? agents : []).find(x => x && x.name === n);
+    return a ? a.id : null;
+  }, name);
+}
+/** 在聊天下拉中选中某个智能体（触发 change，更新 renderer state.agentId） */
+async function selectAgentByName(name) {
+  const id = await getAgentIdByName(name);
+  expect(id, `应找到智能体「${name}」`).toBeTruthy();
+  await page.evaluate((aid) => {
+    const sel = document.querySelector('#agent-select');
+    if (sel) { sel.value = aid; sel.dispatchEvent(new Event('change', { bubbles: true })); }
+  }, id);
+  await page.waitForTimeout(200);
+}
+/** 切换通用助手的模型（legacy 用例用） */
+async function setGeneralModel(model, extra = {}) {
+  await page.evaluate(async ({ name, model, extra }) => {
+    const r = await window.api.invoke('agents:list');
+    const agents = r && r.data ? r.data : r;
+    const g = (Array.isArray(agents) ? agents : []).find(a => a && a.name === name);
+    if (g) await window.api.invoke('agents:update', g.id, { model, ...extra });
+  }, { name: GENERAL_AGENT_NAME, model, extra });
+}
+
 test.beforeAll(async () => {
   fake = await start(0);
   userData = fs.mkdtempSync(path.join(os.tmpdir(), 'adp-e2e-'));
@@ -268,6 +299,8 @@ test('3) 【主路径】选好模型发送「你好」→ 无 ReferenceError →
   pageErrors = [];
   // 回到聊天
   await closePage();
+  // v2.9.9 Phase B：本用例测 legacy 通用对话路径，选中非 is_main 的通用助手
+  await selectAgentByName(GENERAL_AGENT_NAME);
   await page.locator('#btn-newchat').click().catch(() => {});
   await page.waitForTimeout(500);
   await page.locator('#input').fill('你好');
@@ -292,7 +325,8 @@ test('3) 【主路径】选好模型发送「你好」→ 无 ReferenceError →
 
 test('4) 业务失败：model-FAIL → 唯一终态 failed（绝不随后 completed）', async () => {
   await closePage();
-  await setMainModel('model-FAIL');
+  await setGeneralModel('model-FAIL');
+  await selectAgentByName(GENERAL_AGENT_NAME);
   await page.locator('#input').fill('触发失败');
   await page.getByRole('button', { name: '发送 ▸' }).click();
   await expect(page.locator('#status-text')).toContainText('失败', { timeout: 30000 });
@@ -307,7 +341,8 @@ test('4) 业务失败：model-FAIL → 唯一终态 failed（绝不随后 comple
 
 test('5) 停止：model-HANG + 点停止 → 唯一终态 cancelled', async () => {
   await closePage();
-  await setMainModel('model-HANG', { timeout_ms: 120000 });
+  await setGeneralModel('model-HANG', { timeout_ms: 120000 });
+  await selectAgentByName(GENERAL_AGENT_NAME);
   await page.locator('#input').fill('停不下来');
   await page.getByRole('button', { name: '发送 ▸' }).click();
   await expect(page.locator('#btn-stop')).toBeVisible({ timeout: 10000 });
@@ -324,7 +359,8 @@ test('5) 停止：model-HANG + 点停止 → 唯一终态 cancelled', async () =
 
 test('6) 超时：model-HANG + 短 timeout → 唯一终态 timeout', async () => {
   await closePage();
-  await setMainModel('model-HANG', { timeout_ms: 8000 });
+  await setGeneralModel('model-HANG', { timeout_ms: 8000 });
+  await selectAgentByName(GENERAL_AGENT_NAME);
   await page.locator('#input').fill('超时用例');
   await page.getByRole('button', { name: '发送 ▸' }).click();
   await expect(page.locator('#status-text')).toContainText('超时', { timeout: 30000 });
@@ -477,6 +513,29 @@ test('12) Quick Open：Ctrl+P 搜索项目文件并打开预览', async () => {
   // 关闭 modal + 清理临时项目
   await page.evaluate(() => { const x = document.querySelector('#modal-overlay .modal-x'); if (x) x.click(); });
   fs.rmSync(projRoot, { recursive: true, force: true });
+  const fatals = pageErrors.filter(e => /Cannot read|TypeError|ReferenceError|is not defined/.test(e));
+  expect(fatals).toEqual([]);
+});
+
+// v2.9.9 Phase B（B1）— Workbench Shell + Activity Bar：左侧窄活动栏取代顶部横向导航。
+test('13) Activity Bar：活动栏可见、顶部横向导航已移除、活动栏可导航', async () => {
+  // 关闭可能开着的页面遮罩
+  await page.keyboard.press('Escape');
+  await page.waitForTimeout(200);
+  // 活动栏可见，且包含关键活动项（作用域限定在 #activity-bar，避免与左侧 .ltab 同名按钮冲突）
+  await expect(page.locator('#activity-bar')).toBeVisible();
+  await expect(page.locator('#activity-bar').getByRole('button', { name: '文件' })).toBeVisible();
+  await expect(page.locator('#activity-bar').getByRole('button', { name: '智能体' })).toBeVisible();
+  await expect(page.locator('#activity-bar').getByRole('button', { name: '设置' })).toBeVisible();
+  // 顶部横向 Framework 导航已移除（不再横向堆叠页面）
+  expect(await page.locator('.topnav').count()).toBe(0);
+  // 点「设置」活动 → 打开设置页（page-title=设置），活动栏仍在其上层可点
+  await page.locator('#activity-bar').getByRole('button', { name: '设置' }).click();
+  await expect(page.locator('#page-title')).toHaveText('设置', { timeout: 5000 });
+  await expect(page.locator('#activity-bar').getByRole('button', { name: '文件' })).toBeVisible();
+  // 点「文件」活动 → 左侧栏切到文件 tab
+  await page.locator('#activity-bar').getByRole('button', { name: '文件' }).click();
+  await expect(page.locator('#left-files')).toBeVisible({ timeout: 5000 });
   const fatals = pageErrors.filter(e => /Cannot read|TypeError|ReferenceError|is not defined/.test(e));
   expect(fatals).toEqual([]);
 });

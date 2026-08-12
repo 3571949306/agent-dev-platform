@@ -66,7 +66,31 @@ function wireShell() {
     if (b.dataset.ltab === 'files') await files.render();
   });
 
-  $$('.topnav button').forEach(b => b.onclick = () => pages.open(b.dataset.page));
+  // v2.9.9 Phase B（B1）— Activity Bar：管理页走 pages.open；
+  // Chat/Files 切左侧栏内容，Runs/Computer 切底部面板。不再顶部横向堆叠页面。
+  $$('#activity-bar .abtn').forEach(b => {
+    b.onclick = async () => {
+      if (b.dataset.page) { pages.open(b.dataset.page); return; }
+      $$('#activity-bar .abtn').forEach(x => x.classList.remove('active'));
+      b.classList.add('active');
+      const act = b.dataset.act;
+      const left = $('#left');
+      if (left) left.classList.remove('hidden');
+      if (act === 'chat' || act === 'files') {
+        const tab = act === 'chat' ? 'chats' : 'files';
+        $$('.ltab').forEach(x => x.classList.toggle('active', x.dataset.ltab === tab));
+        $('#left-chats').classList.toggle('hidden', tab !== 'chats');
+        $('#left-files').classList.toggle('hidden', tab !== 'files');
+        if (tab === 'files') await files.render();
+      } else if (act === 'runs') {
+        const bottom = $('#bottom'); if (bottom) bottom.classList.remove('hidden');
+        panels.activate('timeline');
+      } else if (act === 'computer') {
+        const bottom = $('#bottom'); if (bottom) bottom.classList.remove('hidden');
+        panels.activate('computer');
+      }
+    };
+  });
 
   $('#agent-select').onchange = e => { state.agentId = e.target.value; renderModelSelect(); };
   $('#model-select').onchange = async e => {

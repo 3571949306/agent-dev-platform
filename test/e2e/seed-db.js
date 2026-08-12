@@ -38,6 +38,13 @@ if (!fakeConn && baseUrl) {
   fakeConn = store.connections.create({ name: fakeConnName, provider: 'openai', base_url: baseUrl, api_key: 'sk-test-e2e-fake' });
   // 总是把主智能体更新为 Fake API 连接 + model-B（确定 E2E 起点）
   if (main) store.agents.update(main.id, { api_connection_id: fakeConn.id, model: 'model-B' });
+  // v2.9.9 Phase B（#1/#8）— 兼容保留的 legacy 通用对话智能体（非 is_main）。
+  // 主编码智能体（is_main）默认产品入口切到 canonical mainAgent:run；
+  // 旧 gui-main-path 用例（文本回复/fail/hang/timeout）改用这个 legacy 智能体走 agent:send。
+  const generalName = '通用助手';
+  if (!store.agents.list().find(a => a.name === generalName)) {
+    store.agents.create({ name: generalName, is_main: false, api_connection_id: fakeConn.id, model: 'model-B', tools: [] });
+  }
   try {
     const url = new URL(baseUrl + '/models');
     const models = new Promise((resolve, reject) => {

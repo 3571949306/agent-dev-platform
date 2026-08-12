@@ -78,6 +78,8 @@ export function close() {
   current = null;
   diagActive = null;
   $$('.topnav button').forEach(b => b.classList.remove('active'));
+  // v2.9.9 Phase B（B1）— 关闭管理页时清除活动栏中管理页按钮的选中态
+  $$('#activity-bar .abtn[data-page]').forEach(b => b.classList.remove('active'));
 }
 
 /**

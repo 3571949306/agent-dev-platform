@@ -243,6 +243,25 @@ test('12) §76 一键分配主智能体 → 发送 → 收到 QUICK_CONNECT_OK',
 
   // 回到聊天发送消息 → 应收到 QUICK_CONNECT_OK
   await closePage();
+  // v2.9.9 Phase B（#1/#8）：主智能体（is_main）默认产品入口已切到 canonical（结构化 Action），
+  // 不再产生纯文本回复气泡。文本回复验证改用 legacy 通用助手（agent:send）：
+  // 把通用助手也绑定到 Quick Assign Conn + model-QUICK，用它发送并收到 QUICK_CONNECT_OK。
+  const generalId = await page.evaluate(async () => {
+    const conns = await window.api.invoke('connections:list');
+    const clist = conns && conns.data ? conns.data : conns;
+    const conn = (Array.isArray(clist) ? clist : []).find(c => c && c.name === 'Quick Assign Conn');
+    const agents = await window.api.invoke('agents:list');
+    const ags = agents && agents.data ? agents.data : agents;
+    const general = (Array.isArray(ags) ? ags : []).find(a => a && a.name === '通用助手');
+    if (conn && general) await window.api.invoke('agents:update', general.id, { api_connection_id: conn.id, model: 'model-QUICK' });
+    return general ? general.id : null;
+  });
+  expect(generalId, '应存在通用助手').toBeTruthy();
+  await page.evaluate((aid) => {
+    const sel = document.querySelector('#agent-select');
+    if (sel && aid) { sel.value = aid; sel.dispatchEvent(new Event('change', { bubbles: true })); }
+  }, generalId);
+  await page.waitForTimeout(200);
   await page.locator('#btn-newchat').click().catch(() => {});
   await page.waitForTimeout(500);
   await page.locator('#input').fill('请回复');

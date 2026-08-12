@@ -3,6 +3,7 @@
   "frozenAtVersion": "2.9.7",
   "currentPackageVersion": "2.9.7",
   "releaseState": "frozen",
+  "executionPathPolicyVersion": 1,
   "frameworks": {
     "mainAgent": "frozen",
     "dynamicAgent": "frozen",

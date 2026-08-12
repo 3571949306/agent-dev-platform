@@ -217,6 +217,10 @@ test('R3 production deterministic smoke uses Built-in Registry, PermissionEngine
     assert.strictEqual(factory.listInstances().length, 0);
     assert.strictEqual(registry.list().filter(adapter => adapter.id.startsWith('dyn-agent-')).length, 0);
     assert.strictEqual(factory.activeTimerCount(), 0);
+    console.log(
+      'DYNAMIC_AGENT_PRODUCTION security=PASS permissionEngine=DynamicPermissionEngine pathSecurity=PASS ' +
+      'readOnlyCeiling=PASS parentCeiling=PASS outsideWorkspaceBlocked=PASS dynamicCleanup=0 paidProviderCalls=0'
+    );
   } finally {
     setAgentHub(previousHub);
     setDynamicAgentRuntime(previousDynamic.factory, previousDynamic.definitionStore);

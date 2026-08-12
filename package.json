@@ -32,6 +32,7 @@
     "test:generator": "node scripts/run-tests.js generator.test",
     "test:generator:production": "node scripts/run-tests.js generatorProduction",
     "test:architecture": "node scripts/test-architecture.js",
+    "test:architecture-policy": "node scripts/run-tests.js architecturePolicy",
     "test:product": "node scripts/run-tests.js product.test",
     "test:product:production": "node scripts/product-production-smoke.js",
     "icon": "node scripts/make-icon.js"

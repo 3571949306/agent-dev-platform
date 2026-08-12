@@ -60,6 +60,8 @@ Standalone Workflow tool steps intentionally carry null Agent `runId`, `rootRunI
 
 The architecture gate searches production source, tests, and scripts for the requested execution signatures. Every match receives one of these classifications; any `UNSAFE_DUPLICATE` fails the gate.
 
+Unknown production execution paths fail closed. Since `executionPathPolicyVersion: 1`, the classifier is DEFAULT DENY: each signature has an explicit exact-path allowlist (`EXECUTION_PATH_POLICY` in `scripts/executionPathPolicy.js`), and any monitored signature appearing in a `src/**` path that is not explicitly canonical or legacy classifies as `UNSAFE_DUPLICATE`. A synthetic adversarial proof (unknown future paths such as `src/future/secondAgentLoop.js`) must be entirely blocked before the gate can pass.
+
 | Signature | CANONICAL | LEGACY_COMPATIBILITY | TEST_ONLY | Forbidden location |
 |---|---|---|---|---|
 | `provider.streamResponse` | ProviderModelAdapter and provider capability probes | legacy chat, external-Agent compatibility, vision fallback | fake-network and smoke fixtures | Workflow or Generator execution bypass |

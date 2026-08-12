@@ -8,8 +8,11 @@ import * as panels from './panels.js';
 import * as files from './files.js';
 import * as pages from './pages.js';
 import { initOrchestration } from './orchestration.js';
+import * as theme from './theme.js';
 
 async function boot() {
+  // v2.9.9 Phase B（B2/B31）— apply persisted appearance as early as possible.
+  theme.init().catch(() => {});
   try {
     await api.systemInfo();
   } catch (e) {

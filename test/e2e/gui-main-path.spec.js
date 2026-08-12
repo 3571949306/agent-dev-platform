@@ -388,3 +388,45 @@ test('9) 无 JS 致命错误（全程 pageerror 收集）', async () => {
   const fatals = pageErrors.filter(e => /Cannot read|TypeError|ReferenceError|is not defined/.test(e));
   expect(fatals).toEqual([]);
 });
+
+// v2.9.9 Phase B（B31/B32/B2）— 主题与密度：真实切换 + 持久化。
+test('10) 外观：主题/密度切换生效并持久化', async () => {
+  // 清理前置用例可能遗留的模态框（modal-overlay 会遮挡顶栏，导致「设置」不可点）。
+  await page.evaluate(() => {
+    const ov = document.querySelector('#modal-overlay');
+    if (ov && !ov.classList.contains('hidden')) {
+      const x = ov.querySelector('.modal-x');
+      if (x) x.click(); else ov.classList.add('hidden');
+    }
+  });
+  await page.keyboard.press('Escape'); // 关闭可能开着的全屏管理页遮罩
+  await page.waitForTimeout(300);
+  await page.getByRole('button', { name: '设置' }).click();
+  await page.waitForSelector('#set-theme', { timeout: 10000 });
+  await page.waitForSelector('#set-density', { timeout: 10000 });
+
+  // 切到浅色主题 → <html data-theme="light">
+  await page.selectOption('#set-theme', 'light');
+  await page.waitForFunction(() => document.documentElement.getAttribute('data-theme') === 'light', null, { timeout: 5000 });
+  expect(await page.evaluate(() => document.documentElement.getAttribute('data-theme'))).toBe('light');
+  // 持久化：settings 存了 ui.theme=light
+  const savedTheme = await page.evaluate(async () => {
+    const r = await window.api.invoke('settings:get', 'ui.theme', null);
+    return r && r.data !== undefined ? r.data : r;
+  });
+  expect(savedTheme).toBe('light');
+
+  // 切到紧凑密度 → <html data-density="compact">
+  await page.selectOption('#set-density', 'compact');
+  await page.waitForFunction(() => document.documentElement.getAttribute('data-density') === 'compact', null, { timeout: 5000 });
+  expect(await page.evaluate(() => document.documentElement.getAttribute('data-density'))).toBe('compact');
+
+  // 切回深色 + 舒适（恢复默认，避免影响后续/其他用例），并验证仍然生效
+  await page.selectOption('#set-theme', 'dark');
+  await page.selectOption('#set-density', 'comfortable');
+  await page.waitForFunction(() => document.documentElement.getAttribute('data-theme') === 'dark'
+    && document.documentElement.getAttribute('data-density') === 'comfortable', null, { timeout: 5000 });
+
+  const fatals = pageErrors.filter(e => /Cannot read|TypeError|ReferenceError|is not defined/.test(e));
+  expect(fatals).toEqual([]);
+});

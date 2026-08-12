@@ -3,6 +3,7 @@ import { api } from './api.js';
 import { state } from './state.js';
 import { $, $$, esc, h, toast, fmtTime, truncate, confirmBox, openModal, closeModal, onModalOk, prettyJson } from './util.js';
 import { ZH, sourceName } from './i18n.js';
+import * as theme from './theme.js';
 
 // v2.3.0: External Agent 状态卡 —— 把最近一次运行结果展示在列表卡片上
 function extStatusBase(s) { return String(s || '').split(':')[0].trim(); }
@@ -2135,7 +2136,28 @@ async function renderSettings(body) {
     api.prompts(), api.skills(), api.audit(), api.systemInfo(),
     state.project ? api.memories('project', state.project.id) : Promise.resolve([])
   ]);
+  const curTheme = theme.getTheme();
+  const curDensity = theme.getDensity();
   body.innerHTML = `
+    <section class="panel">
+      <h3>外观</h3>
+      <div class="row">
+        <label class="muted small" style="margin:0">主题
+          <select id="set-theme" style="margin-left:8px">
+            <option value="dark" ${curTheme === 'dark' ? 'selected' : ''}>深色</option>
+            <option value="light" ${curTheme === 'light' ? 'selected' : ''}>浅色</option>
+            <option value="system" ${curTheme === 'system' ? 'selected' : ''}>跟随系统</option>
+          </select>
+        </label>
+        <label class="muted small" style="margin:0">密度
+          <select id="set-density" style="margin-left:8px">
+            <option value="comfortable" ${curDensity === 'comfortable' ? 'selected' : ''}>舒适</option>
+            <option value="compact" ${curDensity === 'compact' ? 'selected' : ''}>紧凑</option>
+          </select>
+        </label>
+      </div>
+    </section>
+
     <section class="panel">
       <div class="panel-h"><h3>提示词库</h3><span class="grow"></span><button class="btn tiny" id="p-add">+ 新建</button></div>
       ${prompts.length ? `<table class="tbl"><tbody>${prompts.map(p => `<tr><td><b>${esc(p.name)}</b><div class="muted small">${esc(truncate(p.content, 120))}</div></td><td class="right"><button class="btn tiny" data-pe="${p.id}">编辑</button><button class="btn tiny danger" data-pd="${p.id}">删除</button></td></tr>`).join('')}</tbody></table>` : '<div class="muted">暂无</div>'}
@@ -2172,6 +2194,10 @@ async function renderSettings(body) {
     </section>`;
 
   $('#p-add').onclick = () => promptForm(null);
+  const setThemeEl = $('#set-theme');
+  if (setThemeEl) setThemeEl.onchange = async () => { await theme.setTheme(setThemeEl.value); toast('已应用主题', 'ok'); };
+  const setDensityEl = $('#set-density');
+  if (setDensityEl) setDensityEl.onchange = async () => { await theme.setDensity(setDensityEl.value); toast('已应用密度', 'ok'); };
   body.querySelectorAll('[data-pe]').forEach(b => b.onclick = () => promptForm(prompts.find(p => p.id === b.dataset.pe)));
   body.querySelectorAll('[data-pd]').forEach(b => b.onclick = async () => {
     if (!await confirmBox('删除提示词', '确定？')) return;

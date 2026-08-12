@@ -1,5 +1,18 @@
 # Changelog
 
+## v2.9.9 (in progress) — Unified GUI / UX & Product Workbench (Phase B)
+
+Phase B is delivered incrementally on top of the frozen v2.9.8 reliability closure. Items below are VERIFIED only where a machine/E2E proof exists; the remainder stays NOT_STARTED rather than claimed.
+
+- B31 CSS Token System + Theming: introduced semantic token aliases (`--surface`, `--surface-2`, `--surface-3`, `--muted`, `--success`, `--warning`, `--danger`, `--bg-code`, `--text-strong`, `--focus-ring`) mapped onto the existing palette, and a Light theme that recolors purely via token overrides (layout/structure unchanged). Hardcoded dark code-surfaces (`#0a0d12`) now use `var(--bg-code)` so they adapt to the theme. Renderer never invents a theme — it applies the persisted user preference.
+- B32 Density: Comfortable / Compact density via `data-density` attribute; Compact tightens row height / padding without structural changes.
+- B33 Accessibility (partial): `prefers-reduced-motion` respected (animations/transitions disabled), and visible `:focus-visible` focus rings on all interactive controls.
+- B2 Layout/appearance persistence (partial): theme + density persist through `settings:get`/`settings:set` (`ui.theme`, `ui.density`) and are restored at boot before first paint (`theme.init()`), with `system` following `prefers-color-scheme` live.
+- Appearance controls added to the Settings page (主题：深色/浅色/跟随系统；密度：舒适/紧凑).
+- E2E proof: new `gui-main-path` case 10 switches theme→light + density→compact in a real Electron window, asserts `html[data-theme]`/`html[data-density]` update and `ui.theme` persists, then restores defaults; full E2E now 66/66. No existing DOM contract broken.
+
+Remaining Phase B (B1 workbench shell/activity bar, B4 file explorer, B5–B9 task workspace/action cards/diff/run center/run tree, B10–B23 permission/workflow/generator/agents/connections/computer/diagnostics/error-center, B24–B30 palette/keyboard/quick-open/composer/onboarding/boot, B34–B48 responsive/perf/subscription/status-vocabulary/i18n, B49–B61 expanded E2E + GUI smoke/soak + production scenarios, B62–B72 docs/gates) is NOT_STARTED and will not be claimed until each has observable proof.
+
 ## v2.9.8 — Real Project Reliability
 
 ### Final Reliability Closure (Phase A)

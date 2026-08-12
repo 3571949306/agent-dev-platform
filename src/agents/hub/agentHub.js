@@ -188,23 +188,31 @@ function createAgentHub(opts = {}) {
     });
 
     // v2.7.1 — Project Mutation Lock：在 adapter.startTask 之前获取锁
+    // v2.9.8 R7 — 委派重入：父 Run 已持有该 projectRoot 写锁时，其委派 Child 在父锁
+    // 之下执行（不重复获取、也不释放父锁）。其他 Run（含其他父的 Child）仍严格互斥。
     let lockAcquired = false;
     if (projectLock && task.projectRoot) {
-      const isWrite = needsWriteLock(task);
-      const lockResult = isWrite
-        ? projectLock.acquireWrite(task.projectRoot, runId, agentId)
-        : projectLock.acquireRead(task.projectRoot, runId, agentId);
-      if (!lockResult.ok) {
-        // 锁被其他 Run 持有——不启动任务
-        runBridge.finishAgentRun(runId, 'failed', 'PROJECT_LOCKED');
-        return {
-          error: 'PROJECT_LOCKED',
-          errorCode: 'PROJECT_LOCKED',
-          lockHolder: lockResult.lockHolder,
-          runId
-        };
+      const holder = typeof projectLock.getLockHolder === 'function'
+        ? projectLock.getLockHolder(task.projectRoot)
+        : null;
+      const parentHoldsLock = !!(task.parentRunId && holder && holder.runId === task.parentRunId);
+      if (!parentHoldsLock) {
+        const isWrite = needsWriteLock(task);
+        const lockResult = isWrite
+          ? projectLock.acquireWrite(task.projectRoot, runId, agentId)
+          : projectLock.acquireRead(task.projectRoot, runId, agentId);
+        if (!lockResult.ok) {
+          // 锁被其他 Run 持有——不启动任务
+          runBridge.finishAgentRun(runId, 'failed', 'PROJECT_LOCKED');
+          return {
+            error: 'PROJECT_LOCKED',
+            errorCode: 'PROJECT_LOCKED',
+            lockHolder: lockResult.lockHolder,
+            runId
+          };
+        }
+        lockAcquired = true;
       }
-      lockAcquired = true;
     }
 
     // 4. 调用 adapter.startTask，传入 task context

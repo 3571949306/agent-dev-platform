@@ -140,6 +140,10 @@ class RunManager {
     run.status = status;
     run.stage = status;
     run.terminalAt = Date.now();
+    // v2.9.8 R8 — Terminal Audit Truth：每个终态必须可审计——谁终结了它
+    // （source）以及从创建到终态的真实时长（durationMs），不允许静默消失。
+    run.terminalSource = source || 'finish';
+    run.durationMs = run.terminalAt - run.startedAt;
     run.updatedAt = Date.now();
     run.lastActivityAt = Date.now();
     if (error) run.error = String(error);

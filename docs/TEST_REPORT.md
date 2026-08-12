@@ -1,4 +1,42 @@
-# Test Report — Agent Dev Platform (v2.9.7)
+# Test Report — Agent Dev Platform (v2.9.8)
+
+## v2.9.8 — Real Project Reliability Final Completion (2026-08-12)
+
+Starting HEAD: `a96c4d76501c6a075e505d9d0240b0df03955a01` (v2.9.7 Architecture FROZEN，R0-R5 已提交)。本轮只完成 R6/R7/R8，禁止重做 R0-R5；之前的 Cancellation Reliability / Bounded Long-Task Execution / Terminal Audit / Restart Truth 作为 R6/R8 Supplemental Proof 保留。全部使用 fake network provider + real production runtime，paid provider calls = 0，无外部网络依赖。
+
+| Requirement | Deterministic proof | Status |
+| --- | --- | --- |
+| R0 Baseline / Flake | provider-abort critical 重复门 20/20 PASS（`scripts/reliability-repeat.js provider-abort 20`） | VERIFIED |
+| R1 Dirty Worktree | 真实脏 Git 项目（tracked/staged/untracked 三类 marker）经真实 Agent Run 逐字节保留；HEAD 不变、零 stash、零破坏性 Git spawn | VERIFIED |
+| R2 Checkpoint | checkpoint create 非变异（HEAD/index/worktree/status 全不变）；按 checkpoint_id 精确恢复 A→S0、B→S1；非 Git 项目 CHECKPOINT_UNSUPPORTED | VERIFIED |
+| R3 Mutation Safety | stale write 拒绝（FILE_CHANGED_SINCE_READ，外部 marker 保留）；原子写故障注入后原文件字节不变；create 独占；move/copy 碰撞拒绝 | VERIFIED |
+| R4 Verification Truth | 旧 PASS / 新鲜 FAIL 均不得完成；fail→repair→pass 真实修复环；verificationStatus 真话（PASS/FAIL/NOT_AVAILABLE） | VERIFIED |
+| R5 Failure Recovery | 瞬态重试有界（最多 2 次/决策）；权限/安全类零重试；cancel 后零迟到调用 | VERIFIED |
+| R6 Hang / Cancel / Cleanup | R6-A 模型挂死→configured timeout 兑现 timeout 终态；R6-B/E 真实终端子进程取消/超时后进程树全杀（迟到副作用文件不出现）；R6-C Dynamic Child 挂死→child budget 兑现、parent 诚实失败绝不假装 Child 成功；R6-D/F 模型/委派期间取消（abort 到达 provider、child 级联取消）；R6-G 验证期间取消（Completion Policy 绝不完成）；Restart Truth：Run/Workflow/Generator 冷启动诚实终态且零重放；每种终止后资源全清零（activeRuns/Dynamic/AgentHub/locks/approvals/child processes/retry timers = 0） | VERIFIED |
+| R7 Project Lock / Isolation | ProductEntry 真实链：同项目争用 Run B mutation exec = 0（fail busy PROJECT_LOCKED）；cancel/failure 后锁 = 0；不同项目零假争用；holder = 真实 runId/agentId/canonical projectRoot（conversationId 不得伪装） | VERIFIED |
+| R8 Real Project Matrix + Soak | ProductEntry.mainAgent.run → 真实 filesystem mutation → 真实 `node --test` FAIL → Repair → PASS → Completion Policy → completed（Entry=ProductEntry）；脏 Git/同文件编辑/stale verification/外部并发编辑/取消+真实子进程/锁隔离全矩阵；`test:reliability:production` 10/10；soak 20/20 fresh repos（每轮含资源清零证明） | VERIFIED |
+
+本轮发现的真实缺陷及修复（均由上述 Proof 暴露）：
+
+1. **ProviderModelAdapter 挂死无兑底**：provider 永不 settle 时 run 跟着挂死 → 新增有界结算（configured timeout / abort 竞速，超时计时器 unref）。
+2. **Main Run 不拿项目锁**：两个 Main Run 可并发写同一项目 → ProjectMutationLock 接入 MainAgentService 生产链（fail busy），终态统一释放；AgentHub 支持委派 Child 在父锁下重入执行。
+3. **Child 失败被静默吞掉**：delegate timeout/failed/cancelled 后 parent 可直接 completed（假装 Child 成功）→ 该类失败进入 repair 通道，完成策略拒绝带未解决问题的 complete；guard/策略拦截保持工具反馈语义（hookProduction 场景 C 兼容）。
+4. **锁 holder 不可审计**：getLockHolder 补 canonical projectRoot 字段（R7-E）。
+
+Repetition / Flake Gates（串行，任何一次失败即整体 FAIL，禁止只重跑失败轮）：
+
+```text
+npm test:                        3/3 PASS（1662 tests，1661 pass / 0 fail / 1 skip）
+Provider abort critical:         20/20 PASS
+Reliability Production:          10/10 PASS（每轮 21 条机器 Proof token 全匹配）
+Reliability Soak:                20/20 fresh repos PASS（每轮资源清零）
+```
+
+架构冻结保持：`test:architecture` / `test:architecture-policy` PASS（DEFAULT_DENY，unsafe duplicates = 0，合成未知生产路径 ALL BLOCKED）；frozenAtVersion = 2.9.7 不变，仅 currentPackageVersion → 2.9.8。未新增任何 framework/runtime/router/engine；仅 helper / test fixture / production guard / metadata。
+
+最终发布门（严格串行）：npm test → dynamic-agent(:production) → model-router(:production) → skill(:production) → hook(:production) → workflow(:production) → generator(:production) → architecture(:policy) → product(:production) → reliability(:production)(:soak) → 重复门 → e2e → dist，全部 PASS（见仓库根提交记录与 `scripts/reliability-production-smoke.js` 输出的机器 Proof）。
+
+Next: Unified GUI / UX (P2)。
 
 ## v2.9.7 — Architecture Freeze + Productization Baseline (2026-08-11)
 

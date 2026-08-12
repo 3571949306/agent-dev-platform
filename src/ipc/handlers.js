@@ -732,6 +732,9 @@ function register(window) {
     activeRuns, requestPermission,
     getCurrentProject: () => currentProjectId ? store.projects.get(currentProjectId) : null,
     getAgentFull, PermissionEngine,
+    // v2.9.8 R7 — 与 AgentHub / Workflow 共用同一把 ProjectMutationLock 单例：
+    // Main Run 与委派/工作流 Run 在同一 projectRoot 上严格互斥，不同项目互不阻塞。
+    projectMutationLock: projectLock,
     // v2.9.3 Skill Engine（R7）— Main Agent 支持 requestedSkillIds
     skillRegistry, skillResolver,
     hookEngine,

@@ -53,6 +53,22 @@ class TerminalManager {
     return true;
   }
   status(runId) { const r = this.runs.get(runId); return r ? { id: r.id, status: r.status, exitCode: r.exitCode } : null; }
+  /**
+   * v2.9.8 R6 — Owned Child Process Truth：仍存活的受管子进程计数。
+   * 只有 status='running' 的记录持有活 child；exited/killed/aborted/timeout
+   * 均意味着进程树已终。终止后残留的记录仅是审计元数据，会随 close 事件结算。
+   */
+  activeCount() {
+    let n = 0;
+    for (const r of this.runs.values()) if (r.status === 'running') n++;
+    return n;
+  }
+  /** v2.9.8 R6 — 清理已终态的审计记录（仅删非 running 条目，不碰活进程）。 */
+  pruneTerminal() {
+    for (const [id, r] of [...this.runs.entries()]) {
+      if (r.status !== 'running') this.runs.delete(id);
+    }
+  }
 }
 
 const terminalManager = new TerminalManager();

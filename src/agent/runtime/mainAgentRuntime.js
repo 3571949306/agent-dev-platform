@@ -78,6 +78,29 @@ function runMainAgent(opts) {
     }
   }
 
+  // v2.9.8 R7 — Project Lock / Run Isolation：Main Run 在启动前获取项目写锁。
+  // 锁 holder 绑定真实身份（runId + agentId + canonical projectRoot），绝不用
+  // conversationId 伪装。获取失败（另一 Run 持锁）= fail busy：诚实 failed(PROJECT_LOCKED)，
+  // 零 mutation。释放统一在后台 loop 的 finally（完成/取消/失败/超时都释放）。
+  const projectMutationLock = opts.projectMutationLock || null;
+  let projectLockHeld = false;
+  if (projectMutationLock && projectRoot) {
+    const lockResult = projectMutationLock.acquireWrite(projectRoot, runId, agentId || 'native-main');
+    if (!lockResult.ok) {
+      const holder = lockResult.lockHolder || null;
+      try {
+        runManager.finishRun(runId, 'failed', {
+          source: 'projectMutationLock',
+          error: 'PROJECT_LOCKED: 项目正被另一个 Run 修改（holder=' + (holder ? holder.runId : 'unknown') + '）',
+          message: '项目写锁被占用，任务未启动'
+        });
+      } catch { /* Late Result Guard */ }
+      emitTerminalEvent(emit, runId, { status: 'failed', error: 'PROJECT_LOCKED', errorCode: 'PROJECT_LOCKED' });
+      return { runId, conversationId, locked: false, lockHolder: holder };
+    }
+    projectLockHeld = true;
+  }
+
   const lim = limits || createLimits({ maxRuntimeMs: timeoutMs || lim0() });
   const plan = createPlan(goal, initialPlan || []);
   const blackboard = createBlackboard(goal);
@@ -153,6 +176,7 @@ function runMainAgent(opts) {
       // fail-closed：Skill 解析失败 → Run 直接失败，绝不静默继续
       try { runManager.finishRun(runId, 'failed', { error: error.message, source: 'skillResolution' }); } catch { /* Late Result Guard */ }
       emitTerminalEvent(emit, runId, { status: 'failed', error: error.message, errorCode: error.code });
+      if (projectLockHeld) { try { projectMutationLock.release(runId); } catch { /* noop */ } projectLockHeld = false; }
       throw error;
     }
   }
@@ -173,6 +197,7 @@ function runMainAgent(opts) {
       const error = new Error('HOOK_ENGINE_UNAVAILABLE: Hook Engine is not initialized');
       error.code = 'HOOK_ENGINE_UNAVAILABLE';
       try { runManager.finishRun(runId, 'failed', { error: error.message, source: 'hookResolution' }); } catch { /* terminal gate */ }
+      if (projectLockHeld) { try { projectMutationLock.release(runId); } catch { /* noop */ } projectLockHeld = false; }
       throw error;
     }
     const selection = hookEngine.resolver.resolveSelection({ hookIds: requestedHookIds });
@@ -180,6 +205,7 @@ function runMainAgent(opts) {
       const error = new Error(`${selection.errorCode}: ${selection.error}`);
       error.code = selection.errorCode;
       try { runManager.finishRun(runId, 'failed', { error: error.message, source: 'hookResolution' }); } catch { /* terminal gate */ }
+      if (projectLockHeld) { try { projectMutationLock.release(runId); } catch { /* noop */ } projectLockHeld = false; }
       throw error;
     }
     ctx.hookEngine = hookEngine;
@@ -320,6 +346,11 @@ function runMainAgent(opts) {
       } catch { /* run_end observers cannot alter terminal truth */ }
       if (timeoutTimer) clearTimeout(timeoutTimer);
       if (opts.unregisterAbort) opts.unregisterAbort(conversationId);
+      // v2.9.8 R7 — 终态后释放项目写锁（完成/取消/失败/超时统一路径，锁绝不陪葬）
+      if (projectLockHeld) {
+        try { projectMutationLock.release(runId); } catch { /* noop */ }
+        projectLockHeld = false;
+      }
       // §78-85: Orchestrator 生命周期收口 — dispose（清 child/timer/listener）+ unregister（避免 registry 泄漏）
       if (_orch) {
         try { await _orch.dispose(); } catch { /* noop */ }

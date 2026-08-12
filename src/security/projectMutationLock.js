@@ -247,15 +247,16 @@ function createProjectMutationLock() {
 
   /**
    * 获取 projectRoot 上的写锁持有者信息。
+   * v2.9.8 R7-E — holder 必须可审计到真实身份：runId / agentId / canonical projectRoot。
    * @param {string} projectRoot
-   * @returns {{ runId, agentId, acquiredAt } | null}
+   * @returns {{ runId, agentId, projectRoot, acquiredAt } | null}
    */
   function getLockHolder(projectRoot) {
     const key = canonical(projectRoot);
     if (!key) return null;
     const wl = writeLocks.get(key);
     if (!wl) return null;
-    return { runId: wl.runId, agentId: wl.agentId, acquiredAt: wl.acquiredAt };
+    return { runId: wl.runId, agentId: wl.agentId, projectRoot: wl.projectRoot, acquiredAt: wl.acquiredAt };
   }
 
   /**

@@ -76,6 +76,22 @@ function evaluateActionResult(action, result) {
     };
   }
 
+  // v2.9.8 R6-C — Child 真实进入执行却未成功（timeout/failed/cancelled）绝不允许被静默吞掉：
+  // 进入 repair 通道并把失败记入 blackboard 未解决问题，完成策略会拒绝
+  // 「假装 Child 成功」的 complete；模型可修复/重试，否则以 repair 上限诚实失败。
+  // 区分于策略/守卫拦截（HOOK_BLOCKED、PERMISSION_DENIED、DELEGATE_START_FAILED 等）：
+  // 那些是「Child 从未启动」的工具反馈，父 Agent 观察后自行决策（与其他工具失败同语义）。
+  if (action && action.type === 'delegate' && result && result.ok === false
+      && result.error && /^DELEGATE_(TIMEOUT|FAILED|CANCELLED|INTERRUPTED|UNAVAILABLE)$/.test(result.error.code || '')) {
+    return {
+      needsRepair: true,
+      repairReason: `委派任务失败: ${result.error.code}（${result.error.message || ''}）`,
+      isTestFailure: false,
+      fatal: false,
+      fatalReason: ''
+    };
+  }
+
   return { needsRepair: false, repairReason: '', isTestFailure: false, fatal: false, fatalReason: '' };
 }
 

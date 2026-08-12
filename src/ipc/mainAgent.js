@@ -66,7 +66,7 @@ function bindMainRouteDecision({ selection, bindRouteDecisionToRun, runId, conve
  * }
  */
 function register(deps, registrar = reg) {
-  const { store, emit, runManager, getTool, buildProvider, resolveModelFor, resolveRuntimeModel, bindRouteDecisionToRun, activeRuns, requestPermission, getCurrentProject, getAgentFull, PermissionEngine, skillRegistry, skillResolver, hookEngine, availableToolNames } = deps;
+  const { store, emit, runManager, getTool, buildProvider, resolveModelFor, resolveRuntimeModel, bindRouteDecisionToRun, activeRuns, requestPermission, getCurrentProject, getAgentFull, PermissionEngine, skillRegistry, skillResolver, hookEngine, availableToolNames, projectMutationLock } = deps;
   const handlers = {};
   const expose = (channel, fn) => {
     handlers[channel] = fn;
@@ -125,6 +125,9 @@ function register(deps, registrar = reg) {
       hookIds: Array.isArray(hookIds) ? hookIds : undefined,
       hookEngine,
       availableToolNames,
+      // v2.9.8 R7 — Project Lock / Run Isolation：Main Run 启动前拿项目写锁（fail busy），
+      // 终态（completed/failed/cancelled/timeout）统一在 runtime finally 释放。
+      projectMutationLock: projectMutationLock || null,
       onRunCreated: ({ runId: actualRunId }) => {
         bindMainRouteDecision({ selection: modelSelection, bindRouteDecisionToRun, runId: actualRunId, conversationId });
       },

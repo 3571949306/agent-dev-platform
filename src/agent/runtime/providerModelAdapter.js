@@ -31,7 +31,7 @@ function createProviderModelAdapter(opts) {
       let text = '';
       const buf = [];
       try {
-        const result = await provider.streamResponse({
+        const streamPromise = provider.streamResponse({
           model: modelInfo.model,
           system,
           messages,
@@ -41,14 +41,77 @@ function createProviderModelAdapter(opts) {
           signal: abortSignal,
           onChunk: (t) => { buf.push(t); }
         });
+        // v2.9.8 R6-A — Model Hang Guard：configured timeout 必须在 adapter 层真兑现。
+        // 守规矩的 provider（http 传输层）会自己按 timeoutMs/signal 结算；但若 provider
+        // 永不 settle（挂死、忽略 abort），run 绝不能跟着挂死——用超时/abort 竞速强制结算。
+        const result = await settleBounded(streamPromise, timeoutMs, abortSignal);
         text = buf.join('') || result.content || '';
       } catch (e) {
         if (abortSignal && abortSignal.aborted) throw e;
-        throw new Error('模型请求失败: ' + (e.message || e));
+        throw e && e.timeout === true ? e : new Error('模型请求失败: ' + (e.message || e));
       }
       return { text };
     }
   };
+}
+
+/**
+ * v2.9.8 R6-A — 有界结算：provider promise 与 configured timeout / abort signal 竞速。
+ * 超时抛出带 timeout=true 的错误（AgentLoop 归类为 timeout 终态）；
+ * abort 抛出 AbortError（归类为 cancelled）。provider 先 settle 时计时器立即清除。
+ */
+function settleBounded(streamPromise, timeoutMs, abortSignal) {
+  const ms = Number(timeoutMs);
+  const hasTimeout = Number.isFinite(ms) && ms > 0;
+  const hasSignal = abortSignal && typeof abortSignal.addEventListener === 'function';
+  if (!hasTimeout && !hasSignal) return streamPromise;
+
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let timer = null;
+    let onAbort = null;
+    const cleanup = () => {
+      if (timer) { clearTimeout(timer); timer = null; }
+      if (onAbort && hasSignal) {
+        try { abortSignal.removeEventListener('abort', onAbort); } catch { /* noop */ }
+      }
+    };
+    const done = (fn, value) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      fn(value);
+    };
+    streamPromise.then(
+      value => done(resolve, value),
+      err => done(reject, err)
+    );
+    if (hasTimeout) {
+      timer = setTimeout(() => {
+        const e = new Error(`model request timeout (${ms}ms)`);
+        e.name = 'TimeoutError';
+        e.timeout = true;
+        done(reject, e);
+      }, ms);
+      if (timer.unref) timer.unref(); // 绝不为请求超时留住事件循环
+    }
+    if (hasSignal) {
+      if (abortSignal.aborted) {
+        const e = new Error('aborted');
+        e.name = 'AbortError';
+        e.aborted = true;
+        done(reject, e);
+        return;
+      }
+      onAbort = () => {
+        const e = new Error('aborted');
+        e.name = 'AbortError';
+        e.aborted = true;
+        done(reject, e);
+      };
+      try { abortSignal.addEventListener('abort', onAbort, { once: true }); } catch { onAbort = null; }
+    }
+  });
 }
 
 module.exports = { createProviderModelAdapter };

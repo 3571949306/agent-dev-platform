@@ -115,6 +115,12 @@ async function runAgentLoop(deps) {
         safeEmit(emit, EVENTS.RUN_STARTED, { runId, conversationId: ctx.conversationId, goal: blackboard.goal });
       }
 
+      // v2.9.8 R7：run 总超时触发后（超时定时器已把 run 标记 timeout 并 abort），
+      // 循环必须在当前迭代内立即退出，而不是拖到下一迭代才结算。
+      if (ctx.abortSignal && ctx.abortSignal.aborted) {
+        return finish('cancelled', { summary: '用户已停止' });
+      }
+
       // 2. 构建上下文
       setState('READING_CONTEXT');
       const compacted = compact(toolResults);

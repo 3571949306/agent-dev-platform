@@ -1,19 +1,24 @@
-// v2.9.9 Phase B（B24/B25）— Command Palette + 全局键盘快捷键。
-// Palette 只做「导航 / 既有用户动作」入口，绝不绕过 Permission，也不创造运行时事实。
-// 全部命令复用既有 DOM 动作（点击按钮 / pages.open / panels.activate），不引入第二套 IPC。
-import { $, $$ } from './util.js';
+// v2.9.9 Phase B（B24/B25/B26）— Command Palette + Quick Open + 全局键盘快捷键。
+// 两种模式复用同一 UI / 键位：
+//   - commands：命令面板（Ctrl+Shift+P），导航/既有用户动作，绝不绕过 Permission；
+//   - files：Quick Open（Ctrl+P），项目内文件搜索并打开只读预览。
+// 全部动作复用既有能力（pages.open / panels.activate / files.preview / files:listAll），不引入第二套 IPC。
+import { $ } from './util.js';
+import { api } from './api.js';
 import * as panels from './panels.js';
 import * as pages from './pages.js';
+import * as files from './files.js';
 
 let inputEl = null;
 let listEl = null;
-let hintEl = null;
-let commands = [];
-let filtered = [];
-let selIndex = 0;
 let isOpen = false;
+let mode = 'commands';           // 'commands' | 'files'
+let commands = [];
+let items = [];                  // 当前模式过滤后的条目
+let selIndex = 0;
+let fileCache = null;            // Quick Open 文件列表缓存（B36：只在打开时拉取一次）
 
-/* ---------------- layout helpers（B24 引用的面板切换） ---------------- */
+/* ---------------- layout helpers ---------------- */
 function toggleBottom(tab) {
   const bottom = $('#bottom');
   if (!bottom) return;
@@ -38,6 +43,7 @@ function buildCommands() {
     { id: 'project.open', label: '打开项目', run: () => $('#btn-project') && $('#btn-project').click() },
     { id: 'chat.new', label: '新对话', hint: 'Ctrl+N', run: () => $('#btn-newchat') && $('#btn-newchat').click() },
     { id: 'run.stop', label: '停止当前运行', run: () => clickIfVisible('#btn-stop') },
+    { id: 'quickopen', label: '快速打开文件…', hint: 'Ctrl+P', run: () => openFiles() },
     { id: 'page.dashboard', label: '打开 总览', run: () => pages.open('dashboard') },
     { id: 'page.connections', label: '打开 API 连接', run: () => pages.open('connections') },
     { id: 'page.agents', label: '打开 智能体', run: () => pages.open('agents') },
@@ -64,29 +70,48 @@ function ensureDom() {
   wrap.className = 'hidden';
   wrap.innerHTML = `
     <div class="cp-box" role="dialog" aria-label="命令面板">
-      <input id="cp-input" type="text" autocomplete="off" spellcheck="false" placeholder="输入命令…（Esc 关闭）" aria-label="命令搜索">
+      <input id="cp-input" type="text" autocomplete="off" spellcheck="false" aria-label="搜索">
       <div id="cp-list" role="listbox"></div>
       <div id="cp-hint" class="muted small">↑↓ 选择 · Enter 执行 · Esc 关闭</div>
     </div>`;
   document.body.appendChild(wrap);
   inputEl = $('#cp-input');
   listEl = $('#cp-list');
-  hintEl = $('#cp-hint');
-  wrap.addEventListener('mousedown', e => { if (e.target === wrap) closePalette(); });
+  wrap.addEventListener('mousedown', e => { if (e.target === wrap) close(); });
   inputEl.addEventListener('input', () => { selIndex = 0; renderList(); });
 }
 
-function renderList() {
+/* ---------------- data source ---------------- */
+async function loadFiles() {
+  if (fileCache) return fileCache;
+  try {
+    const r = await api.listAllFiles();
+    fileCache = (r && r.files) || [];
+  } catch { fileCache = []; }
+  return fileCache;
+}
+
+function applyFilter() {
   const q = (inputEl.value || '').trim().toLowerCase();
-  filtered = q ? commands.filter(c => c.label.toLowerCase().includes(q) || c.id.toLowerCase().includes(q)) : commands.slice();
-  if (selIndex >= filtered.length) selIndex = 0;
-  listEl.innerHTML = filtered.length
-    ? filtered.map((c, i) => `<div class="cp-item${i === selIndex ? ' sel' : ''}" role="option" data-i="${i}">
+  if (mode === 'files') {
+    const src = fileCache || [];
+    items = (q ? src.filter(p => p.toLowerCase().includes(q)) : src).slice(0, 80)
+      .map(p => ({ id: p, label: p, isFile: true }));
+  } else {
+    items = q ? commands.filter(c => c.label.toLowerCase().includes(q) || c.id.toLowerCase().includes(q)) : commands.slice();
+  }
+  if (selIndex >= items.length) selIndex = 0;
+}
+
+function renderList() {
+  applyFilter();
+  listEl.innerHTML = items.length
+    ? items.map((c, i) => `<div class="cp-item${i === selIndex ? ' sel' : ''}" role="option" data-i="${i}">
         <span class="cp-label">${c.label}</span>${c.hint ? `<span class="cp-kbd">${c.hint}</span>` : ''}
       </div>`).join('')
-    : '<div class="cp-empty muted">无匹配命令</div>';
+    : `<div class="cp-empty muted">${mode === 'files' ? '无匹配文件' : '无匹配命令'}</div>`;
   listEl.querySelectorAll('.cp-item').forEach(n => {
-    n.onclick = () => exec(filtered[Number(n.dataset.i)]);
+    n.onclick = () => exec(items[Number(n.dataset.i)]);
     n.onmouseenter = () => { selIndex = Number(n.dataset.i); paintSel(); };
   });
 }
@@ -96,24 +121,44 @@ function paintSel() {
   if (sel && sel.scrollIntoView) sel.scrollIntoView({ block: 'nearest' });
 }
 
-function openPalette() {
+/* ---------------- open / close ---------------- */
+async function openCommands() {
   ensureDom();
+  mode = 'commands';
   isOpen = true;
   $('#cmd-palette').classList.remove('hidden');
+  inputEl.placeholder = '输入命令…（Esc 关闭）';
   inputEl.value = '';
   selIndex = 0;
   renderList();
   inputEl.focus();
 }
-function closePalette() {
+async function openFiles() {
+  ensureDom();
+  mode = 'files';
+  isOpen = true;
+  $('#cmd-palette').classList.remove('hidden');
+  inputEl.placeholder = '搜索项目文件…（Esc 关闭）';
+  inputEl.value = '';
+  selIndex = 0;
+  listEl.innerHTML = '<div class="cp-empty muted">加载文件列表…</div>';
+  inputEl.focus();
+  await loadFiles();
+  if (isOpen && mode === 'files') renderList();
+}
+function close() {
   isOpen = false;
   const el = $('#cmd-palette');
   if (el) el.classList.add('hidden');
 }
-function exec(cmd) {
-  if (!cmd) return;
-  closePalette();
-  try { cmd.run(); } catch (e) { console.error('palette command failed', cmd.id, e); }
+
+async function exec(item) {
+  if (!item) return;
+  close();
+  try {
+    if (item.isFile) await files.preview(item.id);
+    else if (typeof item.run === 'function') item.run();
+  } catch (e) { console.error('palette exec failed', item.id, e); }
 }
 
 /* ---------------- keyboard ---------------- */
@@ -125,21 +170,22 @@ function onKey(e) {
   const mod = e.ctrlKey || e.metaKey;
   // 面板已打开：优先处理导航/执行键（Enter / 箭头 / Esc 无需修饰键）。
   if (isOpen) {
-    if (e.key === 'Escape') { e.preventDefault(); closePalette(); return; }
-    if (e.key === 'ArrowDown') { e.preventDefault(); selIndex = Math.min(selIndex + 1, filtered.length - 1); paintSel(); return; }
+    if (e.key === 'Escape') { e.preventDefault(); close(); return; }
+    if (e.key === 'ArrowDown') { e.preventDefault(); selIndex = Math.min(selIndex + 1, items.length - 1); paintSel(); return; }
     if (e.key === 'ArrowUp') { e.preventDefault(); selIndex = Math.max(selIndex - 1, 0); paintSel(); return; }
-    if (e.key === 'Enter') { e.preventDefault(); exec(filtered[selIndex]); return; }
-    if (mod && e.shiftKey && String(e.key || '').toLowerCase() === 'p') { e.preventDefault(); closePalette(); return; }
-    return; // 其余按键（输入字符）交给 palette 输入框用于过滤
+    if (e.key === 'Enter') { e.preventDefault(); exec(items[selIndex]); return; }
+    if (mod && e.shiftKey && String(e.key || '').toLowerCase() === 'p') { e.preventDefault(); close(); return; }
+    return; // 其余按键（输入字符）交给输入框用于过滤
   }
   // 面板未打开：仅处理带修饰键的全局快捷键。
   if (!mod) return;
   const k = String(e.key || '').toLowerCase();
-  if (e.shiftKey && k === 'p') { e.preventDefault(); e.stopPropagation(); openPalette(); return; }  // Ctrl+Shift+P 唤起
-  if (!e.shiftKey && k === 'j') { e.preventDefault(); toggleBottom('terminal'); return; }          // Ctrl+J 底部面板
-  if (!e.shiftKey && k === 'b') { e.preventDefault(); toggleSidebar(); return; }                   // Ctrl+B 侧边栏
+  if (e.shiftKey && k === 'p') { e.preventDefault(); e.stopPropagation(); openCommands(); return; } // Ctrl+Shift+P 命令面板
+  if (!e.shiftKey && k === 'p') { if (!isTyping(e)) { e.preventDefault(); openFiles(); } return; }   // Ctrl+P Quick Open
+  if (!e.shiftKey && k === 'j') { e.preventDefault(); toggleBottom('terminal'); return; }            // Ctrl+J 底部面板
+  if (!e.shiftKey && k === 'b') { e.preventDefault(); toggleSidebar(); return; }                     // Ctrl+B 侧边栏
   if (e.shiftKey && k === 'e') { if (!isTyping(e)) { e.preventDefault(); activateLeft('files'); } return; } // Ctrl+Shift+E 文件
-  if (e.shiftKey && k === 'r') { e.preventDefault(); toggleBottom('problems'); return; }           // Ctrl+Shift+R 问题/Runs
+  if (e.shiftKey && k === 'r') { e.preventDefault(); toggleBottom('problems'); return; }             // Ctrl+Shift+R 问题/Runs
   if (!e.shiftKey && k === 'n') { if (!isTyping(e)) { e.preventDefault(); $('#btn-newchat') && $('#btn-newchat').click(); } return; } // Ctrl+N 新对话
 }
 
@@ -149,4 +195,4 @@ export function init() {
   document.addEventListener('keydown', onKey, true);
 }
 
-export function toggle() { isOpen ? closePalette() : openPalette(); }
+export function toggle() { isOpen ? close() : openCommands(); }

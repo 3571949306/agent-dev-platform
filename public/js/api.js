@@ -35,6 +35,7 @@ export const api = {
   // files
   tree: (dir) => call('files:tree', dir),
   readFile: (p) => call('files:read', p),
+  listAllFiles: () => call('files:listAll'),
   showItem: (p) => call('shell:showItem', p),
   openExternal: (u) => call('shell:openExternal', u),
 

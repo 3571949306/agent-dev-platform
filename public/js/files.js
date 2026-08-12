@@ -45,7 +45,7 @@ async function renderDir(dir, container, depth) {
   if (!data.items.length) container.innerHTML = `<div class="muted small" style="padding-left:${8 + depth * 12}px">（空目录）</div>`;
 }
 
-async function preview(relPath) {
+export async function preview(relPath) {
   try {
     const f = await api.readFile(relPath);
     const body = f.binary || f.truncated

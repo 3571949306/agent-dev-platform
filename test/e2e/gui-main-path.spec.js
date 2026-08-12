@@ -453,3 +453,30 @@ test('11) 命令面板：Ctrl+Shift+P 唤起、过滤、执行、Esc 关闭', as
   const fatals = pageErrors.filter(e => /Cannot read|TypeError|ReferenceError|is not defined/.test(e));
   expect(fatals).toEqual([]);
 });
+
+// v2.9.9 Phase B（B26）— Quick Open：Ctrl+P 搜索项目文件并打开只读预览。
+test('12) Quick Open：Ctrl+P 搜索项目文件并打开预览', async () => {
+  // 准备一个临时项目（含一个可被搜索到的文件）
+  const projRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'adp-e2e-qo-'));
+  fs.writeFileSync(path.join(projRoot, 'hello-quickopen.js'), 'console.log("hi");\n', 'utf8');
+  // 通过 IPC 创建并打开项目（renderer 不直接接触 fs）
+  const proj = await page.evaluate(async (root) => {
+    const call = async (ch, ...args) => { const r = await window.api.invoke(ch, ...args); return r && r.data !== undefined ? r.data : r; };
+    const p = await call('projects:create', { name: 'QO-' + Date.now(), rootPath: root });
+    return await call('projects:open', p.id);
+  }, projRoot);
+  expect(proj && proj.id, '项目应创建并打开').toBeTruthy();
+  // Ctrl+P 打开 Quick Open（文件模式）
+  await page.keyboard.press('Control+p');
+  await page.waitForSelector('#cmd-palette:not(.hidden)', { timeout: 5000 });
+  await page.fill('#cp-input', 'hello-quickopen');
+  await expect(page.locator('#cp-list')).toContainText('hello-quickopen.js', { timeout: 5000 });
+  // Enter 打开只读预览（modal 出现，标题为文件相对路径）
+  await page.keyboard.press('Enter');
+  await expect(page.locator('#modal')).toContainText('hello-quickopen.js', { timeout: 5000 });
+  // 关闭 modal + 清理临时项目
+  await page.evaluate(() => { const x = document.querySelector('#modal-overlay .modal-x'); if (x) x.click(); });
+  fs.rmSync(projRoot, { recursive: true, force: true });
+  const fatals = pageErrors.filter(e => /Cannot read|TypeError|ReferenceError|is not defined/.test(e));
+  expect(fatals).toEqual([]);
+});

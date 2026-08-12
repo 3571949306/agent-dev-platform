@@ -1008,6 +1008,32 @@ function register(window) {
     return { path: relPath, content: buf.toString('utf8'), size: st.size };
   });
 
+  // v2.9.9 Phase B（B26 Quick Open）— 返回项目内有界（bounded）的相对文件路径平坦列表，
+  // 供 Quick Open 搜索。仅遍历项目根内（从 proj.root_path 起步，天然不越界），跳过
+  // IGNORE_DIRS，最多返回 MAX 条以避免巨型仓库阻塞 renderer。renderer 不直接接触 fs。
+  reg('files:listAll', () => {
+    const proj = currentProjectId ? store.projects.get(currentProjectId) : null;
+    if (!proj) throw new Error('未打开项目');
+    const MAX = 5000;
+    const files = [];
+    const walk = (dir) => {
+      if (files.length >= MAX) return;
+      let entries;
+      try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+      for (const e of entries) {
+        if (files.length >= MAX) return;
+        const full = path.join(dir, e.name);
+        if (e.isDirectory()) {
+          if (!IGNORE_DIRS.has(e.name) && !e.name.startsWith('.')) walk(full);
+        } else if (e.isFile()) {
+          files.push(path.relative(proj.root_path, full).split(path.sep).join('/'));
+        }
+      }
+    };
+    walk(proj.root_path);
+    return { root: proj.root_path, files, truncated: files.length >= MAX };
+  });
+
   // ---------- terminal panel (user-initiated) ----------
   reg('terminal:run', async (command) => {
     const proj = currentProjectId ? store.projects.get(currentProjectId) : null;

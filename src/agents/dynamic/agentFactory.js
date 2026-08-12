@@ -275,7 +275,7 @@ function createAgentFactory(options = {}) {
     return [...instances.values()].reduce((sum, instance) => sum + instance.adapter.activeTimerCount(), 0);
   }
 
-  return { createInstance, registerInstance, disposeInstance, getInstance, listInstances, isDefinitionInUse, activeTimerCount };
+  return { createInstance, registerInstance, disposeInstance, getInstance, listInstances, isDefinitionInUse, activeTimerCount, activeForRoot };
 }
 
 module.exports = { createAgentFactory };

@@ -220,11 +220,22 @@ test('32) Capability Routing：编码任务 → Native / Codex 得分高于 Work
   const workbuddyScore = byId['workbuddy'] ? byId['workbuddy'].score : null;
 
   expect(nativeScore, 'Native 应在候选中').not.toBeNull();
-  expect(codexScore, 'Codex 应在候选中').not.toBeNull();
   expect(workbuddyScore, 'WorkBuddy 应在候选中').not.toBeNull();
-  // Native 和 Codex 都具备 coding + filesystem，得分应高于 WorkBuddy（缺少 filesystem）
+  // Native 具备 coding + filesystem，得分应高于 WorkBuddy（缺少 filesystem）——与本机是否安装外部 Agent 无关。
   expect(nativeScore).toBeGreaterThan(workbuddyScore);
-  expect(codexScore).toBeGreaterThan(workbuddyScore);
+
+  // Codex 的排序断言只在它真实安装/可用时成立（环境依赖，与 test 31 相同口径）。
+  // Codex 未安装时 healthCheck=UNAVAILABLE 得低分是正确行为，不得断言它压过 WorkBuddy，
+  // 否则会把“环境未安装”误判为路由回归。
+  const codexEntry = byId['codex'];
+  const codexUnavailable = !!codexEntry && Array.isArray(codexEntry.penalties) && codexEntry.penalties.some(p => /不可用/.test(p));
+  if (!codexUnavailable) {
+    expect(codexScore, 'Codex 应在候选中').not.toBeNull();
+    expect(codexScore).toBeGreaterThan(workbuddyScore);
+  } else {
+    // Codex 未安装：必须如实携带“不可用” penalty（不伪装就绪）。
+    expect(codexEntry.penalties.some(p => /不可用/.test(p)), 'Codex 未安装应标记不可用').toBe(true);
+  }
 
   // GUI 结果区应展示得分 + reasons
   const resultsText = await page.locator('#hub-route-results').textContent();

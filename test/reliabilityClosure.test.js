@@ -44,6 +44,7 @@ const { createLifecycleManager } = require('../src/agents/hub/lifecycleManager')
 const { createRunBridge } = require('../src/agents/hub/runBridge');
 const { createAgentHub, setAgentHub, getAgentHub } = require('../src/agents/hub/agentHub');
 const { createExecutionContextFactory } = require('../src/agent/orchestrator/executionContextFactory');
+const { get: orchestratorGet } = require('../src/agent/orchestrator');
 const { createPathSecurity } = require('../src/security/pathSecurity');
 const { EVENTS } = require('../src/agent/runtime/runtimeEvents');
 const { DYNAMIC_AGENT_BASE_PROMPT } = require('../src/agent/runtime/prompts/mainCodingAgent');
@@ -168,7 +169,13 @@ function buildClosurePlatform({ timeoutMs = 25000 } = {}) {
     lifecycleManager: lifecycle,
     runBridge: createRunBridge({ runManager, lifecycleManager: lifecycle }),
     contextFactory,
-    projectLock
+    projectLock,
+    // v2.9.8 Final Closure（A5）— 与生产 handlers.js 相同的真实 verifier：
+    // 锁重入必须验证委派源自真实活跃 orchestrator 且 token 匹配。
+    delegationAuthorityVerifier: (parentRunId, token) => {
+      const orch = orchestratorGet(parentRunId);
+      return !!(orch && token && orch.delegationToken === token);
+    }
   });
   const factory = createAgentFactory({
     getTool: getBuiltin,

@@ -79,6 +79,10 @@ function createRunBridge({ runManager, lifecycleManager, emit } = {}) {
     projectRoot, projectId, adapterType = null
   } = {}) {
     // 1. RunManager 创建 Run（status=preparing，立即返回 runId）
+    // v2.9.8 Final Closure（A4）— hub-side 公共身份 run 不重复持久化 lineage：
+    // native child 的真实执行实体（inner run）由 runMainAgent 在 RunManager 中
+    // 记录真实 parentRunId/rootRunId/depth；hub run 再加一份会在 run tree 中
+    // 产生重复 child 节点。RunManager 仍能回答真实 lineage（经 inner run）。
     const run = runManager.createRun({ conversationId, agentId, taskId });
     const runId = run.id;
 
@@ -190,12 +194,34 @@ function createRunBridge({ runManager, lifecycleManager, emit } = {}) {
     return mappings.get(runId) || null;
   }
 
+  /**
+   * v2.9.8 Final Closure（A3/A5）— 真实 lineage 透传：从 RunManager 持久记录
+   * 推导 rootRunId（绝不信任调用方自报的身份）。未知 runId 返回 null。
+   * @param {string} runId
+   * @returns {string|null}
+   */
+  function getRootRunId(runId) {
+    return runManager.getRootRunId(runId);
+  }
+
+  /**
+   * v2.9.8 Final Closure（A5）— 判断 runId 是否真实属于 rootRunId 树。
+   * @param {string} runId
+   * @param {string} rootRunId
+   * @returns {boolean}
+   */
+  function belongsToRoot(runId, rootRunId) {
+    return runManager.belongsToRoot(runId, rootRunId);
+  }
+
   return {
     createAgentRun,
     updateAgentRun,
     finishAgentRun,
     cancelAgentRun,
-    getRunMapping
+    getRunMapping,
+    getRootRunId,
+    belongsToRoot
   };
 }
 

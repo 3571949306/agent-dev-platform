@@ -76,16 +76,17 @@ function evaluateActionResult(action, result) {
     };
   }
 
-  // v2.9.8 R3 — 委派失败分类：
+  // v2.9.8 R3 / Final Closure（A2）— 委派失败分类：
   //  - Pre-start 失败（DYNAMIC_AGENT_DEFINITION_NOT_FOUND、SELF_DELEGATION_BLOCKED、
   //    DELEGATION_DEPTH_EXCEEDED、PROJECT_LOCKED、PERMISSION_DENIED、HOOK_BLOCKED、
   //    DELEGATE_START_FAILED、NO_AVAILABLE_AGENT 等）是「Child 从未启动」的工具反馈，
   //    保持普通 tool feedback 语义，不得进入 repair。
-  //  - Executed-child 失败：Child 真实启动并到达 unsuccessful terminal（timeout/
-  //    failed/cancelled/interrupted），才进入 repair 通道。
-  // 通过 data.runId != null 且 data.status 在 terminal 失败集合中来判定属于 executed-child failure。
+  //  - Executed-child 失败：只有 executionStarted === true（adapter.startTask 真实执行过）
+  //    且到达 unsuccessful terminal（timeout/failed/cancelled/interrupted）才进入 repair。
+  //    禁止用 runId != null 作为 execution started 的证明（AgentHub 在锁/定义失败时
+  //    也会先创建 Run 记录，runId 存在但 adapter 从未执行）。
   if (action && action.type === 'delegate' && result && result.ok === false) {
-    const isExecutedChild = !!result.data && result.data.runId != null &&
+    const isExecutedChild = !!result.data && result.data.executionStarted === true &&
       ['timeout', 'failed', 'cancelled', 'interrupted'].includes(result.data.status);
     if (isExecutedChild) {
       const code = result.error && result.error.code;

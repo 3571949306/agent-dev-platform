@@ -19,6 +19,7 @@ const { createAgentHubBridge } = require('./agentHubBridge');
 const { createAgentTask } = require('./agentTaskContract');
 const { EventEmitter } = require('events');
 const { ORCHESTRATION_EVENT } = require('./events');
+const crypto = require('crypto');
 
 /**
  * 创建 MainAgentOrchestrator 实例（per Parent Run）。
@@ -49,12 +50,18 @@ function createMainAgentOrchestrator(opts) {
   const eventBus = new EventEmitter();
   eventBus.setMaxListeners(50);
 
+  // v2.9.8 Final Closure（A5）— Delegation Authority Token：每个 orchestrator 的
+  // 不可伪造身份。AgentHub 锁重入时验证「该委派确实源自这个活跃 orchestrator」，
+  // 伪造 parentRunId/rootRunId 的独立 Run 拿不到对应 token，无法绕过项目锁。
+  const delegationToken = crypto.randomUUID();
+
   const bridge = createAgentHubBridge({
     hub,
     childRunTracker,
     blackboard,
     parentRunId,
     parentAgentId,
+    delegationToken,
     emit: (type, payload) => {
       // §20: Child events 实时到 GUI + eventBus
       try { eventBus.emit(type, payload); } catch { /* noop */ }
@@ -275,7 +282,8 @@ function createMainAgentOrchestrator(opts) {
     getChildren, cancelAllChildren, cancelChild, finalVerify, complete, dispose,
     blackboard, childRunTracker, bridge, executionContextFactory,
     eventBus,
-    parentRunId, parentAgentId
+    parentRunId, parentAgentId,
+    delegationToken
   };
 }
 

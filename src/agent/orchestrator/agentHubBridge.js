@@ -32,6 +32,7 @@ function createAgentHubBridge(opts) {
   const blackboard = opts && opts.blackboard;
   const parentRunId = (opts && opts.parentRunId) || null;
   const parentAgentId = (opts && opts.parentAgentId) || null;
+  const delegationToken = (opts && opts.delegationToken) || null;
   const emit = (opts && opts.emit) || null;
 
   // §83: dispose 时需要停止轮询，避免 zombie timer
@@ -76,13 +77,17 @@ function createAgentHubBridge(opts) {
    * （如 TestAgentAdapter.finishRun('completed', resultText)）；必须把字符串
    * 结果当作 summary 保留，否则 Child Result 在规范化时被丢弃，Main Agent
    * 永远看不到 reviewer 输出。
+   *
+   * v2.9.8 Final Closure（A2）：executionStarted 显式携带——只有 adapter.startTask
+   * 真实执行过才为 true（runId 存在不代表 execution started）。
    */
-  function normalizeResult(status, result, agentId, runId) {
+  function normalizeResult(status, result, agentId, runId, executionStarted) {
     const r = typeof result === 'string' ? { summary: result } : (result || {});
     return {
       ok: status === 'completed',
       agentId,
       runId,
+      executionStarted: executionStarted === true,
       sessionId: r.sessionId || null,
       status,
       summary: sanitize(typeof r.summary === 'string' ? r.summary : (r.message || '')),
@@ -207,6 +212,9 @@ function createAgentHubBridge(opts) {
       parentRunId,
       parentAgentId,
       rootRunId: agentTask.rootRunId || parentRunId,
+      // v2.9.8 Final Closure（A5）— 携带 orchestrator 授权 token，供 AgentHub
+      // 验证锁重入时「委派确实源自真实活跃 orchestrator」，防伪造 parentRunId 绕锁。
+      delegationToken,
       delegationPath: agentTask.delegationPath,
       readOnly: agentTask.readOnly
     };
@@ -215,12 +223,15 @@ function createAgentHubBridge(opts) {
     try {
       startResult = await hub.start(agentId, hubTask);
     } catch (e) {
-      return { ok: false, status: 'failed', agentId, runId: null, errors: [String(e.message || e)], summary: '启动失败', errorCode: 'CRASH' };
+      return { ok: false, status: 'failed', agentId, runId: null, executionStarted: false, errors: [String(e.message || e)], summary: '启动失败', errorCode: 'CRASH' };
     }
     if (startResult.error) {
+      // v2.9.8 Final Closure（A2）：pre-start 失败（PROJECT_LOCKED/AGENT_NOT_FOUND 等）
+      // 即使携带 runId，execution 也从未开始。
       return {
         ok: false, status: 'failed', agentId,
         runId: startResult.runId || null,
+        executionStarted: false,
         errors: [startResult.error],
         summary: startResult.error,
         errorCode: startResult.errorCode
@@ -253,7 +264,8 @@ function createAgentHubBridge(opts) {
     // await terminal（event-driven，不轮询 DB）
     const { status, result } = await tracker.wait(runId, agentTask.budget.maxRuntimeMs);
 
-    const agentResult = normalizeResult(status, result, agentId, runId);
+    // v2.9.8 Final Closure（A2）：到达这里的 child 均已通过 hub.start 的 adapter.startTask 真实启动
+    const agentResult = normalizeResult(status, result, agentId, runId, true);
 
     // §36: Child Result 写 Blackboard
     if (blackboard) {

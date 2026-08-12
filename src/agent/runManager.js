@@ -178,6 +178,62 @@ class RunManager {
   }
   list() { return [...this.runs.values()]; }
 
+  // -----------------------------------------------------------
+  // v2.9.8 Final Closure（A3）— Authentic Run Tree Lineage Resolver。
+  // Root/parent 身份只能从持久化的 run 记录（parent_run_id/root_run_id）推导，
+  // 绝不信任 task/模型自报的身份。未知 runId 一律返回 null（fail-closed）。
+  // -----------------------------------------------------------
+
+  /**
+   * 获取 runId 的真实父 Run（沿 parentRunId 链，带环保护）。
+   * @param {string} runId
+   * @returns {object|null} 父 run 记录；root 或未知 runId 返回 null
+   */
+  getParentRun(runId) {
+    const run = this.runs.get(runId);
+    if (!run || !run.parentRunId) return null;
+    return this.runs.get(run.parentRunId) || null;
+  }
+
+  /**
+   * 获取 runId 的真实父 runId。
+   * @param {string} runId
+   * @returns {string|null}
+   */
+  getParentRunId(runId) {
+    const parent = this.getParentRun(runId);
+    return parent ? parent.id : null;
+  }
+
+  /**
+   * 获取 runId 的真实 rootRunId（优先沿 parent 链推导到树顶；
+   * 链断裂时回退到记录的 rootRunId 字段；未知 runId 返回 null）。
+   * @param {string} runId
+   * @returns {string|null}
+   */
+  getRootRunId(runId) {
+    let run = this.runs.get(runId);
+    if (!run) return null;
+    const seen = new Set();
+    while (run.parentRunId && this.runs.has(run.parentRunId) && !seen.has(run.parentRunId)) {
+      seen.add(run.id);
+      run = this.runs.get(run.parentRunId);
+    }
+    return run.id || run.rootRunId || null;
+  }
+
+  /**
+   * 判断 runId 是否真实属于 rootRunId 树（推导后的 root 严格相等）。
+   * @param {string} runId
+   * @param {string} rootRunId
+   * @returns {boolean}
+   */
+  belongsToRoot(runId, rootRunId) {
+    if (!runId || !rootRunId) return false;
+    const derived = this.getRootRunId(runId);
+    return derived !== null && derived === rootRunId;
+  }
+
   /** 启动时把数据库里所有非终态 Run 标记为 interrupted（应用上次被关闭）。 */
   interruptStale({ conversationIds = [] } = {}) {
     let stale = [];

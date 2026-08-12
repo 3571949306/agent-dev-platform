@@ -86,7 +86,8 @@ function createAgentHub(opts = {}) {
     registry, router, healthManager,
     lifecycleManager, eventNormalizer, runBridge,
     emit, projectLock,
-    contextFactory   // v2.9.0 §39-40：统一 Adapter context 构建（修复 §7B 缺口）
+    contextFactory,   // v2.9.0 §39-40：统一 Adapter context 构建（修复 §7B 缺口）
+    delegationAuthorityVerifier   // v2.9.8 Final Closure（A5）：(parentRunId, token) => boolean
   } = opts;
 
   if (!registry) throw new Error('createAgentHub: registry 必填');
@@ -188,28 +189,47 @@ function createAgentHub(opts = {}) {
     });
 
     // v2.7.1 — Project Mutation Lock：在 adapter.startTask 之前获取锁
-    // v2.9.8 R4 — 委派重入使用 rootRunId：同一 Root Run Tree 下的所有委派（Main/Child/Grandchild）
-    // 共享同一把 project lock，而不是仅比较 immediate parent。伪造 rootRunId 不可行，
-    // 因为它必须从真实 RunManager lineag / Orchestrator identity 传递而来。
+    // v2.9.8 Final Closure（A5）— Unforgeable Lock Reentrancy：
+    // 禁止用 task.rootRunId（调用方/模型可控文本）声称同树。
+    // child 的真实 root 一律从 RunManager 持久 lineage 推导：task.parentRunId 是
+    // 平台 Orchestrator/Bridge 设置的真实身份（非模型可控），沿它在 RunManager
+    // 中推导到树顶；锁持有者的 root 同样从 RunManager 推导。严格相等才重入；
+    // 任一侧推导失败（未知 runId）= fail-closed：不重入，正常争锁。
+    // 独立 Run 即使伪造 task.rootRunId = holder 的 root，也不会影响推导链，
+    // 其推导出的 root 仍是自己，依旧 PROJECT_LOCKED。
     let lockAcquired = false;
     if (projectLock && task.projectRoot) {
       const holder = typeof projectLock.getLockHolder === 'function'
         ? projectLock.getLockHolder(task.projectRoot)
         : null;
-      const sameRootTree = !!(task.rootRunId && holder && holder.runId === task.rootRunId);
+      let sameRootTree = false;
+      if (task.parentRunId && holder) {
+        const childRealRoot = runBridge.getRootRunId(task.parentRunId);
+        const holderRealRoot = runBridge.getRootRunId(holder.runId);
+        if (childRealRoot && holderRealRoot && childRealRoot === holderRealRoot) {
+          // 真实 lineage 匹配后进一步验证委派授权（orchestrator token）：
+          // 伪造 parentRunId 的独立 Run 拿不到对应活跃 orchestrator 的 token。
+          // verifier 已注入（生产 handlers.js 恒注入）时以验证结果为准；
+          // 未注入时退回 lineage 判定（兼容无 orchestrator 的旧部署）。
+          sameRootTree = typeof delegationAuthorityVerifier === 'function'
+            ? delegationAuthorityVerifier(task.parentRunId, task.delegationToken) === true
+            : true;
+        }
+      }
       if (!sameRootTree) {
         const isWrite = needsWriteLock(task);
         const lockResult = isWrite
           ? projectLock.acquireWrite(task.projectRoot, runId, agentId)
           : projectLock.acquireRead(task.projectRoot, runId, agentId);
         if (!lockResult.ok) {
-          // 锁被其他 Run 持有——不启动任务
+          // 锁被其他 Run 持有——不启动任务（execution 从未开始）
           runBridge.finishAgentRun(runId, 'failed', 'PROJECT_LOCKED');
           return {
             error: 'PROJECT_LOCKED',
             errorCode: 'PROJECT_LOCKED',
             lockHolder: lockResult.lockHolder,
-            runId
+            runId,
+            executionStarted: false
           };
         }
         lockAcquired = true;
@@ -270,6 +290,9 @@ function createAgentHub(opts = {}) {
       });
 
       // 5. 处理启动失败
+      // v2.9.8 Final Closure（A2）— Execution-Started Truth：runId 存在 != execution started。
+      // 只有 adapter.startTask 真实执行且未拒绝时 executionStarted=true；
+      // 此前任何失败（锁/定义/路由/启动异常）一律 executionStarted=false。
       if (startResult && startResult.ok === false) {
         runBridge.finishAgentRun(runId, 'failed', startResult.error || '启动失败');
         if (lockAcquired && projectLock) {
@@ -278,15 +301,16 @@ function createAgentHub(opts = {}) {
         return {
           error: startResult.error || '启动失败',
           errorCode: ec('AGENT_START_FAILED', 'AGENT_START_FAILED'),
-          runId
+          runId,
+          executionStarted: false
         };
       }
 
       // 启动成功：Lifecycle → running
       lifecycleManager.transition(lifecycleRunId, LIFECYCLE.RUNNING);
 
-      // 6. 返回 runId
-      return { runId, agentId };
+      // 6. 返回 runId（executionStarted=true：adapter 真实启动）
+      return { runId, agentId, executionStarted: true };
     } catch (e) {
       // adapter.startTask 抛异常：完成 Run 为 failed，返回 error
       runBridge.finishAgentRun(runId, 'failed', e.message);
@@ -296,7 +320,8 @@ function createAgentHub(opts = {}) {
       return {
         error: e.message,
         errorCode: ec('AGENT_START_FAILED', 'AGENT_START_FAILED'),
-        runId
+        runId,
+        executionStarted: false
       };
     }
   }

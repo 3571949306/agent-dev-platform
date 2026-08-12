@@ -133,7 +133,16 @@ const executionContextFactory = createExecutionContextFactory({
     getNativeMainAgentConfig: () => nativeMainAgentConfigFromStore(store)
   })
 });
-const agentHub = createAgentHub({ registry: agentRegistry, router: agentRouter, healthManager, lifecycleManager, eventNormalizer, runBridge, emit, projectLock, contextFactory: executionContextFactory });
+const agentHub = createAgentHub({
+  registry: agentRegistry, router: agentRouter, healthManager, lifecycleManager, eventNormalizer, runBridge, emit, projectLock, contextFactory: executionContextFactory,
+  // v2.9.8 Final Closure（A5）— Unforgeable Lock Reentrancy：锁重入必须验证
+  // 「委派确实源自 parentRunId 对应的真实活跃 orchestrator」且 token 严格匹配。
+  // 伪造 parentRunId/rootRunId 的独立 Run 拿不到活跃 orchestrator 的 token → 无法绕锁。
+  delegationAuthorityVerifier: (parentRunId, token) => {
+    const orch = orchestratorGet(parentRunId);
+    return !!(orch && token && orch.delegationToken === token);
+  }
+});
 setAgentHub(agentHub);
 // v2.9.2 — one model-resolution entry for Main/Dynamic native runtimes.
 // The router sees public Store metadata only; buildProvider remains the sole credential boundary.

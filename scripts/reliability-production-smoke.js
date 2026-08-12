@@ -95,7 +95,17 @@ const proof = {
     && outputBySuite.reliabilityClosure.includes('errorCode=DYNAMIC_AGENT_DEFINITION_NOT_FOUND'),
   nestedDelegationLockReentrancy: outputBySuite.reliabilityClosure.includes('R4_NESTED_DELEGATION rootRunIdShared=YES'),
   providerTimeoutAbort: outputBySuite.reliabilityClosure.includes('R5_PROVIDER_ABORT observed=true')
-    && outputBySuite.reliabilityClosure.includes('lateResultIgnored=YES')
+    && outputBySuite.reliabilityClosure.includes('lateResultIgnored=YES'),
+  // v2.9.8 FINAL RELIABILITY CLOSURE — PHASE A (A1-A9)
+  a3AuthenticLineage: outputBySuite.reliabilityClosure.includes('A3_LINEAGE derivedRoot=PASS failClosed=PASS'),
+  a2ExecutionStarted: outputBySuite.reliabilityClosure.includes('A2_EXECUTION_STARTED prestartRepair=0'),
+  a6ThreeLevelDelegation: outputBySuite.reliabilityClosure.includes('A6_THREE_LEVEL grandchildExecuted=YES')
+    && outputBySuite.reliabilityClosure.includes('projectLocked=NO'),
+  a5UnforgeableLock: outputBySuite.reliabilityClosure.includes('A5_UNFORGEABLE_LOCK forgedRootAccepted=NO'),
+  a7ForgedRoot: outputBySuite.reliabilityClosure.includes('A7_FORGED_ROOT accepted=NO runBMutationExec=0'),
+  a1TerminalTruthRace: outputBySuite.reliabilityClosure.includes('A1_TERMINAL_TRUTH_RACE status=timeout terminalEvents=1'),
+  a9CancelRaceQuiescence: outputBySuite.reliabilityClosure.includes('A9_CANCEL_RACE interleavedWrites=0')
+    && outputBySuite.reliabilityClosure.includes('releasedAfterQuiescence=YES')
 };
 
 const allOutput = Object.values(outputBySuite).join('\n');

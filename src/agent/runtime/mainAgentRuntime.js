@@ -217,12 +217,17 @@ function runMainAgent(opts) {
   //   AgentHub 不可用（隔离单测）时 orchestrator=null，delegate 回退现有逻辑。
   let _orch = null;
   let _unregister = null;
+  // v2.9.8 Final Closure（A8）— descendant quiescence 探测依赖：保留 hub 与
+  // dynamic factory 引用，finally 中用真实 lifecycle/实例状态作证据。
+  let _hub = null;
+  let _dynamicFactory = null;
   try {
     const { createMainAgentOrchestrator, register, unregister } = require('../orchestrator');
     _unregister = unregister;
     const { getAgentHub } = require('../../agents/hub/agentHub');
     const dynamicRuntime = require('../../agents/dynamic/runtimeRegistry').getDynamicAgentRuntime();
-    const _hub = getAgentHub();
+    _dynamicFactory = (dynamicRuntime && dynamicRuntime.factory) || null;
+    _hub = getAgentHub();
     if (_hub) {
       _orch = createMainAgentOrchestrator({
         hub: _hub, parentRunId: runId, rootRunId: opts.rootRunId || runId, parentAgentId: agentId || 'native-main',
@@ -256,11 +261,13 @@ function runMainAgent(opts) {
   };
 
   // 5. run 总超时定时器
+  // v2.9.8 Final Closure（A1）— abort 携带 reason 区分 timeout 与 user cancel（设计 A），
+  // 但最终 terminal truth 仍以 RunManager 为准（设计 C 兑底）。
   let timeoutTimer = null;
   if (lim.maxRuntimeMs > 0) {
     timeoutTimer = setTimeout(() => {
       if (!ac.signal.aborted) {
-        ac.abort();
+        try { ac.abort({ type: 'timeout', runId }); } catch { ac.abort(); }
         // RunManager 终态用小写（'timeout'），大写会被当作未知终态拒绝。
         try { runManager.finishRun(runId, 'timeout', { source: 'mainAgentTimeout', message: `运行超时 ${lim.maxRuntimeMs}ms` }); } catch { /* Late Result Guard */ }
       }
@@ -334,11 +341,20 @@ function runMainAgent(opts) {
       const terminalStatus = finalRun && finalRun.status ? finalRun.status : (result && result.status);
       emitTerminalEvent(emit, runId, { ...result, status: terminalStatus });
     } catch (e) {
+      // v2.9.8 Final Closure（A1）— Terminal Truth All Exit Paths：
+      // catch 只推断「写入 RunManager 的目标终态」；若 RunManager 已终态（如 timeout
+      // timer 先到），finishRun 被终态门忽略。最终 GUI terminal event 一律以
+      // RunManager finalRun.status 为准，禁止 catch 自己重新声称最终事实。
+      const abortReason = ctx.abortSignal && ctx.abortSignal.reason;
+      const isTimeoutAbort = !!(abortReason && abortReason.type === 'timeout');
       const isAbort = ctx.abortSignal.aborted || /\babort/i.test(e.message || '');
-      const status = isAbort ? 'cancelled' : (/超时|timed?out/i.test(e.message || '') ? 'timeout' : 'failed');
-      try { runManager.finishRun(runId, mapToRunManagerTerminal(status), { source: 'mainAgentCatch', error: e.message }); } catch { /* Late Result Guard */ }
-      emitTerminalEvent(emit, runId, { status, error: e.message, errorCode: e.code });
-      result = { status, error: e.message, errorCode: e.code };
+      const inferred = isTimeoutAbort ? 'timeout'
+        : (isAbort ? 'cancelled' : (/超时|timed?out/i.test(e.message || '') ? 'timeout' : 'failed'));
+      try { runManager.finishRun(runId, mapToRunManagerTerminal(inferred), { source: 'mainAgentCatch', error: e.message }); } catch { /* Late Result Guard */ }
+      const finalRun = runManager.getRun(runId);
+      const truthStatus = finalRun && finalRun.status ? finalRun.status : inferred;
+      emitTerminalEvent(emit, runId, { status: truthStatus, error: e.message, errorCode: e.code });
+      result = { status: truthStatus, error: e.message, errorCode: e.code };
     } finally {
       try {
         const finalRun = runManager.getRun(runId);
@@ -348,8 +364,14 @@ function runMainAgent(opts) {
       } catch { /* run_end observers cannot alter terminal truth */ }
       if (timeoutTimer) clearTimeout(timeoutTimer);
 
-      // v2.9.8 R2 — Parent lock must outlive owned descendants：先取消/等待所有 child，
-      //  再释放项目锁，最后才解注册 abort/runtime bookkeeping。
+      // v2.9.8 R2 / Final Closure（A8）— Parent lock must outlive owned descendants：
+      // 先级联取消所有 running child，然后 bounded 等待 descendant quiescence
+      //（runtime execution + hub lifecycle + dynamic 实例 + terminal 进程全部真实停止），
+      // 再释放项目锁，最后才解注册 abort/runtime bookkeeping。
+      //
+      // 完整 quiescence 探测只对「持有项目锁的 root run」启用（A8 的锁释放门控）。
+      // 重入父锁的 child run 不持有锁，其清理只需等待自己的 descendant tracker 终态，
+      // 否则 child 会反过来等待 root 的 dynamic 实例 dispose，造成交叉等待拖慢 unregister。
       if (_orch) {
         try {
           // 级联取消所有 running child（不等待 dispose 内部再取消）
@@ -357,8 +379,17 @@ function runMainAgent(opts) {
             try { await _orch.cancelChild(childRunId); } catch { /* noop */ }
           });
         } catch { /* noop */ }
-        // bounded 等待 descendant cleanup（最大 5 秒）
-        try { await waitDescendantCleanup(_orch, 5000); } catch { /* noop */ }
+        const quiescenceProbes = projectLockHeld ? {
+          hub: _hub,
+          // 仅计当前 root 树 owned 的 Dynamic 实例
+          dynamicInstanceCount: () => (_dynamicFactory && typeof _dynamicFactory.activeForRoot === 'function')
+            ? _dynamicFactory.activeForRoot(ctx.rootRunId || runId)
+            : 0,
+          // owned terminal 进程计数（全局兑底：任何活进程存在都延迟释放，方向安全）
+          terminalActiveCount: () => require('../../tools/terminal').terminalManager.activeCount()
+        } : {};
+        // bounded 等待 descendant quiescence（最大 5 秒，超时强制继续，绝不无限持锁）
+        try { await waitDescendantCleanup(_orch, 5000, quiescenceProbes); } catch { /* noop */ }
         try { await _orch.dispose(); } catch { /* noop */ }
         try { if (_unregister) _unregister(runId); } catch { /* noop */ }
       }
@@ -432,22 +463,67 @@ function mapToRunManagerTerminal(s) {
 }
 
 /**
- * v2.9.8 R2 — Bounded descendant cleanup wait。
- * 等待 orchestrator 下属的所有 child run 进入终态，最大等待 timeoutMs。
- * 用于保证 root project lock 在任意 owned descendant 仍能 mutate 之前不会释放。
+ * v2.9.8 R2 / Final Closure（A8）— Bounded descendant quiescence wait。
+ *
+ * Child terminal flag != Child execution quiesced。root project lock 只有在
+ * 所有 owned descendant 的 runtime execution / lifecycle / terminal 进程真正
+ * 停止后才能释放。证据链（每项都是真实探测，不是 status 推断）：
+ *   - trackerTerminal：childRunTracker 全部终态（runtime task promise settled）
+ *   - hubLifecycleTerminal：AgentHub lifecycle 不再 active
+ *   - dynamicInstancesZero：Dynamic 实例已 dispose
+ *   - terminalProcessesZero：owned terminal 进程数 = 0
+ * bounded：超过 timeoutMs 强制返回（root terminal truth 保持真实，绝不无限持锁），
+ * 上层已有强制终止机制兑底。
+ * @returns {Promise<{ quiesced: boolean, evidence: object }>}
  */
-async function waitDescendantCleanup(orchestrator, timeoutMs) {
-  if (!orchestrator || !orchestrator.childRunTracker) return;
+async function waitDescendantCleanup(orchestrator, timeoutMs, probes = {}) {
+  const evidence = {
+    trackerTerminal: true,
+    hubLifecycleTerminal: true,
+    dynamicInstancesZero: true,
+    terminalProcessesZero: true
+  };
+  if (!orchestrator || !orchestrator.childRunTracker) return { quiesced: true, evidence };
   const tracker = orchestrator.childRunTracker;
   const deadline = Date.now() + timeoutMs;
   const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+  const TERMINAL = ['completed', 'failed', 'cancelled', 'timeout', 'interrupted'];
   while (Date.now() < deadline) {
-    const children = tracker.getChildren && tracker.getChildren(orchestrator.parentRunId);
-    if (!children || children.length === 0) return;
-    const allTerminal = children.every(childId => tracker.isTerminal(childId));
-    if (allTerminal) return;
-    await sleep(10);
+    const children = (tracker.getChildren && tracker.getChildren(orchestrator.parentRunId)) || [];
+    const allTrackerTerminal = children.every(childId => tracker.isTerminal(childId));
+    evidence.trackerTerminal = allTrackerTerminal;
+
+    // AgentHub lifecycle 探测：child 的 hub run 也必须终态
+    if (allTrackerTerminal && probes.hub && typeof probes.hub.status === 'function') {
+      let allHubTerminal = true;
+      for (const childId of children) {
+        try {
+          const st = await probes.hub.status(childId);
+          if (st && !TERMINAL.includes(st.status)) { allHubTerminal = false; break; }
+        } catch { /* 查不到映射 = 已不在活跃生命周期 */ }
+      }
+      evidence.hubLifecycleTerminal = allHubTerminal;
+    } else if (!probes.hub) {
+      evidence.hubLifecycleTerminal = allTrackerTerminal;
+    }
+
+    // Dynamic 实例探测（仅计当前 root 树 owned 实例，避免被无关 run 干扰）
+    if (typeof probes.dynamicInstanceCount === 'function') {
+      try { evidence.dynamicInstancesZero = probes.dynamicInstanceCount() === 0; } catch { /* best effort */ }
+    }
+
+    // Owned terminal 进程探测（仅计当前 runId，避免被无关 run 干扰）
+    if (typeof probes.terminalActiveCount === 'function') {
+      try { evidence.terminalProcessesZero = probes.terminalActiveCount() === 0; } catch { /* best effort */ }
+    }
+
+    if (allTrackerTerminal && evidence.hubLifecycleTerminal
+        && evidence.dynamicInstancesZero && evidence.terminalProcessesZero) {
+      return { quiesced: true, evidence };
+    }
+    await sleep(20);
   }
+  return { quiesced: false, evidence };
 }
 
 function lim0() { return 10 * 60 * 1000; }

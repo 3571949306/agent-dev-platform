@@ -41,6 +41,17 @@ function clearCompletionPolicyProblems(blackboard) {
 const { composeSystemPromptWithHookContext } = require('./prompts/mainCodingAgent');
 const { dispatchRuntimeHook } = require('../../hooks/runtimeDispatch');
 
+// v2.9.8 Final Closure（A1）— 区分 user cancellation 与 run timeout abort：
+// mainAgentRuntime 的 timeout timer 以 ac.abort({ type: 'timeout' }) 触发，
+// 用户 stop 是普通 abort（无 reason）。loop 据此结算正确的终态语义；
+// 最终 terminal truth 仍由 RunManager 终态门兑底（先到者胜）。
+function abortTerminalStatus(ctx) {
+  const reason = ctx && ctx.abortSignal && ctx.abortSignal.reason;
+  return reason && reason.type === 'timeout'
+    ? { status: 'timeout', summary: '运行超时' }
+    : { status: 'cancelled', summary: '用户已停止' };
+}
+
 /**
  * 运行 Main Agent Loop。
  * @param {object} deps {
@@ -99,7 +110,8 @@ async function runAgentLoop(deps) {
     while (true) {
       // 0. 中止 / 超时检查
       if (ctx.abortSignal && ctx.abortSignal.aborted) {
-        return finish('cancelled', { summary: '用户已停止' });
+        const ab = abortTerminalStatus(ctx);
+        return finish(ab.status, { summary: ab.summary });
       }
       counters.runtimeMs = Date.now() - startedAt;
       const lim = checkLimits(limits, counters);
@@ -118,7 +130,8 @@ async function runAgentLoop(deps) {
       // v2.9.8 R7：run 总超时触发后（超时定时器已把 run 标记 timeout 并 abort），
       // 循环必须在当前迭代内立即退出，而不是拖到下一迭代才结算。
       if (ctx.abortSignal && ctx.abortSignal.aborted) {
-        return finish('cancelled', { summary: '用户已停止' });
+        const ab = abortTerminalStatus(ctx);
+        return finish(ab.status, { summary: ab.summary });
       }
 
       // 2. 构建上下文
@@ -166,7 +179,10 @@ async function runAgentLoop(deps) {
           outcome: { hasAction: !!(decision && decision.action) }
         });
       } catch (e) {
-        if (ctx.abortSignal && ctx.abortSignal.aborted) return finish('cancelled', { summary: '用户已停止' });
+        if (ctx.abortSignal && ctx.abortSignal.aborted) {
+          const ab = abortTerminalStatus(ctx);
+          return finish(ab.status, { summary: ab.summary });
+        }
         const isTimeout = /超时|timed?out/i.test(e.message || '');
         if (isTimeout) return finish('timeout', { error: e.message });
         return finish('failed', { error: '模型调用失败: ' + e.message, errorCode: 'MODEL_CALL_FAILED' });
@@ -357,7 +373,10 @@ async function runAgentLoop(deps) {
       }
     }
   } catch (e) {
-    if (ctx.abortSignal && ctx.abortSignal.aborted) return finish('cancelled', { summary: '用户已停止' });
+    if (ctx.abortSignal && ctx.abortSignal.aborted) {
+      const ab = abortTerminalStatus(ctx);
+      return finish(ab.status, { summary: ab.summary });
+    }
     const isTimeout = /超时|timed?out/i.test(e.message || '');
     if (isTimeout) return finish('timeout', { error: e.message });
     return finish('failed', { error: e.message, errorCode: 'LOOP_ERROR' });

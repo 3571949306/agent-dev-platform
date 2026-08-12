@@ -168,13 +168,14 @@ async function executeDelegateCore(ctx, action, args) {
       const childSummary = (result && (result.summary || (result.errors && result.errors[0]))) || '';
 
       // Pre-start policy/configuration failure：保持 errorCode 原样
+      // v2.9.8 Final Closure（A2）：data.executionStarted 显式携带，区分「Run 已创建」与「execution 真实开始」
       if (result && result.ok === false && result.errorCode) {
         return {
           ok: false,
           tool: 'delegate',
           action,
           summary: childSummary ? `child=${result.agentId || '?'} status=${result.status || '?'}: ${childSummary}` : undefined,
-          data: { runId: result.runId, agentId: result.agentId, status: result.status, result },
+          data: { runId: result.runId, agentId: result.agentId, status: result.status, executionStarted: result.executionStarted === true, result },
           error: {
             code: result.errorCode,
             message: (result.errors && result.errors[0]) || result.summary || 'delegate 未完成',
@@ -188,7 +189,7 @@ async function executeDelegateCore(ctx, action, args) {
         tool: 'delegate',
         action,
         summary: childSummary ? `child=${result.agentId || '?'} status=${result.status || '?'}: ${childSummary}` : undefined,
-        data: { runId: result.runId, agentId: result.agentId, status: result.status, result },
+        data: { runId: result.runId, agentId: result.agentId, status: result.status, executionStarted: result.executionStarted === true, result },
         error: result.ok ? null : {
           code: `DELEGATE_${String(result.status || 'FAILED').toUpperCase()}`,
           message: (result.errors && result.errors[0]) || result.summary || 'delegate 未完成',
@@ -255,7 +256,8 @@ async function executeDelegateCore(ctx, action, args) {
     ok,
     tool: 'delegate',
     action,
-    data: { runId, agentId: startResult.agentId, status, result: last && last.result },
+    // hub.start 成功返回后 adapter 已真实启动（executionStarted=true）
+    data: { runId, agentId: startResult.agentId, status, executionStarted: true, result: last && last.result },
     error: ok ? null : { code: `DELEGATE_${(status || 'TIMEOUT').toUpperCase()}`, message: (last && last.error) || 'delegate 未完成' }
   };
 }

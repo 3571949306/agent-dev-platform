@@ -36,6 +36,7 @@
     "test:product": "node scripts/run-tests.js product.test",
     "test:product:production": "node scripts/product-production-smoke.js",
     "test:reliability": "node scripts/run-tests.js reliability",
+    "test:reliability-closure": "node scripts/run-tests.js reliabilityClosure",
     "test:reliability:production": "node scripts/reliability-production-smoke.js",
     "test:reliability:soak": "node scripts/run-tests.js reliabilitySoak",
     "icon": "node scripts/make-icon.js"

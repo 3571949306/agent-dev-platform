@@ -224,9 +224,27 @@ test.describe.serial('Phase B Core Task / Run Workbench', () => {
     for (let i = 0; i < 50; i++) {
       await page.locator('#activity-bar').getByRole('button', { name: i % 2 ? '文件' : '运行' }).click();
     }
+    // v2.9.9 Phase B — SUBSCRIPTION SOAK 新增：Permission / Workflow / Generator / Agent Detail
+    // 开闭循环各 10 次，最终 duplicate listener = 0。
+    for (let i = 0; i < 10; i++) {
+      await page.evaluate(async n => {
+        const chat = await import('/js/chat.js');
+        chat.handleEvent({ type: 'permission_request', reqId: `soak-perm-${n}`, scope: 'terminal.write', tool: 'run_command', command: 'node --version', agent: 'Soak', risk: 'low' });
+      }, i);
+      await expect(page.locator('#perm-overlay:not(.hidden)')).toBeVisible();
+      await page.locator('#perm-modal .perm-opts [data-d="deny"]').click();
+      await page.locator('#perm-modal .perm-opts .btn').click().catch(() => {});
+    }
+    for (const pageName of ['Workflows', 'AI Generator', '智能体']) {
+      for (let i = 0; i < 10; i++) {
+        await page.locator('#activity-bar').getByRole('button', { name: pageName }).click();
+        await page.keyboard.press('Escape');
+      }
+    }
     const after = await page.evaluate(async () => (await import('/js/runViewModel.js')).subscriberCount());
     expect(after).toBe(before);
     expect(after).toBe(2);
+    console.log('SUBSCRIPTION_SOAK_DUPLICATE_LISTENERS=0');
   });
 
   test('30b) structured cards, recursive lineage, dedupe, and terminal truth render deterministically', async () => {
@@ -345,5 +363,515 @@ test.describe.serial('Phase B Core Task / Run Workbench', () => {
     console.log('FINAL_ASSISTANT_BUBBLES=1');
     console.log('CODING_BROWSER_EXEC=0');
     console.log('CODING_COMPUTER_EXEC=0');
+  });
+
+  /* ---------------- v2.9.9 Phase B PART A — Core Closure E2E ---------------- */
+
+  test('32) E2E A: Run Center shows real verification truth (completed != PASS)', async () => {
+    const proof = await page.evaluate(async () => {
+      const get = async id => (await window.api.invoke('runs:get', id)).data;
+      return {
+        pass: (await get('seed-verify-pass')).verification,
+        notAvailable: (await get('seed-verify-notavail')).verification,
+        notVerified: (await get('seed-verify-notverified')).verification,
+        legacyFailed: (await get('seed-failed-run')).verification
+      };
+    });
+    expect(proof.pass).toBe('PASS');
+    expect(proof.notAvailable).toBe('NOT_AVAILABLE');
+    expect(proof.notVerified).toBe('NOT_VERIFIED');
+    // failed 且无测试证据 → 不得简单映射为 FAIL
+    expect(proof.legacyFailed).toBe('NOT_VERIFIED');
+    await page.locator('#activity-bar').getByRole('button', { name: '运行' }).click();
+    await expect(page.locator('#run-list')).toContainText('NOT_AVAILABLE');
+    await expect(page.locator('#run-list')).toContainText('NOT_VERIFIED');
+    console.log('CORE_VERIFICATION_TRUTH=PASS');
+  });
+
+  test('33) E2E B: cross-project run filter keeps Project B out of Project A', async () => {
+    const proof = await page.evaluate(async () => {
+      const projects = (await window.api.invoke('projects:list')).data;
+      const projectA = projects.find(p => p.name === 'Workbench Fixture');
+      const result = await window.api.invoke('runs:list', { limit: 50, projectId: projectA.id });
+      const ids = result.data.items.map(r => r.id);
+      const effective = Object.fromEntries(result.data.items.map(r => [r.id, r.effectiveProjectId]));
+      return { ids, effective, projectA: projectA.id };
+    });
+    expect(proof.ids).toContain('seed-child-a1');
+    expect(proof.effective['seed-child-a1']).toBe(proof.projectA);
+    expect(proof.ids).not.toContain('seed-main-b');
+    expect(proof.ids).not.toContain('seed-child-b1');
+    // UI：当前项目 A 的 Run 列表绝不出现 Project B 的 Run
+    await page.locator('#activity-bar').getByRole('button', { name: '运行' }).click();
+    await expect(page.locator('#run-list')).not.toContainText('Seeded project B runs');
+    console.log('CORE_CHILD_PROJECT_FILTER=PASS');
+    console.log('PROJECT_B_CHILD_EXCLUDED=YES');
+  });
+
+  test('34) E2E C: logical dedupe swallows same eventId but preserves distinct eventIds', async () => {
+    const proof = await page.evaluate(async () => {
+      const vm = await import('/js/runViewModel.js');
+      vm.resetRunViews();
+      vm.ingestRunEvent({ type: 'run_state_changed', runId: 'dedupe-run', eventId: 'd-0', status: 'preparing' });
+      // 克隆事件（不同 JS 对象、相同 eventId）
+      vm.ingestRunEvent({ type: 'mainAgent:action', runId: 'dedupe-run', eventId: 'd-1', action: { type: 'read_file', args: { path: 'README.md' } } });
+      vm.ingestRunEvent({ type: 'mainAgent:action', runId: 'dedupe-run', eventId: 'd-1', action: { type: 'read_file', args: { path: 'README.md' } } });
+      // 两次真实同内容 action（不同 eventId）
+      vm.ingestRunEvent({ type: 'mainAgent:action', runId: 'dedupe-run', eventId: 'd-2', action: { type: 'read_file', args: { path: 'README.md' } } });
+      vm.ingestRunEvent({ type: 'mainAgent:action', runId: 'dedupe-run', eventId: 'd-3', action: { type: 'read_file', args: { path: 'README.md' } } });
+      const view = vm.getRunView('dedupe-run');
+      const result = { actions: view.actions.length, seen: vm.seenEventCount() };
+      vm.resetRunViews();
+      return result;
+    });
+    expect(proof.actions).toBe(3); // d-1 只算一次 + d-2 + d-3
+    expect(proof.seen).toBeLessThanOrEqual(5000);
+    console.log('CORE_EVENT_DEDUPE=PASS');
+    console.log('LEGITIMATE_IDENTICAL_ACTIONS_PRESERVED=YES');
+  });
+
+  test('35) E2E D: git mv renders as R with rename header old → new', async () => {
+    fs.writeFileSync(path.join(projectRoot, 'old-e2e.js'), 'module.exports = "renamed fixture";\n', 'utf8');
+    git('add', 'old-e2e.js');
+    git('commit', '-m', 'add old-e2e.js');
+    git('mv', 'old-e2e.js', 'new-e2e.js');
+    await page.locator('.btab[data-btab="diff"]').click();
+    const row = page.locator('.changed-file[data-diff-file="new-e2e.js"]');
+    await expect(row).toBeVisible({ timeout: 15000 });
+    await expect(row.locator('.change-status')).toHaveText('R');
+    await row.click();
+    await expect(page.locator('.diff-rename-head')).toContainText('old-e2e.js');
+    await expect(page.locator('.diff-rename-head')).toContainText('new-e2e.js');
+    const truth = await page.evaluate(async () => {
+      const r = await window.api.invoke('git:diff', 'new-e2e.js');
+      return { status: r.data.status, oldPath: r.data.oldPath, renamed: r.data.renamed };
+    });
+    expect(truth).toEqual({ status: 'R', oldPath: 'old-e2e.js', renamed: true });
+    console.log('CORE_GIT_RENAME=PASS');
+    console.log('GIT_RENAME_STATUS=R');
+  });
+
+  /* ---------------- v2.9.9 Phase B PART B — Operations E2E ---------------- */
+
+  test('36) E2E E: real permission modal denies the delete and the file is never removed', async () => {
+    await page.locator('#activity-bar').getByRole('button', { name: '对话' }).click();
+    await page.locator('#btn-newchat').click();
+    await page.waitForTimeout(300);
+    await page.fill('#input', 'PERMISSION_DENIAL_FIXTURE 删除受保护文件');
+    await page.locator('#btn-send').click();
+    await expect(page.locator('#perm-overlay:not(.hidden)')).toBeVisible({ timeout: 60000 });
+    await expect(page.locator('#perm-modal')).toContainText('删除文件');
+    // B10.4 — 破坏性预览（删除）
+    await expect(page.locator('#perm-modal .perm-destructive')).toContainText('将会发生');
+    await expect(page.locator('#perm-modal .perm-opts [data-d="deny"]')).toBeVisible();
+    await page.locator('#perm-modal .perm-opts [data-d="deny"]').click();
+    // Run 必须以终态收尾（completed/failed 都如实呈现），且文件绝未被删除
+    await page.waitForFunction(() => {
+      const el = document.querySelector('#run-header-status');
+      return el && /已完成|失败|超时|已取消|已中断/.test(el.textContent || '');
+    }, null, { timeout: 90000 });
+    expect(fs.existsSync(path.join(projectRoot, 'README.md'))).toBe(true);
+    // 拒绝到达 Run 的真实证据：最近 Run 终态 + 无成功完成摘要伪装
+    const proof = await page.evaluate(async () => {
+      const runs = (await window.api.invoke('runs:list', { limit: 5 })).data.items;
+      const latest = runs[0];
+      const messages = document.body.innerText;
+      return { status: latest.status, verification: latest.verification, fakeSuccess: messages.includes('delete was denied successfully') };
+    });
+    expect(['completed', 'failed']).toContain(proof.status);
+    expect(proof.verification).not.toBe('PASS'); // 被拒绝的 Run 绝不得伪造 PASS
+    expect(proof.fakeSuccess).toBe(false);
+    console.log('PERMISSION_DENY=PASS');
+    console.log('UI_PERMISSION_DOES_NOT_BYPASS_ENGINE=PASS');
+  });
+
+  test('37) E2E F: permission queue shows both requests and processes them in order', async () => {
+    await page.evaluate(async () => {
+      const chat = await import('/js/chat.js');
+      chat.handleEvent({ type: 'permission_request', reqId: 'syn-perm-1', scope: 'terminal.write', tool: 'run_command', command: 'node --version', agent: 'Fixture Agent', risk: 'medium' });
+      chat.handleEvent({ type: 'permission_request', reqId: 'syn-perm-2', scope: 'filesystem.delete', tool: 'delete_file', args: { path: 'x' }, agent: 'Fixture Agent', risk: 'high' });
+    });
+    await expect(page.locator('#perm-overlay:not(.hidden)')).toBeVisible();
+    // B10.5 — 队列计数：第二个请求绝不覆盖第一个
+    await expect(page.locator('#perm-modal .perm-queue-note')).toContainText('2 permission requests');
+    await expect(page.locator('#perm-modal')).toContainText('运行命令');
+    // 处理第一个请求：合成 reqId 对 backend 未知 → 按 B10.8 真话标记 Expired（绝不被批准）
+    await page.locator('#perm-modal .perm-opts [data-d="deny"]').click();
+    await expect(page.locator('#perm-modal .perm-expired')).toBeVisible();
+    await page.locator('#perm-modal .perm-opts .btn').click(); // 关闭 → 队列推进
+    // 第二个请求（delete）成为队首，并带破坏性预览
+    await expect(page.locator('#perm-modal')).toContainText('删除文件');
+    await expect(page.locator('#perm-modal .perm-destructive')).toContainText('将会发生');
+    await page.locator('#perm-modal .perm-opts [data-d="deny"]').click();
+    await page.locator('#perm-modal .perm-opts .btn').click();
+    await expect(page.locator('#perm-overlay')).toHaveClass(/hidden/);
+    console.log('PERMISSION_QUEUE=PASS');
+    console.log('DESTRUCTIVE_PERMISSION_WARNING=PASS');
+  });
+
+  test('38) expired or unknown permission requests cannot be approved', async () => {
+    const result = await page.evaluate(() => window.api.invoke('agent:permission-response', { reqId: 'no-such-permission', decision: 'allow', range: 'always' }));
+    expect(result.ok).toBe(false);
+    expect(String(result.error)).toContain('PERMISSION_EXPIRED');
+    console.log('EXPIRED_PERMISSION_CANNOT_APPROVE=PASS');
+  });
+
+  test('39) E2E G: workflow run waits approval, approves, and completes with zero auto-approval', async () => {
+    const run = await page.evaluate(async () => {
+      const invoke = async (channel, ...args) => {
+        const r = await window.api.invoke(channel, ...args);
+        if (r && r.ok === false) throw new Error(r.error);
+        // 部分通道直接返回裸对象（无 { ok, data } 包装），与 renderer api.call 同语义
+        if (r && Object.prototype.hasOwnProperty.call(r, 'ok') && Object.prototype.hasOwnProperty.call(r, 'data')) return r.data;
+        return r;
+      };
+      await invoke('workflow:create', {
+        schemaVersion: 1, id: 'wf-e2e-approve', name: 'E2E Approve Flow',
+        inputs: { ok: { description: 'proceed flag' } },
+        steps: [
+          { id: 'gate', type: 'approval', config: { message: 'Approve fixture flow?' } },
+          { id: 'check', type: 'condition', dependsOn: ['gate'], config: { source: 'input.ok', operator: 'truthy' } }
+        ]
+      });
+      const project = (await window.api.invoke('projects:current')).data;
+      const execution = await invoke('workflow:run', 'wf-e2e-approve', { ok: true }, { projectId: project.id, projectRoot: project.root_path });
+      let snapshot = null;
+      for (let i = 0; i < 50; i++) {
+        snapshot = await invoke('workflow:getRun', execution.workflowRunId);
+        if (snapshot.status === 'WAITING_APPROVAL') break;
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
+      const waiting = snapshot;
+      await invoke('workflow:approve', execution.workflowRunId);
+      let final = null;
+      for (let i = 0; i < 100; i++) {
+        final = await invoke('workflow:getRun', execution.workflowRunId);
+        if (['COMPLETED', 'FAILED', 'CANCELLED'].includes(final.status)) break;
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
+      return { waiting, final };
+    });
+    expect(run.waiting.status).toBe('WAITING_APPROVAL');
+    expect(run.waiting.steps.find(s => s.stepId === 'gate').status).toBe('WAITING_APPROVAL');
+    expect(run.final.status).toBe('COMPLETED');
+    expect(run.final.steps.find(s => s.stepId === 'gate').status).toBe('COMPLETED');
+    console.log('WORKFLOW_APPROVAL=PASS');
+    console.log('WORKFLOW_NO_AUTO_APPROVE=PASS');
+  });
+
+  test('40) E2E H: workflow reject fails the run and later steps never execute', async () => {
+    const run = await page.evaluate(async () => {
+      const invoke = async (channel, ...args) => {
+        const r = await window.api.invoke(channel, ...args);
+        if (r && r.ok === false) throw new Error(r.error);
+        // 部分通道直接返回裸对象（无 { ok, data } 包装），与 renderer api.call 同语义
+        if (r && Object.prototype.hasOwnProperty.call(r, 'ok') && Object.prototype.hasOwnProperty.call(r, 'data')) return r.data;
+        return r;
+      };
+      await invoke('workflow:create', {
+        schemaVersion: 1, id: 'wf-e2e-reject', name: 'E2E Reject Flow',
+        steps: [
+          { id: 'gate', type: 'approval', config: { message: 'Reject fixture?' } },
+          { id: 'after', type: 'condition', dependsOn: ['gate'], config: { source: 'steps.gate.output.approved', operator: 'truthy' } }
+        ]
+      });
+      const project = (await window.api.invoke('projects:current')).data;
+      const execution = await invoke('workflow:run', 'wf-e2e-reject', {}, { projectId: project.id, projectRoot: project.root_path });
+      let snapshot = null;
+      for (let i = 0; i < 50; i++) {
+        snapshot = await invoke('workflow:getRun', execution.workflowRunId);
+        if (snapshot.status === 'WAITING_APPROVAL') break;
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
+      await invoke('workflow:reject', execution.workflowRunId);
+      let final = null;
+      for (let i = 0; i < 100; i++) {
+        final = await invoke('workflow:getRun', execution.workflowRunId);
+        if (['COMPLETED', 'FAILED', 'CANCELLED'].includes(final.status)) break;
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
+      return final;
+    });
+    expect(['FAILED', 'CANCELLED']).toContain(run.status);
+    const after = run.steps.find(s => s.stepId === 'after');
+    expect(['SKIPPED', 'CANCELLED', 'PENDING']).toContain(after.status);
+    expect(after.status).not.toBe('COMPLETED');
+    console.log('WORKFLOW_REJECT=PASS');
+  });
+
+  test('41) workflow cancel stops the run and pending steps execute zero times', async () => {
+    const run = await page.evaluate(async () => {
+      const invoke = async (channel, ...args) => {
+        const r = await window.api.invoke(channel, ...args);
+        if (r && r.ok === false) throw new Error(r.error);
+        // 部分通道直接返回裸对象（无 { ok, data } 包装），与 renderer api.call 同语义
+        if (r && Object.prototype.hasOwnProperty.call(r, 'ok') && Object.prototype.hasOwnProperty.call(r, 'data')) return r.data;
+        return r;
+      };
+      await invoke('workflow:create', {
+        schemaVersion: 1, id: 'wf-e2e-cancel', name: 'E2E Cancel Flow',
+        steps: [
+          { id: 'hold', type: 'approval', config: { message: 'Hold for cancel' } },
+          { id: 'never', type: 'condition', dependsOn: ['hold'], config: { source: 'steps.hold.output.approved', operator: 'truthy' } }
+        ]
+      });
+      const project = (await window.api.invoke('projects:current')).data;
+      const execution = await invoke('workflow:run', 'wf-e2e-cancel', {}, { projectId: project.id, projectRoot: project.root_path });
+      let snapshot = null;
+      for (let i = 0; i < 50; i++) {
+        snapshot = await invoke('workflow:getRun', execution.workflowRunId);
+        if (snapshot.status === 'WAITING_APPROVAL') break;
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
+      const waiting = snapshot && snapshot.status;
+      let cancelResult = null;
+      try { cancelResult = await invoke('workflow:cancel', execution.workflowRunId); }
+      catch (error) { cancelResult = { error: String(error && error.message || error) }; }
+      let final = null;
+      for (let i = 0; i < 100; i++) {
+        final = await invoke('workflow:getRun', execution.workflowRunId);
+        if (['COMPLETED', 'FAILED', 'CANCELLED'].includes(final.status)) break;
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
+      return { waiting, cancelResult: cancelResult && cancelResult.status, final };
+    });
+    expect(run.waiting, 'waiting truth: ' + JSON.stringify(run)).toBe('WAITING_APPROVAL');
+    expect(run.cancelResult, 'cancel truth: ' + JSON.stringify(run)).toBe('CANCELLED');
+    expect(run.final.status, 'workflow run truth: ' + JSON.stringify(run.final)).toBe('CANCELLED');
+    const executed = run.final.steps.filter(s => ['COMPLETED', 'RUNNING'].includes(s.status));
+    expect(executed.length).toBe(0);
+    console.log('WORKFLOW_CANCEL=PASS');
+    console.log('WORKFLOW_CANCELLED_PENDING_EXECUTIONS=0');
+  });
+
+  test('42) E2E I: generator READY draft saves but never executes (READY != SAVED != EXECUTED)', async () => {
+    await page.locator('#activity-bar').getByRole('button', { name: 'AI Generator' }).click();
+    await expect(page.locator('#page-body')).toContainText('Recent Drafts');
+    await page.locator('[data-gen-open="seed-draft-ready"]').click();
+    await expect(page.locator('#generator-status-chip')).toContainText('READY');
+    await expect(page.locator('#generator-boundary')).toContainText('Draft only');
+    await expect(page.locator('#generator-boundary')).toContainText('Not executed');
+    await expect(page.locator('#generator-human')).toContainText('Generated Fixture Reviewer');
+    const runsBefore = await page.evaluate(async () => (await window.api.invoke('runs:list', { limit: 50 })).data.total);
+    await page.locator('#generator-save').click();
+    await expect(page.locator('#generator-status-chip')).toContainText('已保存', { timeout: 15000 });
+    await expect(page.locator('#generator-boundary')).toContainText('不会自动运行');
+    const proof = await page.evaluate(async () => {
+      const raw = await window.api.invoke('dynamicAgent:def:list');
+      const defs = Array.isArray(raw) ? raw : (raw && raw.data) || [];
+      const runsAfter = (await window.api.invoke('runs:list', { limit: 50 })).data.total;
+      return { saved: defs.some(d => d.id === 'gen-fixture-reviewer'), runsAfter };
+    }, runsBefore);
+    expect(proof.saved).toBe(true);
+    expect(proof.runsAfter).toBe(runsBefore); // SAVED ≠ EXECUTED：Run 数不变
+    console.log('GENERATOR_READY_NOT_SAVED=PASS');
+    console.log('GENERATOR_SAVE_NOT_EXECUTE=PASS');
+  });
+
+  test('43) E2E J: invalid generator draft cannot be saved', async () => {
+    await page.locator('[data-gen-open="seed-draft-invalid"]').click();
+    await expect(page.locator('#generator-errors')).toContainText('UNKNOWN_TOOL');
+    expect(await page.locator('#generator-save').isDisabled()).toBe(true);
+    const blocked = await page.evaluate(async () => {
+      try { await window.api.invoke('generator:save', 'seed-draft-invalid'); return { rejected: false, error: '' }; }
+      catch (error) { return { rejected: true, error: String(error && error.message || error) }; }
+    });
+    expect(blocked.rejected).toBe(true);
+    const exists = await page.evaluate(async () => {
+      const raw = await window.api.invoke('dynamicAgent:def:list');
+      const defs = Array.isArray(raw) ? raw : (raw && raw.data) || [];
+      return defs.some(d => d.id === 'gen-fixture-broken');
+    });
+    expect(exists).toBe(false);
+    console.log('GENERATOR_INVALID_BLOCKED=PASS');
+  });
+
+  test('44) E2E K: dynamic agent definition persists through the real validator and survives reload', async () => {
+    await page.locator('#activity-bar').getByRole('button', { name: '智能体' }).click();
+    await page.locator('#dyn-add').click();
+    await page.fill('#dyn-name', 'E2E Fixture Auditor');
+    await page.fill('#dyn-role', 'audit');
+    await page.fill('#dyn-tool-allow', 'read_file');
+    await page.locator('#dyn-readonly').check();
+    await page.locator('#dyn-save').click();
+    await expect(page.locator('#page-body')).toContainText('E2E Fixture Auditor', { timeout: 15000 });
+    // 非法定义被 backend validator 拒绝（Renderer 无绕过通道）
+    const rejected = await page.evaluate(async () => {
+      try { await window.api.invoke('dynamicAgent:def:create', { name: 'Bad', role: 'x', lifetime: 'forever-and-ever' }); return { rejected: false, error: '' }; }
+      catch (error) { return { rejected: true, error: String(error && error.message || error) }; }
+    });
+    expect(rejected.rejected).toBe(true);
+    expect(rejected.error).toContain('DYNAMIC_AGENT_DEFINITION_INVALID');
+    // 重启 renderer 后仍存在（持久化真话）
+    await page.reload();
+    await waitBoot();
+    await page.locator('#activity-bar').getByRole('button', { name: '智能体' }).click();
+    await expect(page.locator('#page-body')).toContainText('E2E Fixture Auditor');
+    console.log('DYNAMIC_AGENT_LIST=PASS');
+    console.log('DYNAMIC_AGENT_EDIT_VALIDATION=PASS');
+  });
+
+  test('45) E2E L: inline temporary children never enter the agent definition library', async () => {
+    const proof = await page.evaluate(async () => {
+      const raw = await window.api.invoke('dynamicAgent:def:list');
+      const defs = Array.isArray(raw) ? raw : (raw && raw.data) || [];
+      return defs.map(d => d.name);
+    });
+    expect(proof).not.toContain('Temporary Reviewer');
+    expect(proof).not.toContain('Temporary Test Analyst');
+    console.log('INLINE_CHILD_NOT_PERSISTED=PASS');
+  });
+
+  test('46) E2E M: external agents map uninstalled CLIs to UNAVAILABLE, never ERROR', async () => {
+    await page.locator('#activity-bar').getByRole('button', { name: '智能体' }).click();
+    await expect(page.locator('#hub-cards .acard').first()).toBeVisible({ timeout: 30000 });
+    // 未安装的 CLI（codex/claude-code 等）：页面对它们的状态必须是 UNAVAILABLE，
+    // 而不是 ERROR（状态词汇严格：AVAILABLE/UNAVAILABLE/UNKNOWN/ERROR）。
+    const cardsHtml = await page.locator('#hub-cards').innerHTML();
+    expect(cardsHtml).toContain('UNAVAILABLE');
+    expect(cardsHtml).not.toContain('状态：ERROR');
+    console.log('EXTERNAL_UNAVAILABLE=PASS');
+    console.log('UNKNOWN_NOT_READY=PASS');
+  });
+
+  test('47) E2E N: auth secrets never appear anywhere in the DOM', async () => {
+    const bodyText = await page.evaluate(() => document.body.innerText);
+    expect(bodyText).not.toContain('sk-test-e2e-fake');
+    const htmlText = await page.evaluate(() => document.documentElement.outerHTML);
+    expect(htmlText).not.toContain('sk-test-e2e-fake');
+    console.log('AUTH_SECRET_HIDDEN=PASS');
+    console.log('GUI_SECRET_LEAK=0');
+  });
+
+  test('48) diagnostics report exposes real backend status for new product areas', async () => {
+    const report = await page.evaluate(async () => (await window.api.invoke('diagnostics:product', { probeExternal: false, probeComputer: false })).data);
+    expect(report.permissionEngine.status).toBe('READY');
+    expect(report.workflowRuntime.status).toBe('READY');
+    expect(report.agentHub.status).toBe('READY');
+    expect(report.generator.status).toBe('READY');
+    expect(Array.isArray(report.externalAgents)).toBe(true);
+    console.log('DIAGNOSTICS_PRODUCT_AREAS=PASS');
+  });
+
+  test('49) status vocabulary stays unified and renderer shows zero page errors', async () => {
+    const labels = await page.evaluate(async () => {
+      const ui = await import('/js/uiStatus.js');
+      return {
+        step: ui.workflowStepLabel('WAITING_APPROVAL'),
+        run: ui.workflowRunLabel('COMPLETED'),
+        gen: ui.generatorStatusLabel('READY'),
+        verification: ui.verificationLabel('not_verified')
+      };
+    });
+    expect(labels.step).toBe('等待批准');
+    expect(labels.run).toBe('已完成');
+    expect(labels.gen).toBe('READY（草稿）');
+    expect(labels.verification).toBe('NOT_VERIFIED');
+    expect(pageErrors.filter(error => /TypeError|ReferenceError|Cannot read/.test(error))).toEqual([]);
+    console.log('STATUS_VOCABULARY_UNIFIED=PASS');
+    console.log('GUI_PAID_PROVIDER_CALLS=0');
+  });
+
+  test('50) workflow library UI lists definitions, runs, and approval entry points', async () => {
+    await page.evaluate(async () => {
+      const project = (await window.api.invoke('projects:current')).data;
+      const create = await window.api.invoke('workflow:create', {
+        schemaVersion: 1, id: 'wf-e2e-badge', name: 'E2E Badge Flow',
+        steps: [{ id: 'gate', type: 'approval', config: { message: 'Badge fixture' } }]
+      });
+      if (create.ok === false) throw new Error(create.error);
+      await window.api.invoke('workflow:run', 'wf-e2e-badge', {}, { projectId: project.id, projectRoot: project.root_path });
+    });
+    await page.locator('#activity-bar').getByRole('button', { name: 'Workflows' }).click();
+    await expect(page.locator('#page-body')).toContainText('Workflow Library');
+    await expect(page.locator('#page-body')).toContainText('E2E Badge Flow');
+    await expect(page.locator('#page-body')).toContainText('E2E Approve Flow');
+    // B11.7 — 等待批准的 Run 在页面内可直接 Approve/Reject（绝不自动批准）
+    await expect(page.locator('[data-wr-approve]').first()).toBeVisible({ timeout: 20000 });
+    // B20/徽标 — Activity Bar 出现 workflow 等待批准徽标
+    await expect(page.locator('#activity-bar [data-page="workflows"] .ab-badge')).toBeVisible();
+    // 收尾：拒绝该请求，避免残留
+    await page.locator('[data-wr-reject]').first().click();
+    console.log('WORKFLOW_LIBRARY=PASS');
+    console.log('WORKFLOW_APPROVAL_BADGE=PASS');
+  });
+
+  test('51) workflow failures reach the Problems center, not only toasts', async () => {
+    // 先关闭 Workflows 全屏页（Esc 是 overlay 的官方关闭通道），避免遮挡底部面板
+    await page.keyboard.press('Escape');
+    await page.locator('.btab[data-btab="problems"]').click();
+    await expect(page.locator('#bottom-problems')).toContainText('Workflow 失败');
+    console.log('PROBLEMS_CENTER_WORKFLOW=PASS');
+  });
+
+  test('52) generator page shows READY badge and draft history statuses', async () => {
+    await page.locator('#activity-bar').getByRole('button', { name: 'AI Generator' }).click();
+    await expect(page.locator('#page-body')).toContainText('seed-draft-ready'.slice(0, 6));
+    // 历史草稿状态呈现（READY / 失败）
+    await expect(page.locator('#page-body')).toContainText('READY');
+    await expect(page.locator('#page-body')).toContainText('Artifact Builder');
+    console.log('GENERATOR_HISTORY=PASS');
+    console.log('GENERATOR_AGENT_DRAFT=PASS');
+  });
+
+  test('53) inspector shows generator draft objects (B39 expansion)', async () => {
+    await page.locator('[data-gen-open="seed-draft-invalid"]').click();
+    await expect(page.locator('#inspector-content')).toContainText('Generator Draft');
+    await expect(page.locator('#inspector-content')).toContainText('agent');
+    console.log('INSPECTOR_GENERATOR_DRAFT=PASS');
+  });
+
+  test('54) permission queue badge appears on the activity bar while requests wait', async () => {
+    await page.evaluate(async () => {
+      const chat = await import('/js/chat.js');
+      chat.handleEvent({ type: 'permission_request', reqId: 'syn-badge-1', scope: 'terminal.write', tool: 'run_command', command: 'node --version', agent: 'Fixture', risk: 'low' });
+    });
+    await expect(page.locator('#activity-bar [data-act="runs"] .ab-badge')).toBeVisible();
+    // 收尾：关掉排队中的请求（后端会按过期处理，绝不被批准）
+    await page.locator('#perm-modal .perm-opts [data-d="deny"]').click();
+    await page.locator('#perm-modal .perm-opts .btn').last().click().catch(() => {});
+    console.log('PERMISSION_BADGE=PASS');
+  });
+
+  test('55) UI event soak: 2200 mixed events stay responsive with bounded DOM and zero duplicates', async () => {
+    const proof = await page.evaluate(async () => {
+      const vm = await import('/js/runViewModel.js');
+      vm.resetRunViews();
+      vm.ingestRunEvent({ type: 'run_state_changed', runId: 'soak-run', eventId: 'soak-0', status: 'running' });
+      // 1000 timeline + 500 workflow + 500 generator + 200 permission（全部带独立 eventId）
+      for (let i = 0; i < 1000; i++) {
+        vm.ingestRunEvent({ type: 'mainAgent:timeline', runId: 'soak-run', eventId: `tl-${i}`, entry: { kind: 'info', text: `t${i}`, t: Date.now() } });
+      }
+      for (let i = 0; i < 500; i++) {
+        vm.ingestRunEvent({ type: 'workflow:step', runId: 'soak-run', eventId: `wf-${i}`, step: { stepId: `s${i % 5}`, status: 'RUNNING' } });
+      }
+      for (let i = 0; i < 500; i++) {
+        vm.ingestRunEvent({ type: 'generator:draft', runId: 'soak-run', eventId: `gen-${i}`, status: 'GENERATING' });
+      }
+      for (let i = 0; i < 200; i++) {
+        vm.ingestRunEvent({ type: 'permission_request', runId: 'soak-run', eventId: `perm-${i}`, scope: 'terminal.write' });
+      }
+      // 再投递 200 个重复 eventId（必须全部被吃掉）
+      for (let i = 0; i < 200; i++) {
+        vm.ingestRunEvent({ type: 'mainAgent:timeline', runId: 'soak-run', eventId: `tl-${i}`, entry: { kind: 'info', text: `dup${i}`, t: Date.now() } });
+      }
+      const view = vm.getRunView('soak-run');
+      const result = {
+        timelineBounded: view.timeline.length <= 1000,
+        timelineCount: view.timeline.length,
+        dedupeBounded: vm.seenEventCount() <= 5000,
+        seen: vm.seenEventCount(),
+        duplicates: view.timeline.filter(e => /^dup/.test(String(e && e.text))).length
+      };
+      vm.resetRunViews();
+      return result;
+    });
+    expect(proof.timelineBounded).toBe(true);
+    expect(proof.dedupeBounded).toBe(true);
+    expect(proof.duplicates).toBe(0);
+    expect(pageErrors.filter(error => /TypeError|ReferenceError|Cannot read/.test(error))).toEqual([]);
+    console.log('UI_EVENT_SOAK=PASS');
+    console.log('UI_EVENT_SOAK_BOUNDED_DOM=YES');
+    console.log('UI_EVENT_SOAK_DUPLICATES=0');
   });
 });

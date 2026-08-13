@@ -157,7 +157,15 @@ export function renderResult(run) {
   box.querySelector('[data-result-tests]').onclick = () => showTask('progress');
 }
 
-function normalizeVerification(run) { return run.tests.length ? (run.tests.every(test => test.passed) ? 'PASS' : 'FAIL') : (run.status === 'completed' ? 'PASS' : '—'); }
+function normalizeVerification(run) {
+  // v2.9.9 Phase B PART A（A1）— Verification Truth：Renderer 不得从 run.status
+  // 推导验证结论（completed != PASS）。只呈现 backend 机器证据；
+  // 无 backend 值时用真实测试事件作证据；两者都没有则如实报告。
+  const fromBackend = run.verificationStatus || run.verification;
+  if (fromBackend && fromBackend !== '—') return fromBackend;
+  if (run.tests && run.tests.length) return run.tests.every(test => test.passed) ? 'PASS' : 'FAIL';
+  return isTerminalStatus(run.status) ? 'NOT_VERIFIED' : 'RUNNING';
+}
 function formatDuration(ms) { const s = Math.max(0, Math.floor(Number(ms || 0) / 1000)); return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${s % 60}s`; }
 
 function logicalChildCount(run) {
@@ -191,9 +199,17 @@ export function selectInspector(type, value) {
   const box = $('#inspector-content');
   if (!box) return;
   if (type === 'file') box.innerHTML = inspectorSection('File', [['Path', value.path], ['Size', fmtBytes(value.size || 0)], ['Language', value.language || 'Plain Text'], ['Mode', 'Read only']]);
-  else if (type === 'run') box.innerHTML = inspectorSection('Run', [['Run ID', value.id || value.runId], ['智能体', value.agentName || value.agentId || '主智能体'], ['Model', value.model || '—'], ['Status', statusLabel(value.status)], ['Verification', value.verification || '—'], ['Children', value.children ? value.children.size : value.childCount || 0]]);
+  else if (type === 'run') box.innerHTML = inspectorSection('Run', [['Run ID', value.id || value.runId], ['智能体', value.agentName || value.agentId || '主智能体'], ['Model', value.model || '—'], ['Status', statusLabel(value.status)], ['Verification', value.verificationStatus || value.verification || '—'], ['Children', value.children ? value.children.size : value.childCount || 0]]);
   else if (type === 'agent') box.innerHTML = inspectorSection('智能体', [['智能体名称', value.name || value.adapterId || value.agentId], ['Type', value.type || '动态子智能体'], ['Model', value.model || '—'], ['Run state', statusLabel(value.status)], ['Result', value.result || '—']]);
   else if (type === 'action') box.innerHTML = inspectorSection('Action', [['Type', value.type], ['Input', truncate(JSON.stringify(value.args || {}), 500)], ['Result', value.result || '—'], ['Duration', value.duration || '—'], ['Related Run', value.runId || '—']]);
+  // v2.9.9 Phase B（B39）— Inspector 新增对象：Permission / Workflow / Workflow Step /
+  // Generator Draft / Agent Definition / External Agent
+  else if (type === 'permission') box.innerHTML = inspectorSection('Permission', [['Scope', value.scope || '—'], ['Risk', value.risk || '—'], ['Target', truncate(JSON.stringify(value.args || {}), 300)], ['Agent', value.agent || '—'], ['Run', value.runId || '—']]);
+  else if (type === 'workflow') box.innerHTML = inspectorSection('Workflow Run', [['Run ID', value.workflowRunId || '—'], ['Workflow', value.workflowId || '—'], ['Status', value.status || '—'], ['Current Step', value.currentStepId || '—'], ['Error', value.error || '—']]);
+  else if (type === 'workflowStep') box.innerHTML = inspectorSection('Workflow Step', [['Step', value.stepId || '—'], ['Status', value.status || '—'], ['Attempt', value.attempt || 0], ['Input', truncate(JSON.stringify(value.input || value.result || {}), 300)], ['Error', value.error || '—']]);
+  else if (type === 'generatorDraft') box.innerHTML = inspectorSection('Generator Draft', [['Draft', value.draftId || '—'], ['Status', value.status || '—'], ['Type', value.artifactType || '—'], ['Model', value.selectedModel ? `${value.selectedModel.connectionId}/${value.selectedModel.modelId}` : 'Auto'], ['Attempts', value.attempts || 0], ['Validation', value.validation ? (value.validation.valid ? 'VALID' : 'INVALID') : '—']]);
+  else if (type === 'agentDefinition') box.innerHTML = inspectorSection('Agent Definition', [['ID', value.id || '—'], ['Name', value.name || '—'], ['Role', value.role || '—'], ['Runtime', value.runtime && value.runtime.kind || 'native'], ['Model', value.modelPolicy && value.modelPolicy.mode || 'inherit_parent'], ['Tools', ((value.toolPolicy && value.toolPolicy.allow) || []).join(', ') || '—'], ['Skills', ((value.skills && value.skills.required) || []).join(', ') || '—'], ['Hooks', ((value.hooks && value.hooks.required) || []).join(', ') || '—']]);
+  else if (type === 'externalAgent') box.innerHTML = inspectorSection('External Agent', [['Name', value.name || value.id || '—'], ['Transport', value.transport || '—'], ['Availability', value.availability || 'UNKNOWN'], ['Health', value.health || '—'], ['Version', value.version || '—'], ['Verification', value.verification || '—']]);
   else box.innerHTML = '<div class="empty small">Select a run, child agent, file, diff, or action.</div>';
 }
 

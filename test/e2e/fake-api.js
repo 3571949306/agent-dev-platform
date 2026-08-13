@@ -62,6 +62,14 @@ function start(preferredPort = 0, opts = {}) {
                 ? 'REVIEWER_RESULT_4817'
                 : 'TEST_ANALYST_RESULT_9264';
               action = { type: 'complete', args: { summary } };
+            } else if (context.includes('PERMISSION_DENIAL_FIXTURE')) {
+              // v2.9.9 Phase B（B10）— 权限拒绝 fixture：请求删除文件（filesystem.delete
+              // 默认 ask 且无授权 → 弹窗）；被拒后如实收尾，绝不假装删除成功。
+              if (context.includes('PERMISSION_DENIED')) {
+                action = { type: 'complete', args: { summary: 'PERMISSION_FLOW_STOPPED: delete was denied' } };
+              } else {
+                action = { type: 'delete_file', args: { path: 'README.md' } };
+              }
             } else if (!context.includes('REVIEWER_RESULT_4817')) {
               action = { type: 'delegate', args: { goal: 'Review the workbench fixture', inlineAgentDefinition: inlineDefinition('Temporary Reviewer', 'code_reviewer', 'Return findings without modifying files.') } };
             } else if (!context.includes('TEST_ANALYST_RESULT_9264')) {

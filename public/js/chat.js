@@ -723,7 +723,11 @@ export function handleEvent(ev) {
       break;
 
     case 'permission_request':
-      askPermission(ev);
+      enqueuePermission(ev);
+      break;
+
+    case 'permission_expired':
+      markPermissionExpired(ev.reqId);
       break;
 
     case 'error':
@@ -857,8 +861,8 @@ function handleMainAgentEvent(ev, mine) {
     }
 
     case 'mainAgent:permission': {
-      // 权限请求 → 复用权限弹窗
-      askPermission({ ...ev, scope: ev.scope, tool: ev.tool, args: ev.args, reqId: ev.reqId, agent: ev.agent });
+      // 权限请求 → Permission Request Center（排队展示）
+      enqueuePermission({ ...ev, scope: ev.scope, tool: ev.tool, args: ev.args, reqId: ev.reqId, agent: ev.agent });
       break;
     }
 
@@ -913,7 +917,9 @@ function appendNote(text) {
 }
 
 /* ------------------------------------------------------------------ */
-/* permission prompt                                                   */
+/* v2.9.9 Phase B（B10）— Permission Request Center                     */
+/* 排队展示 / 风险分级 / 破坏性预览 / 超时 Expired / View Run。          */
+/* Renderer 只发送 decision，最终由 backend PermissionEngine 裁决（B10.7）。 */
 /* ------------------------------------------------------------------ */
 
 const SCOPE_LABEL = {
@@ -934,15 +940,106 @@ const RISK_IMPACT = {
   critical: '可能永久丢失数据或改变系统状态，无法自动回滚'
 };
 
-/** §28 — 外部智能体只允许「仅本次」；平台不会替用户建立持久授权。 */
+/**
+ * B10.2 — 决策按钮按 PermissionEngine 实际支持的 scope 显示：
+ * backend 通过 ev.ranges 给出允许范围，不允许的范围绝不显示。
+ */
 const RANGE_BUTTONS = [
   { r: 'once', text: '仅本次允许' },
-  { r: 'task', text: '本任务内允许' },
-  { r: 'project', text: '本项目内允许' },
+  { r: 'task', text: '本会话内允许' },
+  { r: 'project', text: '本项目内始终允许' },
   { r: 'always', text: '始终允许' }
 ];
 
-function askPermission(ev) {
+/** B10.4 — 破坏性操作预览：deterministic 后果文案（不由模型生成）。 */
+function destructivePreview(ev) {
+  const cmd = String((ev && (ev.command || (ev.args && (ev.args.command || ev.args.cmd)))) || '').trim();
+  const scope = String((ev && ev.scope) || '');
+  const rules = [
+    { match: /git\s+reset\s+--hard/i, text: '将丢弃当前工作区所有未提交的修改，且无法恢复。' },
+    { match: /git\s+clean/i, text: '将永久删除未被追踪的文件，未提交的新文件会丢失。' },
+    { match: /git\s+push\s+(.*\s)?(--force\b|-f\b)/i, text: '强制推送将覆盖远端分支历史，可能丢失他人提交。' },
+    { match: /git\s+branch\s+-D/i, text: '强制删除分支，未合并的提交将丢失。' },
+    { match: /\brm\s+(-[a-z]*[rf][a-z]*|.*-[a-z]*[rf])/i, text: '将删除文件/目录，此操作不可撤销。' },
+    { match: /\b(format|mkfs|diskpart)\b/i, text: '将格式化存储，数据会永久丢失。' }
+  ];
+  if (scope === 'filesystem.delete') return '将删除目标文件/目录，此操作不可撤销。';
+  for (const rule of rules) if (cmd && rule.match.test(cmd)) return rule.text;
+  if (scope === 'terminal.dangerous' || scope === 'terminal.admin') return '将执行高风险命令，可能改变工作区或系统状态。';
+  if (scope === 'filesystem.outside_workspace') return '将访问当前项目之外的路径。';
+  return null;
+}
+
+// B10.5 — Permission Queue：同一时刻只展示队首请求，其余排队计数，
+// 第二个请求绝不覆盖第一个 modal。
+const permQueue = [];
+let permTimer = null;
+
+export function permissionQueueCount() { return permQueue.length; }
+
+function enqueuePermission(ev) {
+  if (!ev || !ev.reqId) return;
+  if (permQueue.some(p => p.reqId === ev.reqId)) return; // 重复投递去重
+  permQueue.push(ev);
+  panels.setBadge('permission', permQueue.length);
+  if (permQueue.length === 1) showPermissionCard(ev);
+  else updatePermQueueNote(); // B10.5 — 第二个请求绝不覆盖第一个 modal，只更新队列计数
+}
+
+function updatePermQueueNote() {
+  const modal = $('#perm-modal');
+  if (!modal || $('#perm-overlay').classList.contains('hidden')) return;
+  const perm = modal.querySelector('.perm');
+  if (!perm) return;
+  let note = modal.querySelector('.perm-queue-note');
+  if (!note) {
+    note = document.createElement('div');
+    note.className = 'perm-queue-note';
+    perm.insertAdjacentElement('afterbegin', note);
+  }
+  note.textContent = `${permQueue.length} permission requests — 按顺序处理`;
+}
+
+function finishCurrentPermission(reqId) {
+  const index = permQueue.findIndex(p => p.reqId === reqId);
+  if (index >= 0) permQueue.splice(index, 1);
+  panels.setBadge('permission', permQueue.length);
+  if (permTimer) { clearInterval(permTimer); permTimer = null; }
+  closePermModal();
+  const next = permQueue[0];
+  if (next) showPermissionCard(next);
+}
+
+/** B10.8 — backend 超时后标记 Expired：卡片不可再 Allow。 */
+function markPermissionExpired(reqId) {
+  const current = permQueue[0];
+  if (current && current.reqId === reqId) {
+    const modal = $('#perm-modal');
+    if (modal && !$('#perm-overlay').classList.contains('hidden')) {
+      modal.querySelectorAll('.perm-opts .btn').forEach(b => { b.disabled = true; });
+      const box = modal.querySelector('.perm-expired');
+      if (!box) modal.querySelector('.perm').insertAdjacentHTML('beforeend', '<div class="perm-expired">该请求已过期（Expired），已自动拒绝。</div>');
+      const close = h('button', { class: 'btn', type: 'button' }, '关闭');
+      close.onclick = () => finishCurrentPermission(reqId);
+      const opts = modal.querySelector('.perm-opts');
+      if (opts) { opts.innerHTML = ''; opts.appendChild(close); }
+    }
+  }
+  panels.addProblem(`权限请求已过期（自动拒绝）：${reqId ? String(reqId).slice(0, 8) : ''}`);
+}
+window.__adpMarkPermissionExpired = markPermissionExpired; // 测试钩子
+
+async function respondPermission(ev, decision, range) {
+  try {
+    await api.permissionRespond(ev.reqId, decision, range || 'once');
+    finishCurrentPermission(ev.reqId);
+  } catch (error) {
+    // 过期请求 backend 拒绝接受任何 decision（EXPIRED_PERMISSION_CANNOT_APPROVE）
+    markPermissionExpired(ev.reqId);
+  }
+}
+
+function showPermissionCard(ev) {
   const label = SCOPE_LABEL[ev.scope] || ev.scope;
   const argsText = prettyJson(ev.args || {});
   const risk = String(ev.risk || '').toLowerCase();
@@ -955,6 +1052,11 @@ function askPermission(ev) {
         <span class="perm-risk-badge">风险：${esc(RISK_LABEL[risk] || risk.toUpperCase())}</span>
         <span class="perm-risk-impact">${esc(RISK_IMPACT[risk] || '')}</span>
       </div>` : '';
+  // B10.4 — 破坏性操作明确预告「会发生什么」
+  const destructive = destructivePreview(ev);
+  const destructiveBlock = destructive
+    ? `<div class="perm-destructive risk-${esc(risk || 'high')}"><div class="perm-sec-label">将会发生</div><div>${esc(destructive)}</div>${ev.command ? `<div class="muted small">目标：<code>${esc(String(ev.command))}</code></div>` : ''}</div>`
+    : '';
   const reasons = Array.isArray(ev.riskReasons) ? ev.riskReasons.filter(Boolean) : [];
   const reasonBlock = reasons.length
     ? `<ul class="perm-reasons">${reasons.map(r => `<li>${esc(String(r))}</li>`).join('')}</ul>`
@@ -969,38 +1071,78 @@ function askPermission(ev) {
   const argsBlock = argsText && argsText !== '{}'
     ? `<div class="perm-sec-label">完整参数</div><pre class="perm-args">${esc(truncate(argsText, 4000))}</pre>`
     : '';
+  // B10.1 — Permission Card 身份字段：Agent / Permission / Run / Project
+  const project = state.project ? state.project.name : '';
+  const metaRows = [
+    ['智能体', ev.agent || ''],
+    ['权限域', ev.scope || ''],
+    ['工具', ev.tool || ''],
+    ['项目', project],
+    ['Run', ev.runId ? String(ev.runId).slice(0, 8) + '…' : '']
+  ].filter(([, v]) => v);
+  const metaBlock = `<table class="perm-meta"><tbody>${metaRows.map(([k, v]) => `<tr><td>${esc(k)}</td><td class="mono">${esc(v)}</td></tr>`).join('')}</tbody></table>`;
+  const viewRunBtn = ev.runId ? '<button class="btn tiny" data-perm-view-run type="button">View Run</button>' : '';
+  const queueNote = permQueue.length > 1 ? `<div class="perm-queue-note">${permQueue.length} permission requests — 按顺序处理</div>` : '';
 
   const body = `
     <div class="perm">
-      <div class="perm-title">智能体「${esc(ev.agent || '')}」请求权限：<b>${esc(label)}</b></div>
+      ${queueNote}
+      <div class="perm-title">智能体「${esc(ev.agent || '')}」请求权限：<b>${esc(label)}</b> ${viewRunBtn}</div>
       ${riskBlock}
+      ${destructiveBlock}
       ${cmdBlock}
       ${reasonBlock}
-      <div class="perm-tool">详细信息：工具 <code>${esc(ev.tool)}</code>　权限域 <code>${esc(ev.scope)}</code></div>
+      ${metaBlock}
       ${cwdBlock}
       ${argsBlock}
       <div class="perm-opts">
-        ${buttons.map(b => `<button class="btn" data-d="allow" data-r="${b.r}">${b.text}</button>`).join('')}
-        <button class="btn danger" data-d="deny">拒绝</button>
+        ${buttons.map(b => `<button class="btn" data-d="allow" data-r="${b.r}" type="button">${b.text}</button>`).join('')}
+        <button class="btn danger" data-d="deny" type="button">拒绝</button>
       </div>
+      <div class="perm-countdown muted small" aria-live="polite"></div>
     </div>`;
   const modal = openPermModal(body);
   modal.querySelectorAll('.perm-opts .btn').forEach(b => {
     b.onclick = async () => {
-      await api.permissionRespond(ev.reqId, b.dataset.d, b.dataset.r || 'once');
-      closePermModal();
+      // B10.7 — Renderer 只发送 decision，绝不直接执行工具；过期后 backend 会拒绝。
+      modal.querySelectorAll('.perm-opts .btn').forEach(x => { x.disabled = true; });
+      await respondPermission(ev, b.dataset.d, b.dataset.r);
     };
   });
+  const viewRun = modal.querySelector('[data-perm-view-run]');
+  if (viewRun) viewRun.onclick = () => { import('./workspace.js').then(w => w.openRun(ev.runId)); };
+  // B10.8 — 倒计时（backend 超时才是真话，倒计时仅提示）
+  const countdown = modal.querySelector('.perm-countdown');
+  if (permTimer) clearInterval(permTimer);
+  const tick = () => {
+    if (!ev.expiresAt || !countdown) return;
+    const left = Math.max(0, Math.ceil((ev.expiresAt - Date.now()) / 1000));
+    countdown.textContent = left > 0 ? `剩余响应时间：${left}s（过期自动拒绝）` : '已过期，等待后端确认…';
+  };
+  tick();
+  if (ev.expiresAt) permTimer = setInterval(tick, 1000);
+  // 无障碍：Esc = 拒绝（fail-safe），焦点默认落在「拒绝」上
+  const denyBtn = modal.querySelector('[data-d="deny"]');
+  if (denyBtn) denyBtn.focus();
+  modal.__escHandler = (e) => { if (e.key === 'Escape') respondPermission(ev, 'deny', 'once'); };
+  document.addEventListener('keydown', modal.__escHandler);
 }
 
 function openPermModal(bodyHtml) {
-  const overlay = $('#modal-overlay');
-  const modal = $('#modal');
+  const overlay = $('#perm-overlay');
+  const modal = $('#perm-modal');
   modal.innerHTML = `<div class="modal-head"><h3>需要你的确认</h3></div><div class="modal-body">${bodyHtml}</div>`;
   overlay.classList.remove('hidden');
   return modal;
 }
 function closePermModal() {
-  $('#modal-overlay').classList.add('hidden');
-  $('#modal').innerHTML = '';
+  const overlay = $('#perm-overlay');
+  const modal = $('#perm-modal');
+  overlay.classList.add('hidden');
+  if (modal.__escHandler) { document.removeEventListener('keydown', modal.__escHandler); modal.__escHandler = null; }
+  modal.innerHTML = '';
 }
+
+// 兼容旧入口名（内部调用一律走排队通道）
+function askPermission(ev) { enqueuePermission(ev); }
+void askPermission;

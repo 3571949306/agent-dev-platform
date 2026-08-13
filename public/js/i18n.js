@@ -207,6 +207,10 @@ export const ZH = {
     task_complete: '任务完成',
     task_cancelled: '任务已取消',
     permission_request: '权限请求',
+    permission_expired: '权限请求已过期',
+    'workflow:state': '工作流状态变更',
+    'workflow:step': '工作流步骤变更',
+    'workflow:approval': '工作流等待批准',
     error: '错误',
     diagnostics_progress: '诊断进度',
     run_state_changed: '运行状态变更',
@@ -247,6 +251,31 @@ export const ZH = {
     native: '编码',
     computer: '电脑操作',
     external: '外部',
+  },
+  // v2.9.9 Phase B（B41）— 新增产品区域中文词汇统一入口：
+  // Verification / Permission / Workflow / Generator / External Agent。
+  // 页面不得各写各的标签，一律从这里取。
+  verification: {
+    PASS: '验证通过',
+    FAIL: '验证失败',
+    NOT_AVAILABLE: '无验证配置',
+    NOT_VERIFIED: '未验证',
+    RUNNING: '验证中',
+    UNKNOWN: '未知',
+  },
+  permissionDecision: {
+    once: '仅本次允许',
+    task: '本会话内允许',
+    project: '本项目内始终允许',
+    always: '始终允许',
+    deny: '拒绝',
+    expired: '已过期',
+  },
+  externalAvailability: {
+    AVAILABLE: '可用',
+    UNAVAILABLE: '不可用',
+    UNKNOWN: '未知',
+    ERROR: '出错',
   },
 };
 
@@ -295,4 +324,14 @@ export function isMainAgentTerminal(s) {
 /** 终态判断 */
 export function isTerminal(status) {
   return ['completed', 'failed', 'cancelled', 'timeout', 'interrupted'].includes(status);
+}
+
+/** v2.9.9 Phase B（B41）— Verification 状态中文标签 */
+export function verificationName(status) {
+  return ZH.verification[String(status || '').toUpperCase()] || status || '—';
+}
+
+/** v2.9.9 Phase B（B41）— External Agent 可用性中文标签 */
+export function availabilityName(status) {
+  return ZH.externalAvailability[String(status || '').toUpperCase()] || status || '';
 }

@@ -510,7 +510,10 @@ CREATE TABLE IF NOT EXISTS runs (
   last_activity_at TEXT,
   terminal_at TEXT,
   error TEXT DEFAULT '',
-  message TEXT DEFAULT ''
+  message TEXT DEFAULT '',
+  -- v2.9.9 Phase B PART A（A1）：Verification Truth 机器证据（CompletionPolicy 终态写入）。
+  -- completed != PASS：验证结论只来自真实证据，绝不从 run.status 推导。
+  verification_status TEXT
 );
 
 -- v2.8.0 spec §109/§110/§111 — 外部 Agent 会话（Session ≠ Run：一个 Session 可含多个 Run/Turn，
@@ -588,6 +591,8 @@ const COLUMN_MIGRATIONS = [
   // v2.9.0 — Run Tree（§21/§116）：root_run_id + depth 完整化 Run 树追踪
   ['runs', 'root_run_id', 'TEXT'],
   ['runs', 'depth', 'INTEGER', '0'],
+  // v2.9.9 Phase B PART A（A1）：Verification Truth 持久化证据列
+  ['runs', 'verification_status', 'TEXT'],
   // v2.9.2 closure: route decisions are created pre-run, then bound to real runtime identity.
   ['model_route_decisions', 'conversation_id', 'TEXT'],
   ['model_route_decisions', 'root_run_id', 'TEXT'],

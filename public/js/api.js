@@ -141,6 +141,12 @@ export const api = {
   agentCreate: (b) => call('agents:create', b),
   agentUpdate: (id, b) => call('agents:update', id, b),
   agentRemove: (id) => call('agents:remove', id),
+  // v2.9.9 Phase B（B13）— Dynamic Agent Definitions（持久化定义 ≠ 临时实例）
+  dynDefList: () => call('dynamicAgent:def:list'),
+  dynDefCreate: (definition) => call('dynamicAgent:def:create', definition),
+  dynDefUpdate: (id, patch) => call('dynamicAgent:def:update', id, patch),
+  dynDefDelete: (id) => call('dynamicAgent:def:delete', id),
+  dynInstanceList: () => call('dynamicAgent:instance:list'),
   externalAgents: () => call('externalAgents:list'),
   extCreate: (b) => call('externalAgents:create', b),
   extUpdate: (id, b) => call('externalAgents:update', id, b),
@@ -175,6 +181,8 @@ export const api = {
   mainRun: (b) => call('mainAgent:run', b),
   mainStop: (b) => call('mainAgent:stop', b),
   permissionRespond: (reqId, decision, range) => call('agent:permission-response', { reqId, decision, range }),
+  // v2.9.9 Phase B（B10）— Permission Request Center 队列元数据
+  permissionsList: () => call('permissions:list'),
 
   // panels
   tasks: (projectId) => call('tasks:list', projectId),

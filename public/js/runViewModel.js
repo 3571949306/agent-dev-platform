@@ -2,8 +2,47 @@ import { isTerminalStatus, normalizeStatus } from './uiStatus.js';
 
 const runs = new Map();
 const subscribers = new Set();
-const seenObjects = new WeakSet();
+// v2.9.9 Phase B PART A（A3）— Logical Event Deduplication。
+// WeakSet 只防同一 JS object；重放/克隆事件会绕过。改为逻辑身份去重：
+// 首选后端稳定 id（id/eventId/sequence/actionId/toolCallId），无 id 时用
+// bounded logical key；两个真实不同的 invocation（不同 id）绝不被误吞。
+// 缓存 bounded：最多 5000 条 + TTL 10 分钟，避免内存无限增长。
+const DEDUPE_MAX_ENTRIES = 5000;
+const DEDUPE_TTL_MS = 10 * 60 * 1000;
+const seenEventKeys = new Map(); // key -> seenAt
 let revision = 0;
+
+function eventLogicalKey(event) {
+  const runId = event.runId || event.parentRunId || '';
+  const direct = event.id || event.eventId;
+  if (direct !== undefined && direct !== null && direct !== '') return `id:${runId}:${direct}`;
+  if (event.sequence !== undefined && event.sequence !== null) return `seq:${runId}:${event.sequence}`;
+  const invocation = event.actionId || event.toolCallId
+    || (event.action && (event.action.id || event.action.invocationId)) || '';
+  if (invocation) return `inv:${runId}:${invocation}`;
+  // bounded logical key：run + type + timestamp + 状态迁移身份。
+  // 合法同内容 action 两次执行必带不同 eventId（backend 已保证），不会落到此分支。
+  const transition = `${event.previousStatus || ''}>${event.status || ''}`;
+  return `log:${runId}:${event.type || ''}:${event.timestamp || ''}:${transition}`;
+}
+
+function isDuplicateEvent(event) {
+  const key = eventLogicalKey(event);
+  const now = Date.now();
+  if (seenEventKeys.has(key)) {
+    if (now - seenEventKeys.get(key) <= DEDUPE_TTL_MS) return true;
+    seenEventKeys.delete(key); // 过期条目重新放行
+  }
+  // bounded eviction：超限时从最旧条目开始淘汰（含 TTL 过期清理）
+  if (seenEventKeys.size >= DEDUPE_MAX_ENTRIES) {
+    for (const [k, t] of seenEventKeys) {
+      if (seenEventKeys.size < DEDUPE_MAX_ENTRIES * 0.8 && now - t <= DEDUPE_TTL_MS) break;
+      seenEventKeys.delete(k);
+    }
+  }
+  seenEventKeys.set(key, now);
+  return false;
+}
 
 function deriveStage(event, previous) {
   const type = String(event.type || '');
@@ -81,7 +120,12 @@ function updateRun(event) {
   if (type === 'mainAgent:fileChanged' && event.path) node.files = [...new Set([...previous.files, event.path])];
   if (type === 'mainAgent:testResult') node.tests = [...previous.tests, { command: event.command, passed: !!event.passed, required: !!event.required, at: event.timestamp || Date.now() }].slice(-100);
   if (type === 'mainAgent:repairStart') node.repairs = previous.repairs + 1;
-  if (type === 'mainAgent:runCompleted') node.result = event.summary || event.result || previous.result;
+  if (type === 'mainAgent:runCompleted') {
+    node.result = event.summary || event.result || previous.result;
+    // v2.9.9 Phase B PART A（A1）— Verification Truth：只接收 backend 机器证据，
+    // Renderer 绝不从 run.status 推导验证结论。
+    if (event.verificationStatus) node.verificationStatus = event.verificationStatus;
+  }
   if (type === 'mainAgent:action' && event.action && event.action.type === 'complete') node.result = event.action.args && event.action.args.summary || previous.result;
   runs.set(id, node);
   if (node.parentRunId) {
@@ -93,8 +137,7 @@ function updateRun(event) {
 
 export function ingestRunEvent(event) {
   if (!event || typeof event !== 'object') return;
-  if (seenObjects.has(event)) return;
-  seenObjects.add(event);
+  if (isDuplicateEvent(event)) return;
   if (!updateRun(event)) return;
   revision++;
   for (const fn of subscribers) {
@@ -109,6 +152,8 @@ export function subscribeRunView(fn) {
 
 export function getRunView(runId) { return runs.get(runId) || null; }
 export function listRunViews() { return [...runs.values()]; }
-export function resetRunViews() { runs.clear(); revision++; }
+export function resetRunViews() { runs.clear(); seenEventKeys.clear(); revision++; }
 export function subscriberCount() { return subscribers.size; }
+// 测试钩子：bounded 去重缓存可观测（EVENT_DEDUPE_BOUNDED 证据）
+export function seenEventCount() { return seenEventKeys.size; }
 export { deriveStage };

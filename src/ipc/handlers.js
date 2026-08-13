@@ -23,6 +23,9 @@ const extAgents = require('../services/externalAgents');
 const { DesktopAgentBridge } = require('../services/desktopBridge');
 const { pickVisionModel } = require('../services/visionReader');
 const { RunManager } = require('../agent/runManager');
+// v2.9.9 Phase B PART A（A1/A2）— Verification Truth 与 Effective Project Identity 唯一裁决源
+const { resolveRunVerificationStatus } = require('../agent/runVerification');
+const { resolveRunProjectId } = require('../agent/runProjectIdentity');
 // v2.6.0 — Main Agent Runtime（自主编码闭环）。独立 IPC 模块，避免 handlers.js 膨胀。
 const mainAgentIpc = require('./mainAgent');
 // v2.7.0 — Agent Integration Hub
@@ -89,8 +92,27 @@ const platformToolNames = () => [
 let mainWindow = null;
 let currentProjectId = null;
 const activeRuns = new Map();
+// v2.9.9 Phase B PART B（B10）— Permission Request Center：
+// pendingPermissions 存 { resolve, createdAt, meta, timer }；
+// 请求有超时（过期一律自动拒绝，UI 不得再批准），队列元数据可查。
 const pendingPermissions = new Map();
+const PERMISSION_REQUEST_TIMEOUT_MS = Number(process.env.ADP_PERMISSION_TIMEOUT_MS) > 0
+  ? Number(process.env.ADP_PERMISSION_TIMEOUT_MS)
+  : 120000;
 const pendingFileDeletes = new Map();
+
+/**
+ * B10 — 唯一裁决通道：只有仍在 pending 的请求可以被回应。
+ * 过期/未知 reqId 一律失败（Expired permission cannot be approved）。
+ */
+function respondPendingPermission(reqId, decisionPayload) {
+  const entry = pendingPermissions.get(reqId);
+  if (!entry) return false;
+  pendingPermissions.delete(reqId);
+  if (entry.timer) clearTimeout(entry.timer);
+  try { entry.resolve(decisionPayload); } catch { /* already settled */ }
+  return true;
+}
 
 // E2E 测试钩子：externalImport:selectFile 一次性返回的文件路径（仅测试中设置）
 let testFilePickPath = null;
@@ -296,7 +318,11 @@ const productDiagnostics = createProductDiagnostics({
   mcpManager,
   agentRegistry,
   healthManager,
-  projectLock
+  projectLock,
+  // v2.9.9 Phase B（B20）— Diagnostics 接入新增产品区域的真实状态
+  pendingPermissions,
+  workflowRuntime: workflowEngine.runtime,
+  agentHub
 });
 
 let shutdownPromise = null;
@@ -331,8 +357,9 @@ async function shutdownServices() {
       try { controller.abort(); } catch { /* already terminal */ }
     }
     activeRuns.clear();
-    for (const resolve of pendingPermissions.values()) {
-      try { resolve({ decision: 'deny', range: 'once', reason: 'APPLICATION_SHUTDOWN' }); } catch { /* already settled */ }
+    for (const entry of pendingPermissions.values()) {
+      if (entry && entry.timer) clearTimeout(entry.timer);
+      try { (entry.resolve || entry)({ decision: 'deny', range: 'once', reason: 'APPLICATION_SHUTDOWN' }); } catch { /* already settled */ }
     }
     pendingPermissions.clear();
     pendingFileDeletes.clear();
@@ -370,6 +397,9 @@ async function shutdownServices() {
       try { controller.abort(); } catch { /* already terminal */ }
     }
     activeRuns.clear();
+    for (const entry of pendingPermissions.values()) {
+      if (entry && entry.timer) clearTimeout(entry.timer);
+    }
     pendingPermissions.clear();
     pendingFileDeletes.clear();
     for (const id of [...mcpManager.clients.keys()]) mcpManager.disconnect(id);
@@ -505,8 +535,26 @@ function artifactsDirFor(project) {
 function requestPermission(req) {
   return new Promise(resolve => {
     const reqId = crypto.randomUUID();
-    pendingPermissions.set(reqId, resolve);
-    emit('permission_request', { reqId, ...req });
+    const createdAt = Date.now();
+    const meta = {
+      reqId,
+      scope: req.scope || '',
+      tool: req.tool || '',
+      agent: req.agent || '',
+      runId: req.runId || null,
+      conversationId: req.conversationId || null,
+      risk: req.risk || '',
+      createdAt,
+      expiresAt: createdAt + PERMISSION_REQUEST_TIMEOUT_MS
+    };
+    // B10.8 — Timeout truth：过期请求一律自动拒绝（fail-closed）并通知 GUI，
+    // 绝不允许过期后仍可 Allow。
+    const timer = setTimeout(() => {
+      const handled = respondPendingPermission(reqId, { decision: 'deny', range: 'once', reason: 'PERMISSION_EXPIRED' });
+      if (handled) emit('permission_expired', { reqId });
+    }, PERMISSION_REQUEST_TIMEOUT_MS);
+    pendingPermissions.set(reqId, { resolve, createdAt, meta, timer });
+    emit('permission_request', { reqId, ...req, expiresAt: meta.expiresAt });
   });
 }
 
@@ -750,6 +798,16 @@ function mapRunRecord(row) {
   const durationMs = startedAt
     ? Math.max(0, new Date(terminalAt || row.updated_at || Date.now()).getTime() - new Date(startedAt).getTime())
     : 0;
+  // v2.9.9 Phase B PART A（A1）— Verification Truth：completed != PASS。
+  // 验证结论只来自机器证据（持久化证据列 / 真实测试事件），绝不从 run.status 推导。
+  const verification = resolveRunVerificationStatus({ row, testEvents: testEvidenceForRun(row) });
+  // v2.9.9 Phase B PART A（A2）— Effective Project Identity：Child Run 无 conversation 时
+  // 沿真实 root lineage 解析项目；lineage broken → null（不猜）。
+  const effectiveProjectId = resolveRunProjectId({
+    run: row,
+    getConversationProject: (cid) => { const c = cid ? store.conversations.get(cid) : null; return c ? (c.project_id || null) : null; },
+    getRun: (rid) => (rid ? store.runs.get(rid) : null)
+  });
   return {
     id: row.id,
     runId: row.id,
@@ -771,10 +829,26 @@ function mapRunRecord(row) {
     agentName: agent ? agent.name : (row.adapter_id || row.agent_id || '主智能体'),
     model: agent ? (agent.model || '') : '',
     goal: task ? task.title : (conversation ? conversation.title : ''),
-    projectId: conversation ? conversation.project_id : null,
+    projectId: conversation ? (conversation.project_id || null) : null,
+    effectiveProjectId,
     type: row.parent_run_id ? 'dynamic-child' : ((agent && agent.type === 'external') ? 'external' : 'main'),
-    verification: row.status === 'completed' ? 'PASS' : (['failed', 'timeout'].includes(row.status) ? 'FAIL' : '—')
+    verification,
+    verificationStatus: verification
   };
+}
+
+/**
+ * v2.9.9 Phase B PART A（A1）— 历史数据通道：从 events 表中取该 Run 的真实
+ * mainAgent:testResult 事件负载（机器证据）。无 conversation 的 Child Run 返回空。
+ */
+function testEvidenceForRun(row) {
+  if (!row || !row.conversation_id) return [];
+  try {
+    return store.events.list(row.conversation_id)
+      .filter(e => e.type === 'mainAgent:testResult')
+      .map(parseStoredEvent)
+      .filter(p => !p.runId || p.runId === row.id);
+  } catch { return []; }
 }
 
 function parseStoredEvent(row) {
@@ -917,7 +991,9 @@ function register(window) {
     const source = store.runs.list(Math.min(1000, Math.max(limit * 4, 200))).map(mapRunRecord);
     const filtered = source.filter(run => {
       if (status && run.status !== status) return false;
-      if (projectId && run.projectId && run.projectId !== projectId) return false;
+      // v2.9.9 Phase B PART A（A2）— 项目过滤严格按 effectiveProjectId：
+      // 身份未知（null）的 Run 不得混入任何项目视图（防跨项目泄漏）。
+      if (projectId && run.effectiveProjectId !== projectId) return false;
       if (search && !`${run.goal} ${run.agentName} ${run.id}`.toLowerCase().includes(search)) return false;
       return true;
     });
@@ -1375,10 +1451,14 @@ function register(window) {
     return { stopped: !!ac || !!run };
   });
   ipcMain.handle('agent:permission-response', (_e, { reqId, decision, range }) => {
-    const resolve = pendingPermissions.get(reqId);
-    if (resolve) { pendingPermissions.delete(reqId); resolve({ decision, range }); }
+    // B10.7/B10.8 — Renderer 只发送 decision，最终由 PermissionEngine 通道裁决；
+    // 过期/未知请求不得再被批准（EXPIRED_PERMISSION_CANNOT_APPROVE）。
+    const handled = respondPendingPermission(reqId, { decision, range });
+    if (!handled) return { ok: false, error: 'PERMISSION_EXPIRED: 该权限请求已过期或不存在' };
     return { ok: true };
   });
+  // B10.5 — Permission Queue 元数据（GUI 展示队列，不作为执行真话）
+  reg('permissions:list', () => [...pendingPermissions.values()].map(entry => entry.meta));
 
   // v2.7.0 — Agent Integration Hub IPC
   ipcMain.handle('hub:manifests', () => agentHub.getManifests());

@@ -739,6 +739,18 @@ const runs = {
         patch.error ?? ex.error, patch.message ?? ex.message, id);
     return runs.get(id);
   },
+  /**
+   * v2.9.9 Phase B PART A（A1）— Verification Truth 持久化。
+   * 只写验证证据列，绝不触碰 run.status（两个独立事实，互不推导）。
+   * 词汇表外的值一律拒绝（fail-closed）。
+   */
+  setVerification(id, verificationStatus) {
+    const v = String(verificationStatus || '').toUpperCase();
+    if (!['PASS', 'FAIL', 'NOT_AVAILABLE', 'NOT_VERIFIED', 'RUNNING', 'UNKNOWN'].includes(v)) return null;
+    const ex = db().prepare('SELECT id FROM runs WHERE id=?').get(id); if (!ex) return null;
+    db().prepare('UPDATE runs SET verification_status=?, updated_at=? WHERE id=?').run(v, now(), id);
+    return runs.get(id);
+  },
   remove(id) { db().prepare('DELETE FROM runs WHERE id=?').run(id); return true; }
 };
 

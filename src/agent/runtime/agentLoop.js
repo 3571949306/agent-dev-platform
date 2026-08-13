@@ -261,7 +261,7 @@ async function runAgentLoop(deps) {
       //    ask_permission 仍由 loop 处理
       if (action.type === 'ask_permission') {
         if (typeof deps.requestPermission === 'function') {
-          const d = await deps.requestPermission({ scope: action.args && action.args.scope, tool: action.args && action.args.tool, args: action.args, conversationId: ctx.conversationId });
+          const d = await deps.requestPermission({ scope: action.args && action.args.scope, tool: action.args && action.args.tool, args: action.args, conversationId: ctx.conversationId, runId: ctx.runId || null, agentId: ctx.agentId || null });
           if (d && d.decision === 'deny') {
             return finish('failed', { errorCode: 'PERMISSION_DENIED', error: '用户拒绝权限' });
           }

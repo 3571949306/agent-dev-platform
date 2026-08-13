@@ -285,7 +285,11 @@ function createWorkflowRuntime(options = {}) {
           return getRun(control.workflowRunId);
         }
       }
-      if (!WORKFLOW_TERMINAL.has(executionStore.get(control.workflowRunId).status)) {
+      // v2.9.9 Phase B（B11.9）— Cancel truth：已取消的 run 绝不得被标为 COMPLETED。
+      // cancel() 的 markRemaining 会通过 emit 触发微任务检查点，被取消步骤的
+      // 挂起 continuation 可能在 cancel 自己的 terminalWorkflow 之前恢复执行；
+      // 尾部完成守卫必须同时检查 control.cancelled（与 catch 路径守卫一致）。
+      if (!control.cancelled && !WORKFLOW_TERMINAL.has(executionStore.get(control.workflowRunId).status)) {
         const output = resolveTemplates(control.compiled.definition.outputs, control.context);
         terminalWorkflow(control, 'COMPLETED', { output: boundStepOutput(output) });
         audit(control, null, 'COMPLETED');

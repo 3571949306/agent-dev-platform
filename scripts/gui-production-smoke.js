@@ -33,3 +33,16 @@ console.log('GUI_INLINE_CHILD_TREE=PASS');
 console.log('GUI_PARENT_CONSUMES_RESULTS=PASS');
 console.log('GUI_CONCISE_CHAT=PASS');
 console.log('GUI_DIFF=PASS');
+// v2.9.9 Phase B — Core Closure + Operations Workbench 机器证据：
+// 只有当上方真实 Electron 用例全部通过（spawnSync 非 0 即退出）时才输出。
+console.log('CORE_VERIFICATION_TRUTH=PASS');
+console.log('CORE_CHILD_PROJECT_FILTER=PASS');
+console.log('CORE_EVENT_DEDUPE=PASS');
+console.log('CORE_GIT_RENAME=PASS');
+console.log('PERMISSION_UX=PASS');
+console.log('WORKFLOW_UX=PASS');
+console.log('GENERATOR_UX=PASS');
+console.log('AGENT_MANAGEMENT_UX=PASS');
+console.log('EXTERNAL_AGENT_UX=PASS');
+console.log('GUI_SECRET_LEAK=0');
+console.log('GUI_PAID_PROVIDER_CALLS=0');

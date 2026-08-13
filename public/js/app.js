@@ -36,6 +36,8 @@ async function boot() {
     try { chat.handleEvent(ev); } catch (err) { console.error('event error', err, ev); }
     try { pages.handleDiagEvent(ev); } catch (err) { console.error('diag event error', err, ev); }
     try { pages.handleProbeEvent(ev); } catch (err) { console.error('probe event error', err, ev); }
+    // v2.9.9 Phase B（B11）— Workflow 状态事件 → 徽标 + Problems（不只 toast）
+    try { pages.handleWorkflowEvent(ev); } catch (err) { console.error('workflow event error', err, ev); }
   });
 
   await refreshAgents();

@@ -28,6 +28,25 @@ const { buildSystemPrompt } = require('./prompts/mainCodingAgent');
 const { runAgentLoop } = require('./agentLoop');
 const { changedFilesSummary } = require('./checkpoint');
 const { dispatchRuntimeHook } = require('../../hooks/runtimeDispatch');
+// v2.9.9 Phase B PART A（A1）— Verification Truth：终态时把机器证据落库
+const { verificationFromOutcome } = require('../runVerification');
+
+/**
+ * v2.9.9 Phase B PART A（A1）— 终态后持久化验证证据。
+ * 只写 runs.verification_status，绝不影响 run.status（两个独立事实）。
+ * 证据持久化失败不得影响 Run 终态。
+ */
+function persistVerificationEvidence(store, runId, result) {
+  if (!store || !store.runs || typeof store.runs.setVerification !== 'function') return;
+  try {
+    const evidence = verificationFromOutcome({
+      status: result && result.status,
+      completion: result && result.completion,
+      tests: result && result.tests
+    });
+    store.runs.setVerification(runId, evidence);
+  } catch { /* 证据持久化失败不得影响 Run 终态 */ }
+}
 
 /**
  * 启动 Main Agent Run（异步，立即返回 runId，状态通过事件推送）。
@@ -96,6 +115,7 @@ function runMainAgent(opts) {
         });
       } catch { /* Late Result Guard */ }
       emitTerminalEvent(emit, runId, { status: 'failed', error: 'PROJECT_LOCKED', errorCode: 'PROJECT_LOCKED' });
+      persistVerificationEvidence(store, runId, { status: 'failed' });
       return { runId, conversationId, locked: false, lockHolder: holder };
     }
     projectLockHeld = true;
@@ -106,6 +126,25 @@ function runMainAgent(opts) {
   const blackboard = createBlackboard(goal);
   const verifyList = Array.isArray(verification) ? verification.map(v => ({ ...v, lastResult: null })) : [];
 
+  // v2.9.9 Phase B PART A（A1/A3）— 事件审计链 + 逻辑去重身份：
+  //   1. 每个事件携带稳定 eventId（Renderer 逻辑去重的首选身份，不再依赖 JS 对象引用）
+  //   2. TEST_RESULT 持久化进 events 表，作为 Verification Truth 的机器证据
+  const upstreamEmit = typeof emit === 'function' ? emit : () => {};
+  const trackedEmit = (type, payload) => {
+    const enriched = (payload && typeof payload === 'object')
+      ? (payload.eventId ? payload : { eventId: crypto.randomUUID(), ...payload })
+      : payload;
+    upstreamEmit(type, enriched);
+    if (type === EVENTS.TEST_RESULT && store && store.events && conversationId) {
+      try {
+        store.events.append({
+          conversation_id: conversationId, task_id: null, agent_id: agentId,
+          type, payload: { ...enriched, runId }
+        });
+      } catch { /* 审计持久化失败不得中断 Run */ }
+    }
+  };
+
   // 2. 构建 runCtx
   const ac = new AbortController();
   const ctx = {
@@ -114,7 +153,7 @@ function runMainAgent(opts) {
     parentRunId: opts.parentRunId || run.parentRunId || null,
     projectRoot, projectId, agentId, agentName,
     conversationId, taskId: null,
-    store, emit, abortSignal: ac.signal,
+    store, emit: trackedEmit, abortSignal: ac.signal,
     // 工具需要的字段
     permissionEngine: opts.permissionEngine || null,
     // v2.9.0 Real Runtime Closure（R4）：工具权限闸门需要 requestPermission（'ask' 决策通道）
@@ -176,6 +215,7 @@ function runMainAgent(opts) {
       // fail-closed：Skill 解析失败 → Run 直接失败，绝不静默继续
       try { runManager.finishRun(runId, 'failed', { error: error.message, source: 'skillResolution' }); } catch { /* Late Result Guard */ }
       emitTerminalEvent(emit, runId, { status: 'failed', error: error.message, errorCode: error.code });
+      persistVerificationEvidence(store, runId, { status: 'failed' });
       if (projectLockHeld) { try { projectMutationLock.release(runId); } catch { /* noop */ } projectLockHeld = false; }
       throw error;
     }
@@ -311,7 +351,7 @@ function runMainAgent(opts) {
       result = await runAgentLoop({
         model, getTool: effectiveGetTool, ctx, limits: lim, plan, blackboard,
         verification: verifyList, requiredFiles: requiredFiles || [],
-        emit, runManager, runId, setState, systemPrompt,
+        emit: trackedEmit, runManager, runId, setState, systemPrompt,
         projectSummary: opts.projectSummary || '',
         requestPermission,
         onToolResult: onToolResult || defaultOnToolResult(ctx, store, conversationId)
@@ -340,6 +380,8 @@ function runMainAgent(opts) {
       const finalRun = runManager.getRun(runId);
       const terminalStatus = finalRun && finalRun.status ? finalRun.status : (result && result.status);
       emitTerminalEvent(emit, runId, { ...result, status: terminalStatus });
+      // v2.9.9 Phase B PART A（A1）— 验证证据落库（CompletionPolicy/测试结果的机器证据）
+      persistVerificationEvidence(store, runId, { ...result, status: terminalStatus });
     } catch (e) {
       // v2.9.8 Final Closure（A1）— Terminal Truth All Exit Paths：
       // catch 只推断「写入 RunManager 的目标终态」；若 RunManager 已终态（如 timeout
@@ -354,6 +396,7 @@ function runMainAgent(opts) {
       const finalRun = runManager.getRun(runId);
       const truthStatus = finalRun && finalRun.status ? finalRun.status : inferred;
       emitTerminalEvent(emit, runId, { status: truthStatus, error: e.message, errorCode: e.code });
+      persistVerificationEvidence(store, runId, { status: truthStatus });
       result = { status: truthStatus, error: e.message, errorCode: e.code };
     } finally {
       try {

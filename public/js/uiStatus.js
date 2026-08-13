@@ -31,3 +31,28 @@ export const STAGE_LABELS = Object.freeze({
 });
 
 export function stageLabel(stage) { return STAGE_LABELS[String(stage || '').toLowerCase()] || STAGE_LABELS.unknown; }
+
+// v2.9.9 Phase B（B40）— 新增产品区域的统一状态词汇：
+// Permission / Workflow / Generator / Agent / Connection / External Agent。
+// Renderer 各页面一律从这里取标签，不得各写各的 success/ready/ok/working。
+export const WORKFLOW_STEP_LABELS = Object.freeze({
+  PENDING: '等待', READY: '就绪', RUNNING: '运行中', WAITING_APPROVAL: '等待批准',
+  COMPLETED: '已完成', FAILED: '失败', SKIPPED: '已跳过', CANCELLED: '已取消'
+});
+export const WORKFLOW_RUN_LABELS = Object.freeze({
+  RUNNING: '运行中', WAITING_APPROVAL: '等待批准', COMPLETED: '已完成', FAILED: '失败', CANCELLED: '已取消'
+});
+export const GENERATOR_STATUS_LABELS = Object.freeze({
+  GENERATING: '生成中', REPAIRING: '修复中', VALIDATING: '验证中', READY: 'READY（草稿）',
+  FAILED: '失败', CANCELLED: '已取消', SAVED: '已保存', DISCARDED: '已丢弃'
+});
+export const VERIFICATION_LABELS = Object.freeze({
+  PASS: 'PASS', FAIL: 'FAIL', NOT_AVAILABLE: 'NOT_AVAILABLE',
+  NOT_VERIFIED: 'NOT_VERIFIED', RUNNING: 'RUNNING', UNKNOWN: 'UNKNOWN'
+});
+export const EXTERNAL_AVAILABILITY = Object.freeze(['AVAILABLE', 'UNAVAILABLE', 'UNKNOWN', 'ERROR']);
+export const CONNECTION_STATUS = Object.freeze(['AVAILABLE', 'UNAVAILABLE', 'UNKNOWN']);
+export function workflowStepLabel(status) { return WORKFLOW_STEP_LABELS[status] || status || '—'; }
+export function workflowRunLabel(status) { return WORKFLOW_RUN_LABELS[status] || status || '—'; }
+export function generatorStatusLabel(status) { return GENERATOR_STATUS_LABELS[status] || status || '—'; }
+export function verificationLabel(status) { return VERIFICATION_LABELS[String(status || '').toUpperCase()] || status || '—'; }

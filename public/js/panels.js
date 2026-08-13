@@ -10,6 +10,32 @@ const problems = [];
 let diffRenderRevision = 0;
 let diffSelectionRevision = 0;
 
+// v2.9.9 Phase B（B10/B11/B12/B14）— Activity Bar Notification Badges：
+// Permission waiting / Workflow waiting approval / Generator READY / Agent error。
+// count <= 0 清除徽标；徽标只是提示，不是执行真话。
+const BADGE_TARGETS = Object.freeze({
+  permission: '[data-act="runs"]',
+  workflow: '[data-page="workflows"]',
+  generator: '[data-page="generator"]',
+  agent: '[data-page="agents"]'
+});
+export function setBadge(kind, count) {
+  const selector = BADGE_TARGETS[kind];
+  if (!selector) return;
+  const button = document.querySelector(`#activity-bar ${selector}`);
+  if (!button) return;
+  const n = Number(count) || 0;
+  let badge = button.querySelector('.ab-badge');
+  if (n <= 0) { if (badge) badge.remove(); return; }
+  if (!badge) {
+    badge = document.createElement('span');
+    badge.className = 'ab-badge';
+    badge.setAttribute('aria-hidden', 'true');
+    button.appendChild(badge);
+  }
+  badge.textContent = n > 99 ? '99+' : String(n);
+}
+
 // v2.6.0 — 运行时间线（紧凑视图，bottom tab + 右侧栏）
 const timeline = []; // [{ runId, entry: {kind, icon, text, detail, t} }]
 
@@ -142,7 +168,12 @@ function renderDiffFile(file, rows) {
   const body = $('#diff-viewer-body');
   const index = rows.findIndex(row => row.path === file.path);
   body.className = 'diff-viewer-body';
-  body.innerHTML = `<div class="diff-view-head"><strong class="mono">${esc(file.path)}</strong><span class="grow"></span><button class="btn tiny" data-prev-change>Previous Change</button><button class="btn tiny" data-next-change>Next Change</button><button class="btn tiny" data-open-source>Open File</button><button class="btn tiny" data-copy-path>Copy File Path</button><button class="btn tiny" data-copy-diff>Copy Diff</button></div>${renderUnifiedDiffBounded(file.diff, 5000)}`;
+  // v2.9.9 Phase B PART A（A4）— Rename truth：后端报告的 rename 必须在头部呈现 old → new，
+  // 即使内容未变化也展示改名事实。
+  const renameHeader = file.oldPath && file.oldPath !== file.path
+    ? `<div class="diff-rename-head"><span class="chip">R</span><span class="mono">${esc(file.oldPath)}</span><span class="muted">→</span><span class="mono">${esc(file.path)}</span></div>`
+    : '';
+  body.innerHTML = `${renameHeader}<div class="diff-view-head"><strong class="mono">${esc(file.path)}</strong><span class="grow"></span><button class="btn tiny" data-prev-change>Previous Change</button><button class="btn tiny" data-next-change>Next Change</button><button class="btn tiny" data-open-source>Open File</button><button class="btn tiny" data-copy-path>Copy File Path</button><button class="btn tiny" data-copy-diff>Copy Diff</button></div>${renderUnifiedDiffBounded(file.diff, 5000)}`;
   body.querySelector('[data-prev-change]').onclick = () => rows[(index - 1 + rows.length) % rows.length] && $(`[data-diff-file="${cssEscape(rows[(index - 1 + rows.length) % rows.length].path)}"]`)?.click();
   body.querySelector('[data-next-change]').onclick = () => rows[(index + 1) % rows.length] && $(`[data-diff-file="${cssEscape(rows[(index + 1) % rows.length].path)}"]`)?.click();
   body.querySelector('[data-open-source]').onclick = () => openFile(file.path);

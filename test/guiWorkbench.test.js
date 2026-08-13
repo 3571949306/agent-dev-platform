@@ -111,3 +111,42 @@ test('B7 backend Git truth reports add/modify/delete and preserves a complete la
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test('A4 git rename truth: git mv parses as R with old/new paths and rename diff', async () => {
+  const root = tempRoot('adp-workbench-rename-');
+  try {
+    git(root, 'init');
+    git(root, 'config', 'user.email', 'workbench@example.invalid');
+    git(root, 'config', 'user.name', 'Workbench Fixture');
+    fs.writeFileSync(path.join(root, 'old.js'), 'module.exports = 1;\n', 'utf8');
+    git(root, 'add', '.');
+    git(root, 'commit', '-m', 'fixture');
+
+    // 真实 Git rename fixture（spec A4）：git mv，内容未变化
+    git(root, 'mv', 'old.js', 'new.js');
+
+    const service = createWorkbenchGitService(root);
+    const changed = await service.changedFiles();
+    const renamed = changed.files.find(file => file.path === 'new.js');
+    assert.ok(renamed, 'changedFiles 必须包含 new.js');
+    assert.strictEqual(renamed.status, 'R', `rename 必须解析为 R，实际: ${renamed.status}`);
+    assert.strictEqual(renamed.oldPath, 'old.js', 'rename 旧路径必须为 old.js');
+    // 不能把旧路径当独立条目泄漏
+    assert.ok(!changed.files.find(file => file.path === 'old.js'), 'old.js 不得作为独立变更条目出现');
+
+    const diff = await service.diff('new.js');
+    assert.strictEqual(diff.status, 'R');
+    assert.strictEqual(diff.oldPath, 'old.js');
+    assert.strictEqual(diff.renamed, true);
+    // 内容未变化也必须呈现 rename truth
+    assert.match(diff.diff, /rename from old\.js|old\.js/, 'diff 必须包含 rename 事实');
+    assert.match(diff.diff, /rename to new\.js|new\.js/, 'diff 必须包含新路径');
+
+    console.log('GIT_RENAME_STATUS=R');
+    console.log('GIT_RENAME_OLD_PATH=old.js');
+    console.log('GIT_RENAME_NEW_PATH=new.js');
+    console.log('GIT_RENAME_DIFF=PASS');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});

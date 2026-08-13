@@ -265,7 +265,16 @@ class RunManager {
     try { this.store.runs.upsert(run); } catch (e) { this._debug('runs 持久化失败: ' + e.message, run); }
   }
 
-  _emit(type, payload) { try { this.emit(type, payload); } catch (e) { this._debug('emit 失败: ' + e.message); } }
+  // v2.9.9 Phase B PART A（A3）— 每个状态机事件携带稳定 eventId：
+  // Renderer 逻辑去重的首选身份（同一投递/重放不再依赖 JS 对象引用）。
+  _emit(type, payload) {
+    try {
+      const enriched = (payload && typeof payload === 'object' && !payload.eventId)
+        ? { eventId: crypto.randomUUID(), ...payload }
+        : payload;
+      this.emit(type, enriched);
+    } catch (e) { this._debug('emit 失败: ' + e.message); }
+  }
 
   _debug(msg, run) {
     try {

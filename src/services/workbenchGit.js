@@ -21,22 +21,55 @@ async function isGitProject(root) {
   catch { return false; }
 }
 
+/**
+ * v2.9.9 Phase B PART A（A4）— 按 Git `-z` 真实格式解析 porcelain=v1 输出。
+ *
+ * `-z` 下条目以 NUL 分隔；rename/copy 条目的原路径不是用 "old -> new" 字符串
+ * 内联，而是紧随其后的独立 NUL 元素：`R  new.js\0old.js\0`。
+ * 状态映射：M / A / D / R / C，`??`（untracked）呈现为 A。
+ */
 function parseStatus(raw) {
-  const rows = String(raw || '').split('\0').filter(Boolean);
-  return rows.map(row => {
-    const code = row.slice(0, 2);
-    const body = row.slice(3);
+  const tokens = String(raw || '').split('\0');
+  const records = [];
+  for (let i = 0; i < tokens.length; i++) {
+    const token = tokens[i];
+    if (!token || token.length < 3) continue;
+    const code = token.slice(0, 2);
+    const body = token.slice(3);
     const renamed = code.includes('R') || code.includes('C');
-    const parts = renamed ? body.split(' -> ') : [body];
-    const filePath = parts[parts.length - 1].replace(/\\/g, '/');
-    let status = code === '??' ? 'A' : (code.includes('R') ? 'R' : (code.includes('A') ? 'A' : (code.includes('D') ? 'D' : 'M')));
-    return { path: filePath, oldPath: renamed ? parts[0].replace(/\\/g, '/') : null, status, porcelain: code };
-  });
+    let oldPath = null;
+    if (renamed) {
+      oldPath = tokens[i + 1] ? tokens[i + 1].replace(/\\/g, '/') : null;
+      i += 1; // 原路径是独立条目，跳过
+    }
+    const filePath = body.replace(/\\/g, '/');
+    let status;
+    if (code === '??') status = 'A';
+    else if (code.includes('R') || code.includes('C')) status = 'R';
+    else if (code.includes('A')) status = 'A';
+    else if (code.includes('D')) status = 'D';
+    else status = 'M';
+    records.push({ path: filePath, oldPath, status, porcelain: code });
+  }
+  return records;
 }
 
-async function numstatFor(root, relPath) {
+/** numstat 的 rename 行形如 `old => new` 或 `pre/{old => new}/post`，归一到新路径。 */
+function numstatPath(rawPath) {
+  let p = String(rawPath || '').replace(/\\/g, '/');
+  const brace = /^(.*)\{(.*) => (.*)\}(.*)$/.exec(p);
+  if (brace) p = (brace[1] + brace[3] + brace[4]).replace(/\/\//g, '/');
+  else if (p.includes(' => ')) p = p.split(' => ')[1];
+  return p;
+}
+
+async function numstatFor(root, relPath, oldPath) {
   try {
-    const out = (await git(root, ['diff', '--numstat', 'HEAD', '--', relPath])).trim();
+    // rename 时用 --find-renames 对旧路径取 numstat，保证纯改名（0 内容变化）也有真实证据
+    const diffArgs = oldPath
+      ? ['diff', '--numstat', '--find-renames', 'HEAD', '--', oldPath, relPath]
+      : ['diff', '--numstat', 'HEAD', '--', relPath];
+    const out = (await git(root, diffArgs)).trim();
     if (out) {
       const [added, deleted] = out.split(/\s+/);
       return { added: Number(added) || 0, deleted: Number(deleted) || 0 };
@@ -79,10 +112,10 @@ function createWorkbenchGitService(root) {
     const bounded = records.slice(0, 500);
     const stats = new Map();
     try {
-      const rawStats = await git(root, ['diff', '--numstat', 'HEAD']);
+      const rawStats = await git(root, ['diff', '--numstat', '--find-renames', 'HEAD']);
       for (const line of rawStats.split(/\r?\n/).filter(Boolean)) {
         const [added, deleted, ...pathParts] = line.split('\t');
-        stats.set(pathParts.join('\t').replace(/\\/g, '/'), { added: Number(added) || 0, deleted: Number(deleted) || 0 });
+        stats.set(numstatPath(pathParts.join('\t')), { added: Number(added) || 0, deleted: Number(deleted) || 0 });
       }
     } catch { /* unborn repo */ }
     return {
@@ -96,14 +129,18 @@ function createWorkbenchGitService(root) {
     const rel = path.relative(root, guard(root, relPath)).split(path.sep).join('/');
     const statusRows = parseStatus(await git(root, ['status', '--porcelain=v1', '-z', '--untracked-files=all']));
     const record = statusRows.find(row => row.path === rel);
-    if (!record) return { path: rel, diff: '', status: null };
+    if (!record) return { path: rel, diff: '', status: null, oldPath: null, renamed: false };
     let text = '';
     if (record.porcelain === '??') text = syntheticUntrackedDiff(root, rel);
+    else if (record.status === 'R') {
+      // Rename truth：即使内容未变化，diff 也必须呈现 rename 事实（old → new）
+      text = await git(root, ['diff', '--no-ext-diff', '--unified=3', '--find-renames', 'HEAD', '--', record.oldPath || rel, rel]);
+    }
     else text = await git(root, ['diff', '--no-ext-diff', '--unified=3', 'HEAD', '--', rel]);
-    return { path: rel, diff: text, status: record.status, ...await numstatFor(root, rel) };
+    return { path: rel, diff: text, status: record.status, oldPath: record.oldPath, renamed: record.status === 'R', ...await numstatFor(root, rel, record.oldPath) };
   }
 
   return { status, changedFiles, diff };
 }
 
-module.exports = { createWorkbenchGitService, parseStatus };
+module.exports = { createWorkbenchGitService, parseStatus, numstatPath };

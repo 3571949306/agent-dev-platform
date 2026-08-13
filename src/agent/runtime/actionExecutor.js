@@ -311,7 +311,8 @@ async function runTool(ctx, toolName, args, getTool, action, meta = {}) {
         let allowed = false;
         if (typeof ctx.requestPermission === 'function') {
           try {
-            const d = await ctx.requestPermission({ scope, tool: toolName, args, conversationId: ctx.conversationId });
+            // B10.6 — 权限请求携带真实 Run 身份（Permission Card 可跳到 Run Detail）
+            const d = await ctx.requestPermission({ scope, tool: toolName, args, conversationId: ctx.conversationId, runId: ctx.runId || null, agentId: ctx.agentId || null });
             allowed = !!(d && d.decision === 'allow');
           } catch { allowed = false; }
         }

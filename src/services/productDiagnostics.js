@@ -26,11 +26,20 @@ function externalState(health) {
   return 'UNKNOWN';
 }
 
+// PermissionEngine 是启动时接线的单例类（安全模块，永远不得在诊断里重建第二套）；
+// 这里只检查可引用性，不构造实例。
+function PermissionEngineAvailable() {
+  try { return typeof require('../security/permissions').PermissionEngine === 'function'; }
+  catch { return false; }
+}
+
 function createProductDiagnostics(deps = {}) {
   const {
     version, store, getDb, modelCatalog, dynamicAgentFactory, skillRegistry,
     hookEngine, workflowEngine, generatorEngine, computerManager, browserManager,
-    mcpManager, agentRegistry, healthManager, projectLock
+    mcpManager, agentRegistry, healthManager, projectLock,
+    // v2.9.9 Phase B（B20）— 新增产品区域的真实 backend 状态接入
+    pendingPermissions, workflowRuntime, agentHub
   } = deps;
 
   async function inspect({ probeExternal = true, probeComputer = true } = {}) {
@@ -80,6 +89,33 @@ function createProductDiagnostics(deps = {}) {
     report.generator = {
       status: generatorEngine && generatorEngine.service && typeof generatorEngine.service.generate === 'function' && typeof generatorEngine.service.save === 'function' ? 'READY' : 'ERROR'
     };
+
+    // B20 — Permission Engine 状态来自真实 backend（pending 队列 + 授权记录）
+    let grantCount = null;
+    try { grantCount = store.permissionGrants.list().length; } catch { /* 无授权表时缺省 */ }
+    report.permissionEngine = {
+      status: typeof PermissionEngineAvailable() === 'boolean' ? 'READY' : 'ERROR',
+      pendingRequests: pendingPermissions && typeof pendingPermissions.size === 'number' ? pendingPermissions.size : 0,
+      grants: grantCount
+    };
+
+    // B20 — Workflow Runtime 状态（活跃执行计数，来自真实 runtime）
+    try {
+      const runs = workflowRuntime && typeof workflowRuntime.listRuns === 'function' ? workflowRuntime.listRuns(50) : [];
+      report.workflowRuntime = {
+        status: workflowRuntime && typeof workflowRuntime.run === 'function' ? 'READY' : 'ERROR',
+        activeRuns: runs.filter(r => ['RUNNING', 'WAITING_APPROVAL'].includes(r.status)).length,
+        waitingApproval: runs.filter(r => r.status === 'WAITING_APPROVAL').length
+      };
+    } catch (error) { report.workflowRuntime = { status: 'ERROR', error: error.message }; }
+
+    // B20 — AgentHub 状态（注册适配器数，真实注册表）
+    try {
+      report.agentHub = {
+        status: agentHub && typeof agentHub.detect === 'function' ? 'READY' : 'ERROR',
+        registeredAdapters: agentRegistry.list().length
+      };
+    } catch (error) { report.agentHub = { status: 'ERROR', error: error.message }; }
 
     if (process.platform !== 'win32') {
       report.computerUse = { status: 'UNSUPPORTED' };

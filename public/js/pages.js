@@ -4,6 +4,10 @@ import { state } from './state.js';
 import { $, $$, esc, h, toast, fmtTime, truncate, confirmBox, openModal, closeModal, onModalOk, prettyJson } from './util.js';
 import { ZH, sourceName } from './i18n.js';
 import * as theme from './theme.js';
+import * as panels from './panels.js';
+import { selectInspector } from './workspace.js';
+// v2.9.9 Phase B（B40）— 统一状态词汇单一真源（不在页面内各写各的）
+import { WORKFLOW_STEP_LABELS as WF_STEP_LABEL, WORKFLOW_RUN_LABELS as WF_RUN_LABEL, GENERATOR_STATUS_LABELS as GENERATOR_STATUS_LABEL } from './uiStatus.js';
 
 // v2.3.0: External Agent 状态卡 —— 把最近一次运行结果展示在列表卡片上
 function extStatusBase(s) { return String(s || '').split(':')[0].trim(); }
@@ -1267,11 +1271,19 @@ function externalImport() {
 /* Agents                                                              */
 /* ------------------------------------------------------------------ */
 async function renderAgents(body) {
-  const [agents, conns, prompts, tools, ext] = await Promise.all([api.agents(), api.connections(), api.prompts(), api.tools(), api.externalAgents()]);
+  const [agents, conns, prompts, tools, ext, dynDefs] = await Promise.all([
+    api.agents(), api.connections(), api.prompts(), api.tools(), api.externalAgents(),
+    api.dynDefList().catch(() => [])
+  ]);
   const native = agents.filter(a => a.type !== 'external');
+  // B13.1/B13.2 — 分类：Main Agents 与普通本地智能体分开呈现
+  const mains = native.filter(a => a.is_main);
+  const others = native.filter(a => !a.is_main);
+  const connName = id => { const c = conns.find(x => x.id === id); return c ? c.name : (id || 'Auto'); };
   body.innerHTML = `
     <div class="page-actions">
       <button class="btn primary" id="agent-add">+ 新建智能体</button>
+      <button class="btn" id="dyn-add">+ 新建 Dynamic Agent 定义</button>
       <button class="btn" id="ext-add">+ 接入外部智能体</button>
     </div>
     <h3>Agent Integration Hub</h3>
@@ -1284,10 +1296,25 @@ async function renderAgents(body) {
       </div>
       <div id="hub-route-results" style="margin-top:8px"></div>
     </div>
-    <h3>本地智能体</h3>
-    <div class="cards">${native.map(a => `
+    <h3>主智能体</h3>
+    <div class="cards">${mains.map(a => `
       <div class="acard">
-        <div class="acard-h"><b>${esc(a.name)}</b>${a.is_main ? '<span class="chip ok">主智能体</span>' : ''}${a.type === 'computer' ? '<span class="chip">电脑操作</span>' : ''}</div>
+        <div class="acard-h"><b>${esc(a.name)}</b><span class="chip ok">Main</span>${a.type === 'computer' ? '<span class="chip">电脑操作</span>' : ''}</div>
+        <div class="muted small">${esc(truncate(a.description || '', 120))}</div>
+        <div class="acard-meta">
+          <span>模型：${esc(a.model || 'Auto（Model Router）')}</span>
+          <span>连接：${esc(connName(a.api_connection_id))}</span>
+          <span>默认 Skills：${(a.skill_ids || a.defaultSkillIds || []).length}</span>
+          <span>默认 Hooks：${(a.hook_ids || a.defaultHookIds || []).length}</span>
+          <span>状态：Available</span>
+        </div>
+        <div class="muted small">主智能体不作为普通 Dynamic Definition 编辑。</div>
+        <div class="acard-f"><button class="btn tiny" data-ae="${a.id}">编辑</button></div>
+      </div>`).join('') || '<div class="empty">没有主智能体</div>'}</div>
+    <h3>本地智能体</h3>
+    <div class="cards">${others.map(a => `
+      <div class="acard">
+        <div class="acard-h"><b>${esc(a.name)}</b>${a.type === 'computer' ? '<span class="chip">电脑操作</span>' : ''}</div>
         <div class="muted small">${esc(truncate(a.description || '', 120))}</div>
         <div class="acard-meta">
           <span>模型：${esc(a.model || '未设置')}</span>
@@ -1297,7 +1324,26 @@ async function renderAgents(body) {
         </div>
         <div class="acard-f"><button class="btn tiny" data-ae="${a.id}">编辑</button><button class="btn tiny danger" data-ad="${a.id}">删除</button></div>
       </div>`).join('') || '<div class="empty">还没有智能体</div>'}</div>
-    <h3>外部智能体（Codex / WorkBuddy / HTTP）</h3>
+    <h3>Dynamic Agent Definitions</h3>
+    <div class="muted small">持久化定义库。内联临时子智能体（ephemeral children）只在 Run Detail 可见，不会写入此库。</div>
+    <div class="cards">${dynDefs.map(d => {
+      const builtin = d.source === 'builtin' || (d.metadata && d.metadata.source === 'builtin');
+      const readOnly = d.permissionPolicy && d.permissionPolicy.readOnly;
+      return `
+      <div class="acard">
+        <div class="acard-h"><b>${esc(d.name || d.id)}</b><span class="chip">${esc(d.role || 'dynamic')}</span>${builtin ? '<span class="chip ok">Built-in</span>' : ''}${readOnly ? '<span class="chip">Read Only</span>' : ''}${d.canDelegate ? '<span class="chip">Can Delegate</span>' : ''}</div>
+        <div class="muted small">${esc(truncate(d.description || '', 120))}</div>
+        <div class="acard-meta">
+          <span>Runtime：${esc(d.runtime && d.runtime.kind || 'native')}</span>
+          <span>Model：${esc(d.modelPolicy && d.modelPolicy.mode || 'inherit_parent')}</span>
+          <span>Tools：${((d.toolPolicy && d.toolPolicy.allow) || []).length || 'policy'}</span>
+          <span>Skills：${((d.skills && d.skills.required) || []).length}</span>
+          <span>Hooks：${((d.hooks && d.hooks.required) || []).length}</span>
+        </div>
+        <div class="muted small">Used By：UNKNOWN（无可靠引用索引，不猜测）</div>
+        <div class="acard-f"><button class="btn tiny" data-dyn-edit="${esc(d.id)}">编辑</button>${builtin ? '' : `<button class="btn tiny danger" data-dyn-del="${esc(d.id)}">删除</button>`}</div>
+      </div>`; }).join('') || '<div class="empty">还没有 Dynamic Agent 定义</div>'}</div>
+    <h3>外部智能体</h3>
     <div class="cards">${ext.map(a => `
       <div class="acard">
         <div class="acard-h"><b>${esc(a.name)}</b><span class="chip">${esc(a.adapter_type)}</span>${a.online ? '<span class="chip ok">在线</span>' : ''}</div>
@@ -1308,11 +1354,23 @@ async function renderAgents(body) {
       </div>`).join('') || '<div class="empty">没有外部智能体</div>'}</div>`;
 
   $('#agent-add').onclick = () => agentForm(null, { conns, prompts, tools, agents: native, extAgents: ext });
+  $('#dyn-add').onclick = () => dynAgentForm(null);
   $('#ext-add').onclick = () => extForm(null, conns);
   body.querySelectorAll('[data-ae]').forEach(b => b.onclick = () => agentForm(native.find(a => a.id === b.dataset.ae), { conns, prompts, tools, agents: native, extAgents: ext }));
   body.querySelectorAll('[data-ad]').forEach(b => b.onclick = async () => {
     if (!await confirmBox('删除智能体', '确定删除该智能体？')) return;
     await api.agentRemove(b.dataset.ad); toast('已删除'); open('agents');
+  });
+  body.querySelectorAll('[data-dyn-edit]').forEach(b => b.onclick = () => dynAgentForm(dynDefs.find(d => d.id === b.dataset.dynEdit)));
+  body.querySelectorAll('[data-dyn-del]').forEach(b => b.onclick = async () => {
+    const def = dynDefs.find(d => d.id === b.dataset.dynDel);
+    // B13.5 — Built-in 禁止删除（UI 隐藏按钮 + 这里双保险）
+    if (def && (def.source === 'builtin' || (def.metadata && def.metadata.source === 'builtin'))) {
+      return toast('Built-in 定义不可删除', 'warn');
+    }
+    if (!await confirmBox('删除 Dynamic Agent 定义', `确定删除「${b.dataset.dynDel}」？`)) return;
+    try { await api.dynDefDelete(b.dataset.dynDel); toast('已删除'); open('agents'); }
+    catch (error) { toast(error.message, 'error'); panels.addProblem(`Agent 定义删除失败：${error.message}`); }
   });
   body.querySelectorAll('[data-ee]').forEach(b => b.onclick = () => extForm(ext.find(a => a.id === b.dataset.ee), conns));
   body.querySelectorAll('[data-ed]').forEach(b => b.onclick = async () => {
@@ -1324,6 +1382,66 @@ async function renderAgents(body) {
   loadHubCards(body);
   const routeBtn = $('#hub-route-btn', body);
   if (routeBtn) routeBtn.onclick = () => runHubRoutePreview(body);
+}
+
+/**
+ * B13.3/B13.4 — Dynamic Agent 定义表单：所有保存一律走 backend
+ * AgentDefinition validator（dynamicAgent:def:* → normalizeAgentDefinition），
+ * Renderer 不做任何绕过。
+ */
+function dynAgentForm(existing) {
+  const d = existing || {};
+  const content = `<div class="form-grid">
+    <label>名称<input type="text" id="dyn-name" value="${esc(d.name || '')}" placeholder="例如：Code Reviewer"></label>
+    <label>Role<input type="text" id="dyn-role" value="${esc(d.role || '')}" placeholder="例如：review"></label>
+    <label>Lifetime<select id="dyn-lifetime">${['run', 'task', 'session', 'persistent'].map(v => `<option value="${v}" ${d.lifetime === v ? 'selected' : ''}>${v}</option>`).join('')}</select></label>
+    <label>Model Policy<select id="dyn-model-mode">${['inherit_parent', 'auto', 'explicit'].map(v => `<option value="${v}" ${d.modelPolicy && d.modelPolicy.mode === v ? 'selected' : ''}>${v}</option>`).join('')}</select></label>
+  </div>
+  <label>Description<input type="text" id="dyn-desc" value="${esc(d.description || '')}"></label>
+  <label>System Prompt<textarea id="dyn-prompt" rows="4">${esc(d.systemPrompt || '')}</textarea></label>
+  <div class="form-grid">
+    <label>Tool Allow（逗号分隔）<input type="text" id="dyn-tool-allow" value="${esc(((d.toolPolicy && d.toolPolicy.allow) || []).join(', '))}"></label>
+    <label>Tool Deny（逗号分隔）<input type="text" id="dyn-tool-deny" value="${esc(((d.toolPolicy && d.toolPolicy.deny) || []).join(', '))}"></label>
+    <label>Skills Required（逗号分隔）<input type="text" id="dyn-skills" value="${esc(((d.skills && d.skills.required) || []).join(', '))}"></label>
+    <label>Hooks Required（逗号分隔）<input type="text" id="dyn-hooks" value="${esc(((d.hooks && d.hooks.required) || []).join(', '))}"></label>
+  </div>
+  <div class="form-grid">
+    <label><input type="checkbox" id="dyn-readonly" ${d.permissionPolicy && d.permissionPolicy.readOnly ? 'checked' : ''}> Read Only（只读，禁止文件修改）</label>
+    <label><input type="checkbox" id="dyn-delegate" ${d.canDelegate ? 'checked' : ''}> Can Delegate（可委派子智能体）</label>
+  </div>
+  <div class="actions"><button class="btn primary" id="dyn-save">保存（走 AgentDefinition 校验）</button></div>
+  <div id="dyn-errors"></div>`;
+  openModal(existing ? 'Edit Dynamic Agent: ' + esc(existing.id) : 'New Dynamic Agent Definition', content);
+  const splitList = value => String(value || '').split(/\s*,\s*/).map(s => s.trim()).filter(Boolean);
+  $('#dyn-save').onclick = async () => {
+    const definition = {
+      ...(existing ? { id: existing.id } : {}),
+      name: $('#dyn-name').value.trim(),
+      role: $('#dyn-role').value.trim(),
+      description: $('#dyn-desc').value.trim(),
+      systemPrompt: $('#dyn-prompt').value,
+      lifetime: $('#dyn-lifetime').value,
+      modelPolicy: { ...(d.modelPolicy || {}), mode: $('#dyn-model-mode').value },
+      toolPolicy: {
+        allow: splitList($('#dyn-tool-allow').value),
+        deny: splitList($('#dyn-tool-deny').value)
+      },
+      skills: { ...(d.skills || {}), required: splitList($('#dyn-skills').value) },
+      hooks: { ...(d.hooks || {}), required: splitList($('#dyn-hooks').value) },
+      permissionPolicy: { ...(d.permissionPolicy || {}), readOnly: $('#dyn-readonly').checked },
+      canDelegate: $('#dyn-delegate').checked
+    };
+    try {
+      if (existing) await api.dynDefUpdate(existing.id, definition);
+      else await api.dynDefCreate(definition);
+      closeModal();
+      toast('Definition saved', 'ok');
+      open('agents');
+    } catch (error) {
+      $('#dyn-errors').innerHTML = `<div class="error-box">${esc(error.message)}</div>`;
+      panels.addProblem(`Agent 定义校验失败：${error.message}`);
+    }
+  };
 }
 
 /** 健康状态 → chip CSS class */
@@ -1348,6 +1466,22 @@ function hubVerificationClass(level) {
 /** 健康状态 → 展示文本 */
 function hubHealthText(status) {
   return ({ healthy: '健康', degraded: '降级', unavailable: '不可用', checking: '检查中…', disabled: '已禁用', unknown: '未知' })[status] || '未知';
+}
+
+/**
+ * B14.2 — External Agent 可用性词汇（严格）：AVAILABLE / UNAVAILABLE / UNKNOWN / ERROR。
+ * 未安装/未检测到 → UNAVAILABLE，绝不显示为 ERROR；
+ * ERROR 只保留给「已安装但协议/集成真实出错」；无证据 → UNKNOWN。
+ */
+function hubAvailability(healthStatus) {
+  const s = String(healthStatus || '').toLowerCase();
+  if (s === 'healthy' || s === 'degraded') return 'AVAILABLE';
+  if (s === 'unavailable' || s === 'disabled' || s === 'not_installed') return 'UNAVAILABLE';
+  if (s === 'error' || s === 'failed') return 'ERROR';
+  return 'UNKNOWN';
+}
+function hubAvailabilityClass(v) {
+  return v === 'AVAILABLE' ? 'ok' : v === 'UNAVAILABLE' || v === 'ERROR' ? 'bad' : '';
 }
 
 /** 能力键 → 展示标签（首字母大写 camelCase） */
@@ -1421,6 +1555,8 @@ async function loadHubCards(body) {
     const healthStatus = availById.has(m.id)
       ? ((a.health && a.health.status) || a.healthStatus || 'unknown')
       : 'unavailable';
+    // B14.2 — 可用性词汇与 Health 分开展示：未安装 = UNAVAILABLE（非 ERROR）
+    const availability = hubAvailability(healthStatus);
     const clineHealth = m.id === 'cline' ? (a.health || {}) : null;
     const clineSidecarReady = !!(clineHealth?.sidecar?.ready || (clineHealth?.runtime?.probe && clineHealth?.runtime?.coreConstructible));
     const clineApiReady = !!clineHealth?.api?.configured;
@@ -1448,7 +1584,7 @@ async function loadHubCards(body) {
         ).join('')}</div>`
       : '';
     return `<div class="acard" data-hub-id="${esc(m.id)}">
-      <div class="acard-h"><b>${name}</b><span class="chip">${transport}</span><span class="chip ${hubHealthClass(healthStatus)}">运行：${esc(hubHealthText(healthStatus))}</span>${hubAuthChip(a.auth)}${verChip}</div>
+      <div class="acard-h"><b>${name}</b><span class="chip">${transport}</span><span class="chip ${hubAvailabilityClass(availability)}">状态：${esc(availability)}</span><span class="chip ${hubHealthClass(healthStatus)}">运行：${esc(hubHealthText(healthStatus))}</span>${hubAuthChip(a.auth)}${verChip}</div>
       <div class="acard-meta">${caps.map(c => `<span class="chip">${esc(hubCapLabel(c))}</span>`).join('') || '<span class="muted small">无能力声明</span>'}</div>
       ${verRows}
       ${a.version || a.auth || (sessionsByAgent.get(m.id) || []).length ? `
@@ -1458,7 +1594,7 @@ async function loadHubCards(body) {
         ${(sessionsByAgent.get(m.id) || []).slice(0, 3).map(s => `<div><b>Session:</b> ${esc(hubSessionShort(s.external_session_id))} · ${esc(s.transport || '')}${s.resumable ? ' · 可继续' : ''} · ${esc(s.last_status || '')}</div>`).join('')}
       </div>` : ''}
       ${clineRuntime}
-      <div class="acard-f">${m.id === 'cline' ? '<button class="btn tiny" data-cline-config>Configure Cline</button>' : ''}<button class="btn tiny" data-hub-test="${esc(m.id)}">测试</button></div>
+      <div class="acard-f">${m.id === 'cline' ? '<button class="btn tiny" data-cline-config>Configure Cline</button>' : ''}<button class="btn tiny" data-hub-test="${esc(m.id)}" title="安全检测/协议测试，默认不产生付费 LLM 调用">Test Integration</button></div>
     </div>`;
   }).join('');
   const clineConfigButton = cardsEl.querySelector('[data-cline-config]');
@@ -1881,8 +2017,59 @@ function mcpForm() {
 /* ------------------------------------------------------------------ */
 /* Workflows (v2.9.5 serial Workflow Engine)                           */
 /* ------------------------------------------------------------------ */
+/* ------------------------------------------------------------------ */
+/* B12 — Artifact Builder（AI Generator UX 2.0）                        */
+/* Draft only：生成 ≠ 验证，READY ≠ SAVED，SAVED ≠ EXECUTED。           */
+/* 保存/验证一律走 backend 真实 validator；Renderer 不绕过任何边界。      */
+/* ------------------------------------------------------------------ */
+/* B12 状态标签统一来自 uiStatus.js（GENERATOR_STATUS_LABELS）。 */
+
+/** B12.6 — Human View：把 JSON 草稿转成人可读摘要（按 artifact 类型）。 */
+function generatorHumanView(draft) {
+  const candidate = (draft && draft.candidate) || {};
+  const type = draft && draft.artifactType;
+  const rows = [];
+  const add = (k, v) => { if (v !== undefined && v !== null && v !== '') rows.push([k, typeof v === 'object' ? JSON.stringify(v) : String(v)]); };
+  if (type === 'agent') {
+    add('Name', candidate.name || candidate.id);
+    add('ID', candidate.id);
+    add('Role', candidate.dynamicRole || candidate.role);
+    add('Prompt', candidate.dynamicSystemPrompt || candidate.systemPrompt || candidate.prompt);
+    const policy = candidate.toolPolicy || {};
+    add('Tools', { allow: policy.allow, deny: policy.deny });
+    add('Permissions', candidate.permissionPolicy);
+    add('Model Policy', candidate.modelPolicy);
+    add('Skills', candidate.skillIds);
+    add('Hooks', candidate.hookIds);
+    add('Lifetime', candidate.lifetime);
+    add('Can Delegate', candidate.canDelegate);
+  } else if (type === 'workflow') {
+    add('Name', candidate.name || candidate.id);
+    add('Description', candidate.description);
+    add('Steps', Array.isArray(candidate.steps) ? candidate.steps.map(s => `${s.id} (${s.type})`).join(' → ') : null);
+    add('Inputs', candidate.inputs);
+  } else {
+    add('Name', candidate.name || candidate.id);
+    add('Description', candidate.description);
+    for (const [key, value] of Object.entries(candidate)) {
+      if (!['name', 'id', 'description'].includes(key)) add(key, value);
+    }
+  }
+  return rows.length
+    ? `<table class="tbl kv"><tbody>${rows.map(([k, v]) => `<tr><td>${esc(k)}</td><td class="small">${esc(truncate(v, 300))}</td></tr>`).join('')}</tbody></table>`
+    : '<div class="muted">无可展示的草稿内容。</div>';
+}
+
+async function refreshGeneratorBadge() {
+  try {
+    const drafts = await api.generatorListDrafts(50);
+    panels.setBadge('generator', drafts.filter(d => d.status === 'READY').length);
+  } catch { /* runtime 不可用时徽标缺省 */ }
+}
+
 async function renderGenerator(body) {
   const [connections, drafts] = await Promise.all([api.connections(), api.generatorListDrafts(20)]);
+  refreshGeneratorBadge();
   const modelOptions = [];
   for (const connection of connections.filter(item => item.enabled !== 0)) {
     for (const model of connection.models || []) {
@@ -1890,43 +2077,100 @@ async function renderGenerator(body) {
       if (modelId) modelOptions.push({ connectionId: connection.id, modelId, label: `${connection.name} / ${modelId}` });
     }
   }
+  // B12.12 — Generator History（最近 Drafts 状态）
+  const historyRows = drafts.map(d => `<tr><td class="mono small">${esc(truncate(d.draftId, 12))}</td><td>${esc(d.artifactType || '')}</td><td><span class="chip ${d.status === 'READY' ? 'warn' : d.status === 'SAVED' ? 'ok' : d.status === 'FAILED' ? 'bad' : ''}">${esc(GENERATOR_STATUS_LABEL[d.status] || d.status)}</span></td><td class="muted small">${esc(fmtTime(d.updatedAt || d.createdAt))}</td><td class="right"><button class="btn tiny" data-gen-open="${esc(d.draftId)}">Open</button></td></tr>`).join('');
   body.innerHTML = `
     <div class="card">
-      <h3>AI Generator</h3>
-      <p class="muted">Generates configuration drafts only. Generated ≠ validated; validated ≠ saved; saved ≠ executed.</p>
+      <h3>Artifact Builder</h3>
+      <p class="muted">生成配置草稿。Draft only：生成 ≠ 验证；READY ≠ SAVED；SAVED ≠ EXECUTED（保存不会自动运行）。</p>
       <div class="form-grid">
         <label>Artifact Type<select id="generator-type"><option value="agent">Agent</option><option value="skill">Skill</option><option value="hook">Hook</option><option value="workflow">Workflow</option></select></label>
-        <label>Model<select id="generator-model"><option value="">Auto</option>${modelOptions.map(item => `<option value="${esc(JSON.stringify({ connectionId: item.connectionId, modelId: item.modelId }))}">${esc(item.label)}</option>`).join('')}</select></label>
+        <label>Model<select id="generator-model"><option value="">Auto（Selected by Model Router）</option>${modelOptions.map(item => `<option value="${esc(JSON.stringify({ connectionId: item.connectionId, modelId: item.modelId }))}">${esc(item.label)}</option>`).join('')}</select></label>
       </div>
-      <label>Natural Language Requirement<textarea id="generator-intent" rows="7" maxlength="12000" placeholder="Describe the configuration to generate..."></textarea></label>
-      <div class="actions"><button class="primary" id="generator-generate">Generate</button><button id="generator-regenerate" disabled>Regenerate</button><button id="generator-cancel" disabled>Cancel</button></div>
+      <label>描述你希望生成的组件<textarea id="generator-intent" rows="7" maxlength="12000" placeholder="例如：创建一个只读安全审查 Agent，可以读取源码和运行测试，但不能修改文件。"></textarea></label>
+      <div class="actions"><button class="primary" id="generator-generate">Generate Draft</button><button id="generator-regenerate" disabled>Regenerate</button><button id="generator-cancel" disabled>Cancel</button></div>
     </div>
     <div class="card">
-      <h3>Draft Preview</h3>
-      <div id="generator-meta" class="muted">${drafts.length ? 'Select Generate to create a new draft.' : 'No drafts yet.'}</div>
-      <pre id="generator-json" style="max-height:420px;overflow:auto">${drafts.length ? esc(JSON.stringify(drafts[0].candidate, null, 2)) : ''}</pre>
+      <h3>Draft <span id="generator-status-chip"></span></h3>
+      <div id="generator-meta" class="muted">${drafts.length ? 'Select Generate Draft to create a new draft.' : 'No drafts yet.'}</div>
+      <div id="generator-boundary"></div>
+      <div class="task-tabs" id="generator-tabs" style="display:none">
+        <button class="task-tab active" data-gen-tab="human">Human View</button>
+        <button class="task-tab" data-gen-tab="json">Raw Definition</button>
+      </div>
+      <div id="generator-human"></div>
+      <pre id="generator-json" style="max-height:420px;overflow:auto;display:none"></pre>
       <div id="generator-errors"></div>
-      <div class="actions"><button class="primary" id="generator-save" disabled>Save</button><button id="generator-discard" disabled>Discard</button></div>
+      <div class="actions"><button id="generator-validate" disabled>Validate</button><button class="primary" id="generator-save" disabled>Save</button><button id="generator-discard" disabled>Discard</button></div>
+    </div>
+    <div class="card">
+      <h3>Recent Drafts</h3>
+      ${historyRows ? `<table class="tbl"><thead><tr><th>Draft</th><th>Type</th><th>Status</th><th>Updated</th><th></th></tr></thead><tbody>${historyRows}</tbody></table>` : '<div class="muted">No drafts yet.</div>'}
     </div>`;
 
   let currentDraft = null;
   let lastRequest = null;
+  let genTab = 'human';
+  let failedNotified = new Set();
   const renderDraft = draft => {
     currentDraft = draft;
+    if (draft) { try { selectInspector('generatorDraft', draft); } catch { /* inspector 不可用时缺省 */ } }
     const selected = draft && draft.selectedModel;
-    $('#generator-meta').textContent = draft
-      ? `Status: ${draft.status} · attempts: ${draft.attempts || 0} · repairs: ${draft.repairCount || 0} · model: ${selected ? `${selected.connectionId} / ${selected.modelId}` : 'pending'}`
-      : 'No draft.';
-    $('#generator-json').textContent = draft && draft.candidate ? JSON.stringify(draft.candidate, null, 2) : '';
-    const errors = draft && draft.validation && draft.validation.errors || [];
-    $('#generator-errors').innerHTML = errors.length
-      ? `<div class="error-box">${errors.map(error => `<div>${esc(error.code)}: ${esc(error.message)}</div>`).join('')}</div>` : '';
+    const chip = $('#generator-status-chip');
+    if (draft) {
+      const active = ['GENERATING', 'VALIDATING', 'REPAIRING'].includes(draft.status);
+      const attemptText = (draft.attempts || 0) > 0 ? ` · Attempt ${draft.attempts}` : '';
+      chip.innerHTML = `<span class="chip ${draft.status === 'READY' ? 'warn' : draft.status === 'SAVED' ? 'ok' : draft.status === 'FAILED' ? 'bad' : ''}">${esc(GENERATOR_STATUS_LABEL[draft.status] || draft.status)}</span>`;
+      $('#generator-meta').textContent =
+        `type: ${draft.artifactType} · attempts: ${draft.attempts || 0}${attemptText} · repairs: ${draft.repairCount || 0} · model: ${selected ? `${selected.connectionId} / ${selected.modelId}` : (draft.mode === 'auto' || !selected ? 'Auto（Model Router）' : 'pending')}${active ? ' · ' + esc(GENERATOR_STATUS_LABEL[draft.status] || draft.status) : ''}`;
+    } else { chip.innerHTML = ''; $('#generator-meta').textContent = 'No draft.'; }
+    // B12.10 — Save Boundary 明确提示
+    const boundary = $('#generator-boundary');
+    if (draft && draft.status === 'READY') boundary.innerHTML = '<div class="perm-destructive" style="border-color:rgba(210,153,34,.6);background:rgba(210,153,34,.08)">Draft only · Not saved · Not executed</div>';
+    else if (draft && draft.status === 'SAVED') boundary.innerHTML = '<div class="perm-destructive" style="border-color:rgba(63,185,80,.6);background:rgba(63,185,80,.08)">Saved · 不会自动运行（SAVED ≠ EXECUTED）</div>';
+    else boundary.innerHTML = '';
+    // tabs
+    const hasCandidate = draft && draft.candidate;
+    $('#generator-tabs').style.display = hasCandidate ? '' : 'none';
+    $('#generator-human').style.display = hasCandidate && genTab === 'human' ? '' : 'none';
+    $('#generator-json').style.display = hasCandidate && genTab === 'json' ? '' : 'none';
+    if (hasCandidate) {
+      $('#generator-human').innerHTML = generatorHumanView(draft);
+      $('#generator-json').textContent = JSON.stringify(draft.candidate, null, 2);
+    }
+    // B12.8 — Validation truth（VALID / INVALID + 错误码）
+    const validation = draft && draft.validation;
+    const errors = validation && validation.errors || [];
+    const validationChip = validation
+      ? (validation.valid
+        ? '<span class="chip ok">VALID</span>'
+        : '<span class="chip bad">INVALID</span>')
+      : '';
+    $('#generator-errors').innerHTML =
+      (validation ? `<div style="margin:6px 0">${validationChip}</div>` : '') +
+      (errors.length ? `<div class="error-box">${errors.map(error => `<div>${esc(error.code)}: ${esc(error.message)}</div>`).join('')}</div>` : '') +
+      (draft && draft.error ? `<div class="error-box">${esc(draft.errorCode || '')}: ${esc(draft.error)}</div>` : '');
+    if (draft && draft.status === 'FAILED' && !failedNotified.has(draft.draftId)) {
+      failedNotified.add(draft.draftId);
+      panels.addProblem(`Generator 失败：${draft.errorCode || 'GENERATOR_FAILED'} ${draft.error || ''}`);
+      refreshGeneratorBadge();
+    }
+    if (draft && draft.status === 'READY' && !failedNotified.has('ready:' + draft.draftId)) {
+      failedNotified.add('ready:' + draft.draftId);
+      refreshGeneratorBadge();
+    }
     const active = draft && ['GENERATING', 'VALIDATING', 'REPAIRING'].includes(draft.status);
-    $('#generator-save').disabled = !draft || draft.status !== 'READY';
+    // B12.9 — Save 只对 READY 且 VALID 可用；INVALID 一律阻断
+    const valid = !validation || validation.valid !== false;
+    $('#generator-validate').disabled = !hasCandidate || active;
+    $('#generator-save').disabled = !draft || draft.status !== 'READY' || !valid;
     $('#generator-discard').disabled = !draft || draft.status === 'SAVED' || draft.status === 'DISCARDED';
     $('#generator-regenerate').disabled = !lastRequest || active;
     $('#generator-cancel').disabled = !active;
   };
+  $('#generator-tabs').querySelectorAll('[data-gen-tab]').forEach(b => {
+    b.onclick = () => { genTab = b.dataset.genTab; renderDraft(currentDraft); };
+  });
   const poll = async draftId => {
     for (;;) {
       const draft = await api.generatorGetDraft(draftId);
@@ -1946,7 +2190,7 @@ async function renderGenerator(body) {
   };
   $('#generator-generate').onclick = () => {
     const intent = $('#generator-intent').value.trim();
-    if (!intent) return toast('Natural language requirement is required.', 'error');
+    if (!intent) return toast('请先描述你希望生成的组件。', 'error');
     const rawModel = $('#generator-model').value;
     const explicitModel = rawModel ? JSON.parse(rawModel) : null;
     return generate({
@@ -1960,29 +2204,162 @@ async function renderGenerator(body) {
   };
   $('#generator-regenerate').onclick = () => lastRequest && generate(lastRequest);
   $('#generator-cancel').onclick = async () => { if (currentDraft) renderDraft(await api.generatorCancel(currentDraft.draftId)); };
-  $('#generator-save').onclick = async () => {
-    try { const result = await api.generatorSave(currentDraft.draftId); renderDraft(result.draft); toast('Definition saved (not enabled or executed).', 'ok'); }
+  $('#generator-validate').onclick = async () => {
+    if (!currentDraft) return;
+    try { renderDraft(await api.generatorValidate(currentDraft.draftId)); }
     catch (error) { toast(error.message, 'error'); renderDraft(await api.generatorGetDraft(currentDraft.draftId)); }
   };
-  $('#generator-discard').onclick = async () => { if (currentDraft) renderDraft(await api.generatorDiscard(currentDraft.draftId)); };
+  $('#generator-save').onclick = async () => {
+    try { const result = await api.generatorSave(currentDraft.draftId); renderDraft(result.draft); toast('Definition saved (not enabled or executed).', 'ok'); refreshGeneratorBadge(); }
+    catch (error) { toast(error.message, 'error'); panels.addProblem(`Generator 保存失败：${error.message}`); renderDraft(await api.generatorGetDraft(currentDraft.draftId)); }
+  };
+  $('#generator-discard').onclick = async () => { if (currentDraft) { renderDraft(await api.generatorDiscard(currentDraft.draftId)); refreshGeneratorBadge(); } };
+  body.querySelectorAll('[data-gen-open]').forEach(button => {
+    button.onclick = async () => {
+      try { renderDraft(await api.generatorGetDraft(button.dataset.genOpen)); }
+      catch (error) { toast(error.message, 'error'); }
+    };
+  });
+}
+
+/* ------------------------------------------------------------------ */
+/* B11 — Workflow Operations Workspace                                  */
+/* 定义库 / 详情（Overview · Definition · Runs）/ 简单图形 /            */
+/* Run 表单 / 实时步骤视图 / Approval / Cancel。所有执行真话在 backend    */
+/* Workflow Runtime；Renderer 只呈现与发决策请求，绝不自动 approve。      */
+/* ------------------------------------------------------------------ */
+const WF_STEP_CLASS = Object.freeze({
+  PENDING: '', READY: '', RUNNING: 'run', WAITING_APPROVAL: 'warn',
+  COMPLETED: 'ok', FAILED: 'bad', SKIPPED: 'warn', CANCELLED: 'warn'
+});
+
+function wfStepChip(status) {
+  return `<span class="chip ${WF_STEP_CLASS[status] || ''}">${esc(WF_STEP_LABEL[status] || status)}</span>`;
+}
+
+/** B11.3 — 纯 HTML/CSS 步骤图（不引入 DAG 库；runtime 是串行执行，不呈现 parallel）。 */
+function workflowDiagram(def) {
+  const steps = Array.isArray(def.steps) ? def.steps : [];
+  if (!steps.length) return '<div class="muted">无步骤。</div>';
+  const nodes = [];
+  steps.forEach((step, index) => {
+    const config = step.config || {};
+    let detail = '';
+    let kind = step.type;
+    if (step.type === 'agent') detail = `目标：${config.goal || ''}` + (config.target && config.target.mode !== 'main' ? ` · ${config.target.mode}` : '');
+    else if (step.type === 'tool') detail = `工具：${config.toolName || ''}`;
+    else if (step.type === 'condition') detail = `${config.source || ''} ${config.operator || ''} ${config.value !== undefined ? JSON.stringify(config.value) : ''}`;
+    else if (step.type === 'approval') detail = config.message || '需要人工批准';
+    const retry = step.retry && step.retry.maxAttempts > 1 ? ` · retry ×${step.retry.maxAttempts}` : '';
+    nodes.push(`<div class="wf-node wf-node-${esc(step.type)}"><div class="wf-node-head"><span class="wf-node-kind">${esc(kind)}</span><b class="mono">${esc(step.id)}</b><span class="muted small">${esc(detail)}${esc(retry)}</span></div>${step.type === 'condition' ? '<div class="wf-cond-branches"><span>├ true → 继续</span><span>└ false → 跳过后续依赖步骤</span></div>' : ''}</div>`);
+    if (index < steps.length - 1) nodes.push('<div class="wf-arrow">↓</div>');
+  });
+  return `<div class="wf-diagram">${nodes.join('')}</div>`;
+}
+
+/** B11.4 — 输入表单：definition.inputs 有字段则逐键输入，否则 JSON Input。 */
+function workflowInputForm(def) {
+  const inputs = (def && def.inputs && typeof def.inputs === 'object') ? def.inputs : {};
+  const keys = Object.keys(inputs);
+  if (keys.length) {
+    return `<div class="form-grid">${keys.map(key => {
+      const spec = inputs[key] || {};
+      const description = typeof spec === 'string' ? spec : (spec.description || '');
+      const defVal = spec && spec.default !== undefined ? JSON.stringify(spec.default) : '';
+      return `<label>${esc(key)}${description ? ` <span class="muted small">(${esc(description)})</span>` : ''}<input type="text" data-wf-input="${esc(key)}" value="${esc(defVal)}" placeholder="JSON 或文本"></label>`;
+    }).join('')}</div>`;
+  }
+  return `<label>JSON Input<textarea id="wf-json-input" rows="6" placeholder='{}'></textarea></label>`;
+}
+
+function parseWorkflowInput(def, body) {
+  const inputs = (def && def.inputs && typeof def.inputs === 'object') ? def.inputs : {};
+  const keys = Object.keys(inputs);
+  if (keys.length) {
+    const out = {};
+    for (const key of keys) {
+      const el = body.querySelector(`[data-wf-input="${key}"]`);
+      const raw = el ? el.value.trim() : '';
+      if (!raw) continue;
+      try { out[key] = JSON.parse(raw); } catch { out[key] = raw; }
+    }
+    return out;
+  }
+  const jsonEl = $('#wf-json-input');
+  const raw = jsonEl ? jsonEl.value.trim() : '';
+  if (!raw) return {};
+  const parsed = JSON.parse(raw); // 无效 JSON 由调用方捕获提示
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('输入必须是 JSON 对象');
+  return parsed;
+}
+
+/** B11.5/B11.6/B11.8 — 实时步骤视图（状态词汇统一，retry attempt 来自 runtime 真实数据）。 */
+function workflowRunSteps(run, def) {
+  const steps = Array.isArray(run.steps) ? run.steps : [];
+  const defSteps = def && Array.isArray(def.steps) ? def.steps : [];
+  return steps.map(step => {
+    const definition = defSteps.find(s => s.id === step.stepId) || {};
+    const maxAttempts = definition.retry && definition.retry.maxAttempts > 1 ? definition.retry.maxAttempts : null;
+    const attempt = step.attempt > 0 && maxAttempts ? ` <span class="muted small">Attempt ${step.attempt} / ${maxAttempts}</span>` : '';
+    const error = step.error ? `<div class="muted small">${esc(truncate(String(step.error), 160))}</div>` : '';
+    return `<div class="wf-run-step"><span class="mono">${esc(step.stepId)}</span>${wfStepChip(step.status)}${attempt}${error}</div>`;
+  }).join('');
+}
+
+function workflowRunResult(run) {
+  const steps = Array.isArray(run.steps) ? run.steps : [];
+  const completed = steps.filter(s => s.status === 'COMPLETED').length;
+  const failed = steps.filter(s => s.status === 'FAILED').length;
+  const duration = run.startedAt && run.terminalAt ? Math.max(0, Math.round((new Date(run.terminalAt).getTime() - new Date(run.startedAt).getTime()) / 1000)) : null;
+  const output = run.output && Object.keys(run.output).length ? `<pre class="skill-pre">${esc(JSON.stringify(run.output, null, 2))}</pre>` : '';
+  return `<div class="wf-result"><span class="chip ${run.status === 'COMPLETED' ? 'ok' : run.status === 'FAILED' ? 'bad' : 'warn'}">${esc(WF_RUN_LABEL[run.status] || run.status)}</span><span class="muted small">步骤完成 ${completed} · 失败 ${failed}${duration !== null ? ` · ${duration}s` : ''}</span>${output}</div>`;
+}
+
+async function refreshWorkflowBadge() {
+  try {
+    const runs = await api.workflowListRuns(50);
+    const waiting = runs.filter(r => r.status === 'WAITING_APPROVAL').length;
+    panels.setBadge('workflow', waiting);
+  } catch { /* runtime 不可用时徽标缺省 */ }
+}
+
+/** app.js 事件总线接入：workflow 状态/步骤事件 → 徽标 + Problems（不只 toast）。 */
+export function handleWorkflowEvent(ev) {
+  if (!ev || typeof ev.type !== 'string') return;
+  if (ev.type === 'workflow:state') {
+    if (ev.status === 'WAITING_APPROVAL') refreshWorkflowBadge();
+    if (['COMPLETED', 'FAILED', 'CANCELLED'].includes(ev.status)) {
+      refreshWorkflowBadge();
+      if (ev.status === 'FAILED') panels.addProblem(`Workflow 失败：${ev.workflowId || ev.workflowRunId || ''} ${ev.error || ''}`);
+    }
+  }
 }
 
 async function renderWorkflows(body) {
-  const [definitions, runs] = await Promise.all([api.workflowList(), api.workflowListRuns(30)]);
+  const [definitions, runs] = await Promise.all([api.workflowList(), api.workflowListRuns(50)]);
+  refreshWorkflowBadge();
+  const lastRunByWorkflow = new Map();
+  for (const run of runs) {
+    if (run.workflowId && !lastRunByWorkflow.has(run.workflowId)) lastRunByWorkflow.set(run.workflowId, run);
+  }
+  // B11.1 — Workflow Library
   const definitionRows = definitions.map(w => {
-    const stateText = w.enabled ? 'enabled' : 'disabled';
-    const toggleText = w.enabled ? 'Disable' : 'Enable';
-    return '<tr><td><b>' + esc(w.name) + '</b><div class="muted small mono">' + esc(w.id) +
-      '</div></td><td>' + w.steps.length + '</td><td><span class="chip ' +
-      (w.enabled ? 'ok' : '') + '">' + stateText + '</span></td><td class="right">' +
-      '<button class="btn tiny" data-wf-view="' + esc(w.id) + '">View</button>' +
-      '<button class="btn tiny" data-wf-toggle="' + esc(w.id) + '">' + toggleText + '</button>' +
-      '<button class="btn tiny primary" data-wf-run="' + esc(w.id) + '"' +
-      (w.enabled ? '' : ' disabled') + '>Run</button></td></tr>';
+    const last = lastRunByWorkflow.get(w.id);
+    return '<tr><td><b>' + esc(w.name) + '</b><div class="muted small mono">' + esc(w.id) + '</div>' +
+      (w.description ? '<div class="muted small">' + esc(truncate(w.description, 80)) + '</div>' : '') +
+      '</td><td>' + w.steps.length + '</td><td><span class="chip ' + (w.enabled ? 'ok' : '') + '">' + (w.enabled ? 'enabled' : 'disabled') + '</span></td>' +
+      '<td class="small muted">' + (last ? esc(WF_RUN_LABEL[last.status] || last.status) + ' · ' + esc(fmtTime(last.updatedAt || last.startedAt)) : '—') + '</td>' +
+      '<td class="right">' +
+      '<button class="btn tiny" data-wf-open="' + esc(w.id) + '">Open</button>' +
+      '<button class="btn tiny primary" data-wf-run="' + esc(w.id) + '"' + (w.enabled ? '' : ' disabled') + '>Run</button>' +
+      '<button class="btn tiny" data-wf-dup="' + esc(w.id) + '">Duplicate</button>' +
+      '<button class="btn tiny" data-wf-toggle="' + esc(w.id) + '">' + (w.enabled ? 'Disable' : 'Enable') + '</button>' +
+      '<button class="btn tiny danger" data-wf-del="' + esc(w.id) + '">Delete</button></td></tr>';
   }).join('');
-  const runRows = runs.map(run => {
+  // B11.5 — Recent Runs（实时状态 + 批准/取消入口）
+  const runRows = runs.slice(0, 30).map(run => {
     const steps = (run.steps || []).map(step =>
-      '<span class="tag">' + esc(step.stepId) + ': ' + esc(step.status) + '</span>'
+      '<span class="tag">' + esc(step.stepId) + ': ' + esc(WF_STEP_LABEL[step.status] || step.status) + '</span>'
     ).join('');
     const actions = ['RUNNING', 'WAITING_APPROVAL'].includes(run.status)
       ? '<button class="btn tiny danger" data-wr-cancel="' + esc(run.workflowRunId) + '">Cancel</button>'
@@ -1991,25 +2368,21 @@ async function renderWorkflows(body) {
       ? '<button class="btn tiny primary" data-wr-approve="' + esc(run.workflowRunId) + '">Approve</button>' +
         '<button class="btn tiny" data-wr-reject="' + esc(run.workflowRunId) + '">Reject</button>'
       : '';
-    return '<tr><td class="mono small">' + esc(run.workflowRunId) + '</td><td>' +
-      esc(run.status) + '<div class="taglist">' + steps + '</div></td><td class="right">' +
-      approval + actions + '</td></tr>';
+    return '<tr><td class="mono small">' + esc(truncate(run.workflowRunId, 12)) + '</td><td class="small mono">' + esc(run.workflowId || '') + '</td><td>' +
+      '<span class="chip ' + (run.status === 'COMPLETED' ? 'ok' : run.status === 'FAILED' ? 'bad' : run.status === 'WAITING_APPROVAL' ? 'warn' : '') + '">' + esc(WF_RUN_LABEL[run.status] || run.status) + '</span>' +
+      '<div class="taglist">' + steps + '</div></td><td class="right">' +
+      '<button class="btn tiny" data-wr-view="' + esc(run.workflowRunId) + '">View</button>' + approval + actions + '</td></tr>';
   }).join('');
   body.innerHTML =
     '<div class="page-actions"><button class="btn" id="workflow-refresh">Refresh</button></div>' +
-    '<section class="panel"><h3>Workflow Definitions</h3>' +
-    (definitionRows ? '<table class="tbl"><thead><tr><th>Workflow</th><th>Steps</th><th>Status</th><th></th></tr></thead><tbody>' +
+    '<section class="panel"><h3>Workflow Library</h3>' +
+    (definitionRows ? '<table class="tbl"><thead><tr><th>Workflow</th><th>Steps</th><th>Status</th><th>Last Run</th><th></th></tr></thead><tbody>' +
       definitionRows + '</tbody></table>' : '<div class="muted">No workflows defined.</div>') +
     '</section><section class="panel"><h3>Recent Runs</h3>' +
-    (runRows ? '<table class="tbl"><thead><tr><th>Run</th><th>State / Steps</th><th></th></tr></thead><tbody>' +
+    (runRows ? '<table class="tbl"><thead><tr><th>Run</th><th>Workflow</th><th>State / Steps</th><th></th></tr></thead><tbody>' +
       runRows + '</tbody></table>' : '<div class="muted">No workflow runs.</div>') + '</section>';
   $('#workflow-refresh').onclick = () => open('workflows');
-  body.querySelectorAll('[data-wf-view]').forEach(button => {
-    button.onclick = async () => {
-      const value = await api.workflowGet(button.dataset.wfView);
-      openModal('Workflow: ' + esc(value.id), '<pre class="skill-pre">' + esc(JSON.stringify(value, null, 2)) + '</pre>');
-    };
-  });
+  body.querySelectorAll('[data-wf-open]').forEach(button => { button.onclick = () => renderWorkflowDetail(body, button.dataset.wfOpen); });
   body.querySelectorAll('[data-wf-toggle]').forEach(button => {
     button.onclick = async () => {
       const value = definitions.find(item => item.id === button.dataset.wfToggle);
@@ -2018,26 +2391,170 @@ async function renderWorkflows(body) {
       open('workflows');
     };
   });
-  body.querySelectorAll('[data-wf-run]').forEach(button => {
+  body.querySelectorAll('[data-wf-dup]').forEach(button => {
     button.onclick = async () => {
-      if (!state.project) return toast('Open a project before running a Workflow.', 'warn');
-      await api.workflowRun(button.dataset.wfRun, {}, {
+      const source = definitions.find(item => item.id === button.dataset.wfDup);
+      if (!source) return;
+      try {
+        const copy = JSON.parse(JSON.stringify(source));
+        delete copy.enabled;
+        copy.id = `${source.id}-copy-${Date.now().toString(36)}`;
+        copy.name = `${source.name} (Copy)`;
+        await api.workflowCreate(copy);
+        toast('Workflow duplicated', 'ok');
+        open('workflows');
+      } catch (error) { toast(error.message, 'error'); }
+    };
+  });
+  body.querySelectorAll('[data-wf-del]').forEach(button => {
+    button.onclick = async () => {
+      const confirmed = await confirmBox(`删除 Workflow 「${button.dataset.wfDel}」？此操作不可撤销。`);
+      if (!confirmed) return;
+      try { await api.workflowDelete(button.dataset.wfDel); open('workflows'); } catch (error) { toast(error.message, 'error'); }
+    };
+  });
+  body.querySelectorAll('[data-wf-run]').forEach(button => {
+    button.onclick = () => {
+      const def = definitions.find(item => item.id === button.dataset.wfRun);
+      if (def) openWorkflowRunDialog(def);
+    };
+  });
+  body.querySelectorAll('[data-wr-view]').forEach(button => {
+    button.onclick = () => renderWorkflowRunDetail(body, button.dataset.wrView);
+  });
+  bindWorkflowRunActions(body, () => open('workflows'));
+}
+
+/** B11.7 — Approval / Cancel 统一绑定：只发决策请求，最终由 runtime 裁决；绝不自动 approve。 */
+function bindWorkflowRunActions(scope, after) {
+  scope.querySelectorAll('[data-wr-cancel]').forEach(button => {
+    button.onclick = async () => {
+      try { await api.workflowCancel(button.dataset.wrCancel); toast('Workflow cancel requested', 'ok'); } catch (error) { toast(error.message, 'error'); }
+      after();
+    };
+  });
+  scope.querySelectorAll('[data-wr-approve]').forEach(button => {
+    button.onclick = async () => {
+      try { await api.workflowApprove(button.dataset.wrApprove); toast('Approved', 'ok'); } catch (error) { toast(error.message, 'error'); }
+      after();
+    };
+  });
+  scope.querySelectorAll('[data-wr-reject]').forEach(button => {
+    button.onclick = async () => {
+      try { await api.workflowReject(button.dataset.wrReject); toast('Rejected', 'ok'); } catch (error) { toast(error.message, 'error'); }
+      after();
+    };
+  });
+}
+
+function openWorkflowRunDialog(def) {
+  if (!state.project) return toast('Open a project before running a Workflow.', 'warn');
+  const content = `<div class="wf-run-form">${workflowInputForm(def)}<div class="actions"><button class="btn primary" id="wf-run-start">Run Workflow</button></div></div>`;
+  openModal('Run Workflow: ' + esc(def.name || def.id), content);
+  $('#wf-run-start').onclick = async () => {
+    try {
+      const input = parseWorkflowInput(def, $('#modal'));
+      const execution = await api.workflowRun(def.id, input, {
         projectId: state.project.id,
         projectRoot: state.project.root_path
       });
+      closeModal();
       toast('Workflow started', 'ok');
-      open('workflows');
-    };
-  });
-  body.querySelectorAll('[data-wr-cancel]').forEach(button => {
-    button.onclick = async () => { await api.workflowCancel(button.dataset.wrCancel); open('workflows'); };
-  });
-  body.querySelectorAll('[data-wr-approve]').forEach(button => {
-    button.onclick = async () => { await api.workflowApprove(button.dataset.wrApprove); open('workflows'); };
-  });
-  body.querySelectorAll('[data-wr-reject]').forEach(button => {
-    button.onclick = async () => { await api.workflowReject(button.dataset.wrReject); open('workflows'); };
-  });
+      if (execution && execution.workflowRunId) renderWorkflowRunDetail($('#page-body'), execution.workflowRunId);
+    } catch (error) { toast(error.message, 'error'); }
+  };
+}
+
+/** B11.2 — Workflow Detail（Overview / Definition / Runs tabs）。 */
+async function renderWorkflowDetail(body, workflowId) {
+  const [def, runs] = await Promise.all([api.workflowGet(workflowId), api.workflowListRuns(50)]);
+  if (!def) { toast('Workflow not found', 'error'); return open('workflows'); }
+  const ownRuns = runs.filter(r => r.workflowId === workflowId);
+  let tab = 'overview';
+  const renderTab = () => {
+    const tabButton = name => `<button class="task-tab ${tab === name ? 'active' : ''}" data-wf-tab="${name}">${{ overview: 'Overview', definition: 'Definition', runs: 'Runs' }[name]}</button>`;
+    let content = '';
+    if (tab === 'overview') {
+      content = `<div class="wf-overview"><table class="tbl kv"><tbody>
+        <tr><td>Name</td><td>${esc(def.name)}</td></tr>
+        <tr><td>ID</td><td class="mono">${esc(def.id)}</td></tr>
+        <tr><td>Description</td><td>${esc(def.description || '—')}</td></tr>
+        <tr><td>Steps</td><td>${def.steps.length}</td></tr>
+        <tr><td>Enabled</td><td>${def.enabled ? 'yes' : 'no'}</td></tr>
+        <tr><td>Inputs</td><td>${Object.keys(def.inputs || {}).length ? esc(Object.keys(def.inputs).join(', ')) : '—'}</td></tr>
+      </tbody></table><h4>Diagram</h4>${workflowDiagram(def)}</div>`;
+    } else if (tab === 'definition') {
+      content = `<pre class="skill-pre" style="max-height:60vh;overflow:auto">${esc(JSON.stringify(def, null, 2))}</pre>`;
+    } else {
+      content = ownRuns.length
+        ? '<table class="tbl"><thead><tr><th>Run</th><th>State</th><th>Steps</th><th></th></tr></thead><tbody>' + ownRuns.map(run =>
+            '<tr><td class="mono small">' + esc(truncate(run.workflowRunId, 12)) + '</td><td>' +
+            '<span class="chip ' + (run.status === 'COMPLETED' ? 'ok' : run.status === 'FAILED' ? 'bad' : '') + '">' + esc(WF_RUN_LABEL[run.status] || run.status) + '</span></td><td class="small">' +
+            (run.steps || []).map(s => esc(s.stepId) + ':' + esc(s.status)).join(' · ') + '</td><td class="right">' +
+            '<button class="btn tiny" data-wr-view="' + esc(run.workflowRunId) + '">View</button></td></tr>').join('') + '</tbody></table>'
+        : '<div class="muted">No runs for this workflow.</div>';
+    }
+    body.innerHTML = `<div class="page-actions"><button class="btn" id="wf-back">← Back</button>
+      <button class="btn primary" id="wf-run-now" ${def.enabled ? '' : 'disabled'}>Run Workflow</button></div>
+      <div class="task-tabs">${tabButton('overview')}${tabButton('definition')}${tabButton('runs')}</div>
+      <section class="panel">${content}</section>`;
+    $('#wf-back').onclick = () => open('workflows');
+    $('#wf-run-now').onclick = () => openWorkflowRunDialog(def);
+    body.querySelectorAll('[data-wf-tab]').forEach(b => { b.onclick = () => { tab = b.dataset.wfTab; renderTab(); }; });
+    body.querySelectorAll('[data-wr-view]').forEach(b => { b.onclick = () => renderWorkflowRunDetail(body, b.dataset.wrView); });
+  };
+  renderTab();
+}
+
+/** B11.5/B11.7/B11.9/B11.10 — Workflow Run View（轮询 runtime 真实状态，bounded）。 */
+async function renderWorkflowRunDetail(body, workflowRunId) {
+  if (!body) return;
+  let revision = (renderWorkflowRunDetail.revision = (renderWorkflowRunDetail.revision || 0) + 1);
+  let timer = null;
+  const render = async () => {
+    let run = null;
+    try { run = await api.workflowGetRun(workflowRunId); } catch { /* transient */ }
+    if (revision !== renderWorkflowRunDetail.revision) return;
+    if (!run) { body.innerHTML = '<div class="muted">Workflow run not found.</div><div class="page-actions"><button class="btn" id="wf-back">← Back</button></div>'; $('#wf-back').onclick = () => open('workflows'); return; }
+    let def = null;
+    try { def = await api.workflowGet(run.workflowId); } catch { /* definition may be removed */ }
+    const waitingApproval = run.status === 'WAITING_APPROVAL';
+    const approvalStep = waitingApproval ? (run.steps || []).find(s => s.status === 'WAITING_APPROVAL') : null;
+    const approvalDef = def && approvalStep && Array.isArray(def.steps) ? def.steps.find(s => s.id === approvalStep.stepId) : null;
+    const approvalCard = waitingApproval
+      ? `<div class="wf-approval-card"><div class="perm-sec-label">Workflow Approval</div>
+          <table class="perm-meta"><tbody>
+          <tr><td>Workflow</td><td class="mono">${esc(run.workflowId || '')}</td></tr>
+          <tr><td>Step</td><td class="mono">${esc(approvalStep ? approvalStep.stepId : '')}</td></tr>
+          <tr><td>Reason</td><td>${esc(approvalDef && approvalDef.config && approvalDef.config.message || '人工批准节点')}</td></tr>
+          <tr><td>Input</td><td class="mono small">${esc(truncate(JSON.stringify(run.input || {}), 300))}</td></tr>
+          </tbody></table>
+          <div class="perm-opts"><button class="btn primary" data-wr-approve="${esc(run.workflowRunId)}">Approve</button>
+          <button class="btn danger" data-wr-reject="${esc(run.workflowRunId)}">Reject</button></div></div>`
+      : '';
+    const cancelBtn = ['RUNNING', 'WAITING_APPROVAL'].includes(run.status)
+      ? `<button class="btn danger" data-wr-cancel="${esc(run.workflowRunId)}">Cancel Workflow</button>` : '';
+    const terminal = ['COMPLETED', 'FAILED', 'CANCELLED'].includes(run.status);
+    body.innerHTML = `<div class="page-actions"><button class="btn" id="wf-back">← Back</button>${cancelBtn}</div>
+      <section class="panel"><h3>Workflow Run <span class="mono small">${esc(truncate(workflowRunId, 16))}</span></h3>
+      ${terminal ? workflowRunResult(run) : `<div class="chip ${run.status === 'WAITING_APPROVAL' ? 'warn' : ''}">${esc(WF_RUN_LABEL[run.status] || run.status)}</div>`}
+      ${approvalCard}
+      <h4>Steps</h4><div class="wf-run-steps">${workflowRunSteps(run, def) || '<div class="muted">No steps.</div>'}</div>
+      ${def ? `<h4>Diagram</h4>${workflowDiagram(def)}` : ''}
+      </section>`;
+    $('#wf-back').onclick = () => { if (timer) clearTimeout(timer); open('workflows'); };
+    bindWorkflowRunActions(body, () => open('workflows'));
+    // B39 — Workflow Step → Inspector
+    body.querySelectorAll('.wf-run-step').forEach((el, index) => {
+      el.style.cursor = 'pointer';
+      el.onclick = () => { const step = (run.steps || [])[index]; if (step) selectInspector('workflowStep', step); };
+    });
+    refreshWorkflowBadge();
+    if (!terminal && revision === renderWorkflowRunDetail.revision) {
+      timer = setTimeout(render, 1000); // bounded 轮询：终态即停，页面切换由 revision 失效
+    }
+  };
+  await render();
 }
 
 /* ------------------------------------------------------------------ */

@@ -18,6 +18,7 @@ const MODELS = ['model-A', 'model-B', 'model-C'];
 
 function start(preferredPort = 0, opts = {}) {
   const modelsEnabled = opts.modelsEnabled !== false; // 默认 true
+  const workbench = opts.workbench === true;
   return new Promise((resolve, reject) => {
     const srv = http.createServer((req, res) => {
       const url = new URL(req.url, 'http://127.0.0.1');
@@ -47,7 +48,33 @@ function start(preferredPort = 0, opts = {}) {
         req.on('data', d => { body += d; if (body.length > 1e6) req.destroy(); });
         req.on('end', () => {
           let model = 'model-A';
-          try { model = JSON.parse(body || '{}').model || 'model-A'; } catch { /* ignore */ }
+          let requestBody = {};
+          try { requestBody = JSON.parse(body || '{}'); model = requestBody.model || 'model-A'; } catch { /* ignore */ }
+
+          if (workbench) {
+            const messages = Array.isArray(requestBody.messages) ? requestBody.messages : [];
+            const system = String((messages.find(m => m.role === 'system') || {}).content || '');
+            const context = String((messages.filter(m => m.role === 'user').pop() || {}).content || '');
+            const isChild = system.includes('# Dynamic Agent Base Prompt');
+            let action;
+            if (isChild) {
+              const summary = system.includes('Return findings without modifying files.')
+                ? 'REVIEWER_RESULT_4817'
+                : 'TEST_ANALYST_RESULT_9264';
+              action = { type: 'complete', args: { summary } };
+            } else if (!context.includes('REVIEWER_RESULT_4817')) {
+              action = { type: 'delegate', args: { goal: 'Review the workbench fixture', inlineAgentDefinition: inlineDefinition('Temporary Reviewer', 'code_reviewer', 'Return findings without modifying files.') } };
+            } else if (!context.includes('TEST_ANALYST_RESULT_9264')) {
+              action = { type: 'delegate', args: { goal: 'Analyze the workbench tests', inlineAgentDefinition: inlineDefinition('Temporary Test Analyst', 'test_analyst', 'Analyze test coverage and return TEST_ANALYST_RESULT_9264.') } };
+            } else if (!context.includes('WORKBENCH_FIXTURE_CONTENT')) {
+              action = { type: 'read_file', args: { path: 'src/main.js' } };
+            } else if (!context.includes('WORKBENCH_TEST_PASS')) {
+              action = { type: 'run_tests', args: { command: `node -e "console.log('WORKBENCH_TEST_PASS')"` } };
+            } else {
+              action = { type: 'complete', args: { summary: 'Workbench task complete: children consumed, file read, tests passed.' } };
+            }
+            return streamReply(res, model, JSON.stringify({ action }));
+          }
 
           if (model === 'model-FAIL') {
             res.writeHead(500, { 'Content-Type': 'application/json' });
@@ -126,6 +153,24 @@ function start(preferredPort = 0, opts = {}) {
 }
 
 module.exports = { start, startProbeServer, startHangServer, MODELS };
+
+function inlineDefinition(name, role, systemPrompt) {
+  return {
+    name, role, systemPrompt,
+    runtime: { kind: 'native' },
+    toolPolicy: { allow: ['read_file'], deny: [] },
+    permissionPolicy: { readOnly: true, allow: ['filesystem.read'], deny: [] },
+    modelPolicy: { mode: 'inherit_parent' },
+    lifetime: 'run', canDelegate: false
+  };
+}
+
+function streamReply(res, model, reply) {
+  res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' });
+  res.write(`data: ${JSON.stringify({ id: 'chatcmpl-workbench', object: 'chat.completion.chunk', model, choices: [{ index: 0, delta: { content: reply }, finish_reason: null }] })}\n\n`);
+  res.write('data: [DONE]\n\n');
+  res.end();
+}
 
 /**
  * v2.4.1 — Probe 专用 Fake Server（spec §25-§30 E2E fixtures）。

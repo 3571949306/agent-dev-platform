@@ -16,7 +16,9 @@
       <div class="project-switch">
         <button id="btn-project" class="pill">未打开项目</button>
       </div>
+      <div id="git-status" class="topbar-git muted">No Git</div>
       <div class="topbar-status"><span class="dot" id="status-dot"></span><span id="status-text">就绪</span></div>
+      <div id="topbar-model" class="topbar-model muted"></div>
     </header>
 
     <div id="body">
@@ -47,45 +49,54 @@
         </div>
         <div id="left-chats" class="left-pane"></div>
         <div id="left-files" class="left-pane hidden"></div>
+        <div id="left-runs" class="left-pane hidden"></div>
       </aside>
 
+      <div class="layout-resizer vertical" id="resize-left" role="separator" aria-label="调整侧边栏宽度" tabindex="0"></div>
       <main id="center">
-        <div id="chat-header">
-          <select id="agent-select"></select>
-          <select id="model-select"></select>
-          <button id="btn-newchat" class="btn">+ 新对话</button>
-        </div>
-        <div id="messages"></div>
-        <div id="composer">
-          <textarea id="input" placeholder="输入自然语言需求，例如：分析这个项目为什么构建失败并修复…（Enter 发送，Shift+Enter 换行）"></textarea>
-          <div class="composer-actions">
-            <span class="hint" id="composer-hint"></span>
-            <button id="btn-stop" class="btn danger hidden">■ 停止</button>
-            <button id="btn-send" class="btn primary">发送 ▸</button>
+        <div id="workspace-tabs" class="workspace-tabs"></div>
+        <section id="task-workspace" class="workspace-view">
+          <div id="run-header" class="run-header hidden">
+            <div class="run-header-main"><span id="run-header-status" class="run-state"></span><strong id="run-header-agent">主智能体</strong><span id="run-header-model"></span><span id="run-header-duration"></span></div>
+            <div class="run-header-meta"><span id="run-header-stage"></span><span id="run-header-children"></span><span id="run-header-files"></span><span id="run-header-verification"></span></div>
           </div>
-        </div>
+          <div class="task-tabs">
+            <button class="task-tab active" data-task-tab="chat">Chat</button>
+            <button class="task-tab" data-task-tab="progress">Run Progress</button>
+            <button class="task-tab" data-task-tab="result">Result</button>
+          </div>
+          <div id="task-chat-pane" class="task-pane">
+            <div id="chat-header">
+              <select id="agent-select"></select>
+              <select id="model-select"></select>
+              <button id="btn-newchat" class="btn">+ 新对话</button>
+            </div>
+            <div id="messages"></div>
+            <div id="composer">
+              <textarea id="input" placeholder="输入自然语言需求，例如：分析这个项目为什么构建失败并修复…（Enter 发送，Shift+Enter 换行）"></textarea>
+              <div class="composer-actions">
+                <span class="hint" id="composer-hint"></span>
+                <button id="btn-stop" class="btn danger hidden">■ 停止</button>
+                <button id="btn-send" class="btn primary">发送 ▸</button>
+              </div>
+            </div>
+          </div>
+          <div id="task-progress-pane" class="task-pane hidden"><div id="task-progress-list"></div></div>
+          <div id="task-result-pane" class="task-pane hidden"><div id="task-result"></div></div>
+        </section>
+        <section id="workspace-file-view" class="workspace-view hidden"></section>
+        <section id="workspace-run-view" class="workspace-view hidden"></section>
       </main>
 
+      <div class="layout-resizer vertical" id="resize-inspector" role="separator" aria-label="调整检查器宽度" tabindex="0"></div>
       <aside id="right">
-        <div class="right-section">
-          <div class="section-title">智能体</div>
-          <div id="agents-list"></div>
-        </div>
-        <div class="right-section">
-          <div class="section-title">任务</div>
-          <div id="tasks-list"></div>
-        </div>
-        <div class="right-section">
-          <div class="section-title">运行时间线</div>
-          <div id="timeline-list"></div>
-        </div>
-        <div class="right-section">
-          <div class="section-title">编排 Run Tree（v2.9.0）</div>
-          <div id="orchestration-list"></div>
-        </div>
+        <div class="inspector-head"><span>Context Inspector</span><button id="inspector-collapse" class="icon-btn" title="收起检查器">›</button></div>
+        <div id="inspector-content"></div>
+        <div class="right-section"><div class="section-title">Run Tree</div><div id="orchestration-list"></div></div>
       </aside>
     </div>
 
+    <div class="layout-resizer horizontal" id="resize-bottom" role="separator" aria-label="调整底部面板高度" tabindex="0"></div>
     <footer id="bottom">
       <div class="bottom-tabs">
         <button class="btab active" data-btab="terminal">终端</button>

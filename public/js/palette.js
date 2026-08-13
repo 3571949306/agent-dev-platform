@@ -20,14 +20,10 @@ let fileCache = null;            // Quick Open 文件列表缓存（B36：只在
 
 /* ---------------- layout helpers ---------------- */
 function toggleBottom(tab) {
-  const bottom = $('#bottom');
-  if (!bottom) return;
-  const nowHidden = bottom.classList.toggle('hidden');
-  if (!nowHidden && tab) panels.activate(tab);
+  window.dispatchEvent(new CustomEvent('layout-toggle-bottom', { detail: { tab } }));
 }
 function toggleSidebar() {
-  const left = $('#left');
-  if (left) left.classList.toggle('hidden');
+  window.dispatchEvent(new CustomEvent('layout-toggle-sidebar'));
 }
 function activateLeft(tab) {
   const b = $(`.ltab[data-ltab="${tab}"]`);

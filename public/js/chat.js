@@ -5,6 +5,7 @@ import { $, esc, h, md, toast, renderDiff, prettyJson, truncate, fmtTime, confir
 import { toolName, eventName, runStatus, isTerminal, mainAgentStateName, mainAgentActionName } from './i18n.js';
 import { preflightCheck } from './preflight.js';
 import * as panels from './panels.js';
+import { appendProgress } from './workspace.js';
 import * as pages from './pages.js';
 
 const msgsEl = () => $('#messages');
@@ -475,13 +476,15 @@ function mainActionCard(action) {
   const a = action || {};
   const type = a.type || 'unknown';
   const displayName = mainAgentActionName(type);
-  const card = h('div', { class: 'ma-action-card running', dataset: { type } });
+  const card = h('div', { class: `ma-action-card action-${type} running`, dataset: { type, startedAt: String(Date.now()) } });
+  const icon = ({ read_file: '📖', read_files: '📖', search: '🔎', search_text: '🔎', patch_file: '✎', write_file: '✎', create_file: '✎', run_command: '›_', run_tests: '✓', delegate: '⇢', complete: '✓' })[type] || '•';
   const thought = a.thought ? `<div class="ma-thought">${esc(truncate(a.thought, 400))}</div>` : '';
   const argsSummary = mainActionArgsSummary(a);
   card.innerHTML = `
     <div class="ma-ac-head">
-      <span class="ma-ac-type">${esc(displayName)}</span>
+      <span class="ma-ac-icon">${icon}</span><span class="ma-ac-type">${esc(displayName)}</span>
       <span class="ma-ac-args">${esc(truncate(argsSummary, 100))}</span>
+      <span class="ma-ac-duration"></span>
       <span class="ma-ac-status">运行中…</span>
       <button class="ma-ac-toggle" title="展开/折叠">▾</button>
     </div>
@@ -515,6 +518,8 @@ function fillMainActionCard(card, result) {
   card.classList.remove('running');
   const out = card.querySelector('.ma-ac-out');
   const status = card.querySelector('.ma-ac-status');
+  const duration = card.querySelector('.ma-ac-duration');
+  if (duration) duration.textContent = `${Math.max(0, Date.now() - Number(card.dataset.startedAt || Date.now()))}ms`;
   let obj = null;
   try { obj = typeof result === 'string' ? JSON.parse(result) : result; } catch { obj = null; }
   const ok = !(obj && obj.ok === false);
@@ -523,12 +528,19 @@ function fillMainActionCard(card, result) {
   if (!ok && obj && obj.error) {
     const e = obj.error;
     status.textContent = '失败：' + (e.code || '');
-    out.innerHTML = `<div class="ma-ac-err">${esc(e.message || JSON.stringify(obj))}</div>`;
+    out.innerHTML = `<div class="ma-ac-err">${esc(redactError(e.message || JSON.stringify(obj)))}</div>`;
     card.querySelector('.ma-ac-body').classList.remove('hidden');
   } else {
     const text = obj ? prettyJson(obj) : String(result || '');
     out.innerHTML = `<pre class="ma-ac-res">${esc(truncate(text, 4000))}</pre>`;
   }
+}
+
+function redactError(value) {
+  return String(value || '')
+    .replace(/(authorization\s*[:=]\s*)([^\s,;]+)/ig, '$1[REDACTED]')
+    .replace(/((?:api[_-]?key|cookie)\s*[:=]\s*)([^\s,;]+)/ig, '$1[REDACTED]')
+    .replace(/\b(?:sk|pk)-[A-Za-z0-9_-]{8,}\b/g, '[REDACTED]');
 }
 
 /** 测试结果行（嵌入到 action card 的 out 区） */
@@ -771,7 +783,7 @@ function handleMainAgentEvent(ev, mine) {
       state.mainAgent.planTasks = (plan.tasks || []).map(t => ({ taskId: t.taskId || t.id || '', title: t.title || '', status: t.status || 'pending' }));
       const card = planCard(plan.goal || state.mainAgent.runId || '任务', state.mainAgent.planTasks);
       state.mainAgent.planEl = card;
-      appendBeforeStatus(card);
+      appendProgress(card);
       break;
     }
 
@@ -795,18 +807,14 @@ function handleMainAgentEvent(ev, mine) {
       // 新动作卡片（finish/delegate 不创建卡片，单独处理）
       const action = ev.action || {};
       if (action.type === 'finish') {
-        // finish 动作：显示为智能体总结气泡
-        if (action.args && action.args.summary) {
-          const sl = $('#status-line');
-          const b = assistantBubble(action.args.summary);
-          if (sl) msgsEl().insertBefore(b, sl); else msgsEl().appendChild(b);
-        }
+        // The canonical final bubble is emitted once by mainAgent:runCompleted.
+        // Keeping finish out of Chat prevents duplicate assistant finals.
         state.mainAgent.pendingActionEl = null;
         break;
       }
       const card = mainActionCard(action);
       state.mainAgent.pendingActionEl = card;
-      appendBeforeStatus(card);
+      appendProgress(card);
       break;
     }
 
@@ -833,7 +841,7 @@ function handleMainAgentEvent(ev, mine) {
 
     case 'mainAgent:repairStart': {
       // 修复横幅
-      appendBeforeStatus(repairBanner(ev.round || 1, ev.reason));
+      appendProgress(repairBanner(ev.round || 1, ev.reason));
       break;
     }
 

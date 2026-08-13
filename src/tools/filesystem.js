@@ -147,6 +147,83 @@ async function atomicWriteFile(ctx, absPath, content) {
   }
 }
 
+// Shared mutation implementations. Main-agent tools and explicit Workbench
+// user actions call these same guarded functions; there is one mutation truth.
+async function createDirectoryMutation(ctx, args) {
+  try {
+    const abs = guardCanonical(ctx, args.path);
+    recheckMutationTarget(ctx, args.path);
+    await fsp.mkdir(abs);
+    return ok({ created: args.path });
+  } catch (e) {
+    if (e && e.code === 'EEXIST') return fail('DIRECTORY_EXISTS', `${args.path} 已存在，创建被拒绝`, false);
+    return e instanceof PathSecurityError ? fail(compatCode(e.code), e.message) : fail('CREATE_DIRECTORY_FAILED', e.message);
+  }
+}
+
+async function createFileMutation(ctx, args) {
+  try {
+    const abs = guardCanonical(ctx, args.path);
+    recheckMutationTarget(ctx, args.path);
+    await fsp.mkdir(path.dirname(abs), { recursive: true });
+    let fh;
+    try {
+      fh = await fsp.open(abs, fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_WRONLY, 0o666);
+    } catch (e) {
+      if (e && e.code === 'EEXIST') return fail('FILE_EXISTS', `${args.path} 已存在，请使用 write_file 覆盖或先删除`);
+      throw e;
+    }
+    try { await fh.writeFile(args.content || '', 'utf8'); } finally { await fh.close(); }
+    observeFile(ctx, abs, args.content || '');
+    return ok({ created: args.path });
+  } catch (e) { return e instanceof PathSecurityError ? fail(compatCode(e.code), e.message) : fail('CREATE_FAILED', e.message); }
+}
+
+async function moveFileMutation(ctx, args) {
+  try {
+    const a = guardCanonical(ctx, args.source);
+    const b = guardCanonical(ctx, args.destination);
+    recheckMutationTarget(ctx, args.source);
+    recheckMutationTarget(ctx, args.destination);
+    await fsp.mkdir(path.dirname(b), { recursive: true });
+    if (fs.existsSync(b) && args.replace !== true) {
+      return fail('DESTINATION_EXISTS', `${args.destination} 已存在，移动被拒绝（显式 replace=true 才允许覆盖）`, false);
+    }
+    await fsp.rename(a, b);
+    return ok({ moved: args.source, to: args.destination });
+  } catch (e) { return e instanceof PathSecurityError ? fail(compatCode(e.code), e.message) : fail('MOVE_FAILED', e.message); }
+}
+
+async function deleteFileMutation(ctx, args) {
+  try {
+    const abs = guardCanonical(ctx, args.path);
+    const st = await fsp.stat(abs);
+    recheckMutationTarget(ctx, args.path);
+    if (st.isDirectory()) await fsp.rmdir(abs); else await fsp.unlink(abs);
+    return ok({ deleted: args.path });
+  } catch (e) { return e instanceof PathSecurityError ? fail(compatCode(e.code), e.message) : fail('DELETE_FAILED', e.message); }
+}
+
+async function deleteDirectoryMutation(ctx, args) {
+  try {
+    const abs = guardCanonical(ctx, args.path);
+    if (path.resolve(abs) === path.resolve(ctx.projectRoot)) return fail('WORKSPACE_ROOT_MUTATION_BLOCKED', '不能删除项目根目录', false);
+    const st = await fsp.lstat(abs);
+    if (!st.isDirectory() || st.isSymbolicLink()) return fail('NOT_A_DIRECTORY', '目标不是普通文件夹', false);
+    recheckMutationTarget(ctx, args.path);
+    await fsp.rm(abs, { recursive: true, force: false });
+    return ok({ deleted: args.path });
+  } catch (e) { return e instanceof PathSecurityError ? fail(compatCode(e.code), e.message) : fail('DELETE_DIRECTORY_FAILED', e.message); }
+}
+
+const workbenchMutations = Object.freeze({
+  create_file: createFileMutation,
+  create_directory: createDirectoryMutation,
+  move_file: moveFileMutation,
+  delete_file: deleteFileMutation,
+  delete_directory: deleteDirectoryMutation
+});
+
 const tools = [
   {
     name: 'list_directory', description: '列出目录内容（文件与子目录）。', risk_level: 'low', permission: 'filesystem.read',
@@ -205,27 +282,14 @@ const tools = [
     }
   },
   {
+    name: 'create_directory', description: '创建文件夹（父文件夹必须存在，碰撞时拒绝）。', risk_level: 'medium', permission: 'filesystem.write',
+    input_schema: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] },
+    exec: createDirectoryMutation
+  },
+  {
     name: 'create_file', description: '创建新文件（若已存在则失败）。', risk_level: 'medium', permission: 'filesystem.write',
     input_schema: { type: 'object', properties: { path: { type: 'string' }, content: { type: 'string', description: '文件内容' } }, required: ['path', 'content'] },
-    async exec(ctx, args) {
-      try {
-        const abs = guardCanonical(ctx, args.path);
-        // §66 execution-time recheck before mutation
-        recheckMutationTarget(ctx, args.path);
-        await fsp.mkdir(path.dirname(abs), { recursive: true });
-        // v2.9.8 R3：exclusive create（O_CREAT|O_EXCL）——消除 exists-check 与写入之间的 TOCTOU
-        let fh;
-        try {
-          fh = await fsp.open(abs, fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_WRONLY, 0o666);
-        } catch (e) {
-          if (e && e.code === 'EEXIST') return fail('FILE_EXISTS', `${args.path} 已存在，请使用 write_file 覆盖或先删除`);
-          throw e;
-        }
-        try { await fh.writeFile(args.content || '', 'utf8'); } finally { await fh.close(); }
-        observeFile(ctx, abs, args.content || '');
-        return ok({ created: args.path });
-      } catch (e) { return e instanceof PathSecurityError ? fail(compatCode(e.code), e.message) : fail('CREATE_FAILED', e.message); }
-    }
+    exec: createFileMutation
   },
   {
     name: 'write_file', description: '写入/覆盖文件（整文件；原子替换 + stale-write 保护）。', risk_level: 'medium', permission: 'filesystem.write',
@@ -260,23 +324,7 @@ const tools = [
   {
     name: 'move_file', description: '移动/重命名文件或目录（目标已存在时默认失败）。', risk_level: 'high', permission: 'filesystem.delete',
     input_schema: { type: 'object', properties: { source: { type: 'string' }, destination: { type: 'string' }, replace: { type: 'boolean', description: '目标已存在时是否显式允许覆盖（默认 false）' } }, required: ['source', 'destination'] },
-    async exec(ctx, args) {
-      try {
-        // §79: source 与 destination 都必须 canonical inside
-        const a = guardCanonical(ctx, args.source);
-        const b = guardCanonical(ctx, args.destination);
-        // §66 execution-time recheck both sides before mutation
-        recheckMutationTarget(ctx, args.source);
-        recheckMutationTarget(ctx, args.destination);
-        await fsp.mkdir(path.dirname(b), { recursive: true });
-        // v2.9.8 R3：destination 碰撞不得静默毁掉未知用户文件
-        if (fs.existsSync(b) && args.replace !== true) {
-          return fail('DESTINATION_EXISTS', `${args.destination} 已存在，移动被拒绝（显式 replace=true 才允许覆盖）`, false);
-        }
-        await fsp.rename(a, b);
-        return ok({ moved: args.source, to: args.destination });
-      } catch (e) { return e instanceof PathSecurityError ? fail(compatCode(e.code), e.message) : fail('MOVE_FAILED', e.message); }
-    }
+    exec: moveFileMutation
   },
   {
     name: 'copy_file', description: '复制文件（目标已存在时默认失败）。', risk_level: 'medium', permission: 'filesystem.write',
@@ -304,17 +352,13 @@ const tools = [
   {
     name: 'delete_file', description: '删除文件或（空）目录。高风险，需权限确认。', risk_level: 'high', permission: 'filesystem.delete',
     input_schema: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] },
-    async exec(ctx, args) {
-      try {
-        const abs = guardCanonical(ctx, args.path);
-        const st = await fsp.stat(abs);
-        // §66 execution-time recheck before destructive mutation
-        recheckMutationTarget(ctx, args.path);
-        if (st.isDirectory()) await fsp.rmdir(abs); else await fsp.unlink(abs);
-        return ok({ deleted: args.path });
-      } catch (e) { return e instanceof PathSecurityError ? fail(compatCode(e.code), e.message) : fail('DELETE_FAILED', e.message); }
-    }
+    exec: deleteFileMutation
+  },
+  {
+    name: 'delete_directory', description: '递归删除项目内文件夹。高风险，需权限确认。', risk_level: 'high', permission: 'filesystem.delete',
+    input_schema: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] },
+    exec: deleteDirectoryMutation
   }
 ];
 
-module.exports = { tools, atomicWriteFile, observeFile, checkStaleWrite, sha256Hex };
+module.exports = { tools, workbenchMutations, atomicWriteFile, observeFile, checkStaleWrite, sha256Hex };

@@ -39,6 +39,8 @@
     "test:reliability-closure": "node scripts/run-tests.js reliabilityClosure",
     "test:reliability:production": "node scripts/reliability-production-smoke.js",
     "test:reliability:soak": "node scripts/run-tests.js reliabilitySoak",
+    "test:gui": "node scripts/run-tests.js guiWorkbench",
+    "test:gui:production": "node scripts/gui-production-smoke.js",
     "icon": "node scripts/make-icon.js"
   },
   "dependencies": {

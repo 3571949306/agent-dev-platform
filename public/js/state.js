@@ -14,6 +14,7 @@ export const state = {
   diffs: [],           // live file changes this session
   tasks: [],
   logs: [],
+  activeFilePath: null,
   // v2.6.0 Main Agent — 当前 Run 的 UI 跟踪
   mainAgent: {
     runId: null,           // 当前 Run ID

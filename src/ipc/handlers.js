@@ -59,6 +59,8 @@ const { createProviderModelAdapter } = require('../agent/runtime/providerModelAd
 const { createProductEntry } = require('../services/productEntry');
 const { createProductDiagnostics } = require('../services/productDiagnostics');
 const { recoverInterruptedRuntime } = require('../services/runtimeRecovery');
+const { createWorkbenchFileService } = require('../services/workbenchFiles');
+const { createWorkbenchGitService } = require('../services/workbenchGit');
 const { getDb } = require('../db/schema');
 const {
   createModelCatalog,
@@ -88,6 +90,7 @@ let mainWindow = null;
 let currentProjectId = null;
 const activeRuns = new Map();
 const pendingPermissions = new Map();
+const pendingFileDeletes = new Map();
 
 // E2E 测试钩子：externalImport:selectFile 一次性返回的文件路径（仅测试中设置）
 let testFilePickPath = null;
@@ -332,6 +335,7 @@ async function shutdownServices() {
       try { resolve({ decision: 'deny', range: 'once', reason: 'APPLICATION_SHUTDOWN' }); } catch { /* already settled */ }
     }
     pendingPermissions.clear();
+    pendingFileDeletes.clear();
 
     const activeHubRunIds = lifecycleManager.listActive()
       .map(run => runBridge.getRunMapping(run.id))
@@ -367,6 +371,7 @@ async function shutdownServices() {
     }
     activeRuns.clear();
     pendingPermissions.clear();
+    pendingFileDeletes.clear();
     for (const id of [...mcpManager.clients.keys()]) mcpManager.disconnect(id);
     forceOwnedResources();
     projectLock.clearAll();
@@ -729,6 +734,55 @@ function reg(channel, fn) {
   });
 }
 
+function currentProjectOrThrow() {
+  const project = currentProjectId ? store.projects.get(currentProjectId) : null;
+  if (!project) throw new Error('未打开项目');
+  return project;
+}
+
+function mapRunRecord(row) {
+  if (!row) return null;
+  const conversation = row.conversation_id ? store.conversations.get(row.conversation_id) : null;
+  const task = row.task_id ? store.tasks.get(row.task_id) : null;
+  const agent = row.agent_id ? (store.agents.get(row.agent_id) || store.externalAgents.get(row.agent_id)) : null;
+  const startedAt = row.started_at || null;
+  const terminalAt = row.terminal_at || null;
+  const durationMs = startedAt
+    ? Math.max(0, new Date(terminalAt || row.updated_at || Date.now()).getTime() - new Date(startedAt).getTime())
+    : 0;
+  return {
+    id: row.id,
+    runId: row.id,
+    conversationId: row.conversation_id || null,
+    agentId: row.agent_id || null,
+    taskId: row.task_id || null,
+    status: row.status || 'unknown',
+    stage: row.stage || row.status || 'unknown',
+    startedAt,
+    updatedAt: row.updated_at || null,
+    terminalAt,
+    durationMs,
+    error: row.error || '',
+    message: row.message || '',
+    parentRunId: row.parent_run_id || null,
+    rootRunId: row.root_run_id || row.id,
+    depth: Number(row.depth || 0),
+    adapterId: row.adapter_id || '',
+    agentName: agent ? agent.name : (row.adapter_id || row.agent_id || '主智能体'),
+    model: agent ? (agent.model || '') : '',
+    goal: task ? task.title : (conversation ? conversation.title : ''),
+    projectId: conversation ? conversation.project_id : null,
+    type: row.parent_run_id ? 'dynamic-child' : ((agent && agent.type === 'external') ? 'external' : 'main'),
+    verification: row.status === 'completed' ? 'PASS' : (['failed', 'timeout'].includes(row.status) ? 'FAIL' : '—')
+  };
+}
+
+function parseStoredEvent(row) {
+  let payload = {};
+  try { payload = JSON.parse(row.payload_json || '{}'); } catch { payload = {}; }
+  return { id: row.id, type: row.type, createdAt: row.created_at, ...payload };
+}
+
 function register(window) {
   mainWindow = window;
   rebuildMcpToolMap();
@@ -852,8 +906,34 @@ function register(window) {
     activeAbortControllers: [...activeRuns.keys()]
   }));
   // v2.3.2 (P0-3): E2E 数据库一致性检查 —— 直接读 runs 表，确认 UI 终态 = runs.status。
-  reg('runs:get', (id) => store.runs.get(id));
-  reg('runs:list', (limit) => store.runs.list(limit || 100));
+  reg('runs:get', (id) => mapRunRecord(store.runs.get(id)));
+  reg('runs:list', (options) => {
+    const legacyArrayShape = !options || typeof options !== 'object';
+    const opts = (options && typeof options === 'object') ? options : { limit: Number(options) || 100 };
+    const limit = Math.max(1, Math.min(50, Number(opts.limit) || 50));
+    const status = opts.status && opts.status !== 'all' ? String(opts.status).toLowerCase() : null;
+    const search = String(opts.search || '').trim().toLowerCase();
+    const projectId = opts.projectId || null;
+    const source = store.runs.list(Math.min(1000, Math.max(limit * 4, 200))).map(mapRunRecord);
+    const filtered = source.filter(run => {
+      if (status && run.status !== status) return false;
+      if (projectId && run.projectId && run.projectId !== projectId) return false;
+      if (search && !`${run.goal} ${run.agentName} ${run.id}`.toLowerCase().includes(search)) return false;
+      return true;
+    });
+    const offset = Math.max(0, Number(opts.offset) || 0);
+    const items = filtered.slice(offset, offset + limit);
+    return legacyArrayShape ? items : { items, total: filtered.length, limit, offset };
+  });
+  reg('runs:children', (runId) => store.runs.list(1000).filter(row => row.parent_run_id === runId).map(mapRunRecord));
+  reg('runs:events', (runId) => {
+    const run = store.runs.get(runId);
+    if (!run || !run.conversation_id) return [];
+    return store.events.list(run.conversation_id)
+      .map(parseStoredEvent)
+      .filter(event => !event.runId || event.runId === runId)
+      .slice(-1000);
+  });
 
   // prompts / skills
   reg('prompts:list', () => store.prompts.list());
@@ -996,17 +1076,39 @@ function register(window) {
       .sort((a, b) => (a.dir === b.dir ? a.name.localeCompare(b.name) : (a.dir ? -1 : 1)));
     return { root: proj.root_path, dir: relDir || '.', items };
   });
-  reg('files:read', (relPath) => {
-    const proj = currentProjectId ? store.projects.get(currentProjectId) : null;
-    if (!proj) throw new Error('未打开项目');
-    const { guard } = require('../security/pathguard');
-    const abs = guard(proj.root_path, relPath);
-    const st = fs.statSync(abs);
-    if (st.size > 2 * 1024 * 1024) return { path: relPath, truncated: true, content: '（文件过大，仅供智能体分段读取）' };
-    const buf = fs.readFileSync(abs);
-    if (buf.includes(0)) return { path: relPath, binary: true, content: '（二进制文件）' };
-    return { path: relPath, content: buf.toString('utf8'), size: st.size };
+  reg('files:read', (relPath) => createWorkbenchFileService(currentProjectOrThrow().root_path).preview(relPath));
+  reg('files:create', (relPath) => createWorkbenchFileService(currentProjectOrThrow().root_path).createFile(relPath));
+  reg('files:createDir', (relPath) => createWorkbenchFileService(currentProjectOrThrow().root_path).createDir(relPath));
+  reg('files:rename', ({ from, to }) => createWorkbenchFileService(currentProjectOrThrow().root_path).rename(from, to));
+  reg('files:deleteRequest', (relPath) => {
+    const service = createWorkbenchFileService(currentProjectOrThrow().root_path);
+    const target = service.absolute(relPath);
+    const token = crypto.randomUUID();
+    pendingFileDeletes.set(token, { path: target.path, projectId: currentProjectId, expiresAt: Date.now() + 60000 });
+    return { token, path: target.path };
   });
+  reg('files:delete', ({ relPath, token }) => {
+    const request = pendingFileDeletes.get(token);
+    pendingFileDeletes.delete(token);
+    if (!request || request.expiresAt < Date.now() || request.projectId !== currentProjectId || request.path !== String(relPath).replace(/\\/g, '/')) {
+      throw new Error('删除确认已失效，请重新确认');
+    }
+    return createWorkbenchFileService(currentProjectOrThrow().root_path).remove(relPath);
+  });
+  reg('files:reveal', (relPath) => {
+    const target = createWorkbenchFileService(currentProjectOrThrow().root_path).absolute(relPath);
+    shell.showItemInFolder(target.absolutePath);
+    return true;
+  });
+  reg('files:openExternal', async (relPath) => {
+    const target = createWorkbenchFileService(currentProjectOrThrow().root_path).absolute(relPath);
+    const result = await shell.openPath(target.absolutePath);
+    if (result) throw new Error(result);
+    return true;
+  });
+  reg('project:gitStatus', () => createWorkbenchGitService(currentProjectOrThrow().root_path).status());
+  reg('git:changedFiles', () => createWorkbenchGitService(currentProjectOrThrow().root_path).changedFiles());
+  reg('git:diff', (relPath) => createWorkbenchGitService(currentProjectOrThrow().root_path).diff(relPath));
 
   // v2.9.9 Phase B（B26 Quick Open）— 返回项目内有界（bounded）的相对文件路径平坦列表，
   // 供 Quick Open 搜索。仅遍历项目根内（从 proj.root_path 起步，天然不越界），跳过

@@ -210,13 +210,20 @@ async function runSmoke(port) {
   // async connection load, then checks the capability matrix rendered.
   try {
     await wc.executeJavaScript(`(() => { const b = document.querySelector('[data-page="diagnostics"]'); if (b) b.click(); return !!b; })()`);
-    await new Promise(r => setTimeout(r, 700));
+    // Diagnostics may perform bounded external-agent/computer probes. Poll the
+    // real page until it replaces loading state, with a strict upper bound.
+    for (let i = 0; i < 40; i++) {
+      const ready = await wc.executeJavaScript(`document.querySelector('#page-body')?.innerText !== '加载中…'`);
+      if (ready) break;
+      await new Promise(r => setTimeout(r, 250));
+    }
     const diag = await wc.executeJavaScript(`(() => ({
       title: document.querySelector('#page-title')?.textContent || null,
       hasRunBtn: !!document.querySelector('#diag-run'),
       hasMatrix: !!document.querySelector('#diag-matrix'),
       hasEmpty: !!document.querySelector('#diag-goto-api'),
-      hasErr: !!document.querySelector('#page-body .err')
+      hasErr: !!document.querySelector('#page-body .err'),
+      bodyText: document.querySelector('#page-body')?.innerText?.slice(0, 200) || null
     }))()`);
     console.log('SMOKE_DIAG ' + JSON.stringify(diag));
     if (diag.hasErr) smokeErrors.push('[diag] 诊断页渲染抛错');

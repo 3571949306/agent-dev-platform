@@ -507,11 +507,11 @@ test('12) Quick Open：Ctrl+P 搜索项目文件并打开预览', async () => {
   await page.waitForSelector('#cmd-palette:not(.hidden)', { timeout: 5000 });
   await page.fill('#cp-input', 'hello-quickopen');
   await expect(page.locator('#cp-list')).toContainText('hello-quickopen.js', { timeout: 5000 });
-  // Enter 打开只读预览（modal 出现，标题为文件相对路径）
+  // Enter 打开中心只读文件视图（Phase B B4.5 replaces the legacy modal）
   await page.keyboard.press('Enter');
-  await expect(page.locator('#modal')).toContainText('hello-quickopen.js', { timeout: 5000 });
-  // 关闭 modal + 清理临时项目
-  await page.evaluate(() => { const x = document.querySelector('#modal-overlay .modal-x'); if (x) x.click(); });
+  await expect(page.locator('#workspace-file-view')).toContainText('hello-quickopen.js', { timeout: 5000 });
+  await expect(page.locator('#workspace-file-view')).toContainText('READ ONLY', { timeout: 5000 });
+  // 清理临时项目
   fs.rmSync(projRoot, { recursive: true, force: true });
   const fatals = pageErrors.filter(e => /Cannot read|TypeError|ReferenceError|is not defined/.test(e));
   expect(fatals).toEqual([]);

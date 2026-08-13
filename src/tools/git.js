@@ -55,4 +55,4 @@ const tools = [
 
 function gitDestructive(cmd) { return isDestructive(cmd); }
 
-module.exports = { tools, gitDestructive };
+module.exports = { tools, gitDestructive, gitExec };

@@ -169,18 +169,25 @@ test('Canonical Main entry auto-creates two inline children, consumes results, n
     fs.writeFileSync(path.join(projectRoot, 'src.js'), 'module.exports = 1;\n', 'utf8');
 
     let mainCalls = 0;
+    const mainContexts = [];
     const fakeProvider = {
       streamResponse(input) {
         const sys = String(input.system || '');
         const isChild = sys.includes(DYNAMIC_AGENT_BASE_PROMPT);
         let action;
         if (isChild) {
-          action = { type: 'complete', args: { summary: 'inline child result' } };
+          const summary = sys.includes('Temporary Reviewer') || sys.includes('Return findings without modifying files.')
+            ? 'REVIEWER_RESULT_4817'
+            : 'TEST_ANALYST_RESULT_9264';
+          action = { type: 'complete', args: { summary } };
         } else {
           mainCalls++;
+          const context = String(input.messages && input.messages[0] && input.messages[0].content || '');
+          mainContexts.push(context);
           if (mainCalls === 1) action = { type: 'delegate', args: { goal: 'Review the code', inlineAgentDefinition: inlineDef('Temporary Reviewer', 'code_reviewer', 'Return findings without modifying files.') } };
-          else if (mainCalls === 2) action = { type: 'delegate', args: { goal: 'Analyze tests', inlineAgentDefinition: inlineDef('Temporary Test Analyst', 'test_analyst', 'Analyze test coverage.') } };
-          else action = { type: 'complete', args: { summary: 'done with two inline children' } };
+          else if (mainCalls === 2 && context.includes('REVIEWER_RESULT_4817')) action = { type: 'delegate', args: { goal: 'Analyze tests', inlineAgentDefinition: inlineDef('Temporary Test Analyst', 'test_analyst', 'Analyze test coverage.') } };
+          else if (mainCalls === 3 && context.includes('REVIEWER_RESULT_4817') && context.includes('TEST_ANALYST_RESULT_9264')) action = { type: 'complete', args: { summary: 'done with two inline children' } };
+          else action = { type: 'complete', args: { summary: 'PROOF_FAILED_CHILD_RESULTS_MISSING' } };
         }
         const text = JSON.stringify({ action });
         input.onChunk(text);
@@ -221,6 +228,12 @@ test('Canonical Main entry auto-creates two inline children, consumes results, n
     const bothCompleted = children.every(c => c.status === 'completed');
     assert.ok(bothCompleted, 'both inline children completed (parent consumed their results)');
 
+    // P0 proof gap closure: assert the actual model input, not merely the number of calls.
+    assert.strictEqual(mainCalls, 3, 'main provider called exactly once before and once after each child');
+    assert.ok(mainContexts[1].includes('REVIEWER_RESULT_4817'), 'reviewer result is present in the next parent model context');
+    assert.ok(mainContexts[2].includes('REVIEWER_RESULT_4817'), 'reviewer result remains in the final parent model context');
+    assert.ok(mainContexts[2].includes('TEST_ANALYST_RESULT_9264'), 'test analyst result is present in the final parent model context');
+
     // INLINE_CHILD_NO_NEW_CHAT — 用户 conversation 数量不变
     const convCountAfter = store.conversations.list(chain.project.id).length;
     assert.strictEqual(convCountAfter, convCountBefore, 'no new user conversation created by inline children');
@@ -242,6 +255,12 @@ test('Canonical Main entry auto-creates two inline children, consumes results, n
     console.log('MAIN_AUTO_INLINE_CHILD=PASS');
     console.log('MAIN_INLINE_TWO_CHILDREN=PASS');
     console.log('MAIN_PARENT_CONSUMES_CHILD_RESULTS=PASS');
+    console.log('INLINE_REVIEWER_RESULT_CONSUMED=YES');
+    console.log('INLINE_TEST_RESULT_CONSUMED=YES');
+    console.log('INLINE_BOTH_RESULTS_IN_PARENT_CONTEXT=YES');
+    console.log('REVIEWER_RESULT_CONSUMED=YES');
+    console.log('TEST_RESULT_CONSUMED=YES');
+    console.log('BOTH_RESULTS_IN_PARENT_CONTEXT=YES');
     console.log('INLINE_CHILD_NO_NEW_CHAT=PASS');
     console.log('CODING_TASK_BROWSER_EXEC=0');
     console.log('CODING_TASK_COMPUTER_EXEC=0');

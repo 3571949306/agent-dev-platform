@@ -10,6 +10,11 @@ import * as pages from './pages.js';
 import { initOrchestration } from './orchestration.js';
 import * as theme from './theme.js';
 import * as palette from './palette.js';
+import * as workspace from './workspace.js';
+import * as runs from './runs.js';
+import { ingestRunEvent } from './runViewModel.js';
+
+let modelListenersBound = false;
 
 async function boot() {
   // v2.9.9 Phase B（B2/B31）— apply persisted appearance as early as possible.
@@ -22,10 +27,12 @@ async function boot() {
   }
 
   panels.init();
+  workspace.initWorkspace();
   wireShell();
   palette.init(); // v2.9.9 Phase B（B24/B25）— 命令面板 + 全局快捷键
   initOrchestration(); // v2.9.0 — 编排 Run Tree / Delegation Card（隔离激活）
   onEvent(ev => {
+    try { ingestRunEvent(ev); } catch (err) { console.error('run view event error', err, ev); }
     try { chat.handleEvent(ev); } catch (err) { console.error('event error', err, ev); }
     try { pages.handleDiagEvent(ev); } catch (err) { console.error('diag event error', err, ev); }
     try { pages.handleProbeEvent(ev); } catch (err) { console.error('probe event error', err, ev); }
@@ -63,6 +70,7 @@ function wireShell() {
     b.classList.add('active');
     $('#left-chats').classList.toggle('hidden', b.dataset.ltab !== 'chats');
     $('#left-files').classList.toggle('hidden', b.dataset.ltab !== 'files');
+    $('#left-runs').classList.add('hidden');
     if (b.dataset.ltab === 'files') await files.render();
   });
 
@@ -81,10 +89,14 @@ function wireShell() {
         $$('.ltab').forEach(x => x.classList.toggle('active', x.dataset.ltab === tab));
         $('#left-chats').classList.toggle('hidden', tab !== 'chats');
         $('#left-files').classList.toggle('hidden', tab !== 'files');
+        $('#left-runs').classList.add('hidden');
+        if (act === 'chat') workspace.showTask('chat');
         if (tab === 'files') await files.render();
       } else if (act === 'runs') {
-        const bottom = $('#bottom'); if (bottom) bottom.classList.remove('hidden');
-        panels.activate('timeline');
+        $('#left-chats').classList.add('hidden');
+        $('#left-files').classList.add('hidden');
+        $('#left-runs').classList.remove('hidden');
+        await runs.render();
       } else if (act === 'computer') {
         const bottom = $('#bottom'); if (bottom) bottom.classList.remove('hidden');
         panels.activate('computer');
@@ -126,6 +138,7 @@ function setProject(p) {
   api.settingsSet('lastProjectId', p.id).catch(() => {});
   panels.refreshTasks();
   panels.renderDiffPane();
+  workspace.refreshGitStatus();
 }
 
 function updateProjectButton() {
@@ -184,16 +197,17 @@ async function refreshAgents() {
   await renderModelSelect();
 
   // 监听 connections-updated 事件，实时刷新模型列表
-  window.addEventListener('connections-updated', async () => {
+  if (!modelListenersBound) window.addEventListener('connections-updated', async () => {
     state.connections = await api.connections();
     await renderModelSelect();
     if (pages.refreshIfOpen) pages.refreshIfOpen();
   });
-  window.addEventListener('models-updated', async (e) => {
+  if (!modelListenersBound) window.addEventListener('models-updated', async (e) => {
     state.connections = await api.connections();
     await renderModelSelect();
     if (pages.refreshIfOpen) pages.refreshIfOpen();
   });
+  modelListenersBound = true;
 }
 
 async function renderModelSelect() {
@@ -213,6 +227,7 @@ async function renderModelSelect() {
   if (a.model && !models.includes(a.model)) models = [a.model, ...models];
   if (!models.length) models = [a.model || '未设置模型'];
   sel.innerHTML = models.map(m => `<option value="${esc(m)}" ${m === a.model ? 'selected' : ''}>${esc(m)}</option>`).join('');
+  if ($('#topbar-model')) $('#topbar-model').textContent = a.model || '';
   // 更新 composer-hint 显示当前模型信息
   const hint = $('#composer-hint');
   if (hint) {
@@ -228,6 +243,7 @@ async function renderModelSelect() {
 
 function renderAgentsPanel() {
   const box = $('#agents-list');
+  if (!box) return;
   if (!state.agents.length) { box.innerHTML = `<div class="empty small">还没有智能体</div>`; return; }
   box.innerHTML = state.agents.slice(0, 10).map(a => {
     const typeLabel = a.type === 'external' ? '外部' : (a.type === 'computer' ? '电脑操作' : '编码');

@@ -120,6 +120,7 @@ async function openFixtureProject() {
 
 /** 通过 GUI 新建对话（设置 renderer state.conv），返回 conversationId */
 async function createConversationViaGui() {
+  await page.locator('.task-tab[data-task-tab="chat"]').click();
   await page.locator('#btn-newchat').click();
   await page.waitForTimeout(800);
   // 从 API 读取最新对话
@@ -230,7 +231,8 @@ test('28) 修复循环：第一次 patch 错→第二次 patch 对→completed +
   const maEvents = await getMainAgentEvents();
   const repairs = maEvents.filter(e => e.type === 'mainAgent:repairStart');
   expect(repairs.length, '应至少有一次 repairStart 事件').toBeGreaterThanOrEqual(1);
-  // 修复横幅应在 DOM 中可见
+  // Phase B：过程卡片统一进入 Run Progress，不污染最终聊天。
+  await page.locator('.task-tab[data-task-tab="progress"]').click();
   await expect(page.locator('.ma-repair-banner').first()).toBeVisible({ timeout: 5000 });
   // 文件最终被修复
   const after = fs.readFileSync(path.join(fixtureRoot, 'src', 'math.js'), 'utf8');

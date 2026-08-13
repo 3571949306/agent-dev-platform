@@ -3,9 +3,12 @@ import { api } from './api.js';
 import { state } from './state.js';
 import { $, $$, esc, h, renderDiff, fmtTime, truncate, toast, prettyJson } from './util.js';
 import { eventName, ZH } from './i18n.js';
+import { openFile, selectInspector, appendProgress } from './workspace.js';
 
 let activeConv = null;
 const problems = [];
+let diffRenderRevision = 0;
+let diffSelectionRevision = 0;
 
 // v2.6.0 — 运行时间线（紧凑视图，bottom tab + 右侧栏）
 const timeline = []; // [{ runId, entry: {kind, icon, text, detail, t} }]
@@ -106,23 +109,65 @@ export function addDiff(ev) {
 }
 
 export async function renderDiffPane() {
+  const renderRevision = ++diffRenderRevision;
+  diffSelectionRevision++;
   const pane = $('#bottom-diff');
-  let rows = state.diffs;
-  if (!rows.length && state.project) {
-    try {
-      const list = await api.fileChanges(state.project.id);
-      rows = list.map(r => ({ path: r.path, diff: r.diff, at: r.created_at }));
-    } catch {}
+  pane.innerHTML = '<div class="empty">Loading working tree changes…</div>';
+  let truth = { label: 'Working Tree Changes', files: [] };
+  if (state.project) {
+    try { truth = await api.gitChangedFiles(); } catch { /* non-git fallback below */ }
   }
-  if (!rows.length) { pane.innerHTML = `<div class="empty">暂无文件改动</div>`; return; }
-  pane.innerHTML = `<div class="diff-list">${rows.slice(0, 50).map((d, i) => `
-    <div class="diff-item">
-      <div class="di-head" data-i="${i}"><b>${esc(d.path)}</b><span class="muted">${esc(fmtTime(d.at))}</span><span class="di-toggle">▾</span></div>
-      <div class="di-body hidden">${renderDiff(d.diff)}</div>
-    </div>`).join('')}</div>`;
-  pane.querySelectorAll('.di-head').forEach(hd => {
-    hd.onclick = () => hd.parentElement.querySelector('.di-body').classList.toggle('hidden');
-  });
+  if (renderRevision !== diffRenderRevision) return;
+  if (!truth.files.length && state.diffs.length) {
+    truth.files = state.diffs.map(item => ({ path: item.path, status: 'M', added: 0, deleted: 0, diff: item.diff }));
+  }
+  if (!truth.files.length) { pane.innerHTML = '<div class="empty">暂无文件改动</div>'; return; }
+  const rows = truth.files.slice(0, 200);
+  pane.innerHTML = `<div class="diff-workbench"><aside class="changed-files"><div class="changed-title">${esc(truth.label || 'Working Tree Changes')}</div>${rows.map((file, index) => `<button class="changed-file ${index === 0 ? 'active' : ''}" data-diff-file="${esc(file.path)}"><span class="change-status status-${esc(file.status)}">${esc(file.status)}</span><span class="change-path" title="${esc(file.path)}">${esc(file.path)}</span><span class="change-stat"><i>+${Number(file.added || 0)}</i> <b>-${Number(file.deleted || 0)}</b></span></button>`).join('')}</aside><section class="diff-viewer"><div id="diff-viewer-body" class="empty">Select a changed file</div></section></div>`;
+  const open = async path => {
+    const selectionRevision = ++diffSelectionRevision;
+    pane.querySelectorAll('.changed-file').forEach(button => button.classList.toggle('active', button.dataset.diffFile === path));
+    const fallback = rows.find(file => file.path === path);
+    let data = fallback;
+    try { data = await api.gitDiff(path); } catch {}
+    if (selectionRevision !== diffSelectionRevision || renderRevision !== diffRenderRevision) return;
+    renderDiffFile(data || { path, diff: '' }, rows);
+    selectInspector('file', { path, size: 0, language: 'Diff', gitStatus: fallback && fallback.status });
+  };
+  pane.querySelectorAll('[data-diff-file]').forEach(button => button.onclick = () => open(button.dataset.diffFile));
+  await open(rows[0].path);
+}
+
+function renderDiffFile(file, rows) {
+  const body = $('#diff-viewer-body');
+  const index = rows.findIndex(row => row.path === file.path);
+  body.className = 'diff-viewer-body';
+  body.innerHTML = `<div class="diff-view-head"><strong class="mono">${esc(file.path)}</strong><span class="grow"></span><button class="btn tiny" data-prev-change>Previous Change</button><button class="btn tiny" data-next-change>Next Change</button><button class="btn tiny" data-open-source>Open File</button><button class="btn tiny" data-copy-path>Copy File Path</button><button class="btn tiny" data-copy-diff>Copy Diff</button></div>${renderUnifiedDiffBounded(file.diff, 5000)}`;
+  body.querySelector('[data-prev-change]').onclick = () => rows[(index - 1 + rows.length) % rows.length] && $(`[data-diff-file="${cssEscape(rows[(index - 1 + rows.length) % rows.length].path)}"]`)?.click();
+  body.querySelector('[data-next-change]').onclick = () => rows[(index + 1) % rows.length] && $(`[data-diff-file="${cssEscape(rows[(index + 1) % rows.length].path)}"]`)?.click();
+  body.querySelector('[data-open-source]').onclick = () => openFile(file.path);
+  body.querySelector('[data-copy-path]').onclick = () => navigator.clipboard.writeText(file.path).then(() => toast('Path copied', 'ok'));
+  body.querySelector('[data-copy-diff]').onclick = () => navigator.clipboard.writeText(file.diff || '').then(() => toast('Diff copied', 'ok'));
+}
+
+function cssEscape(value) { return String(value).replace(/(["\\])/g, '\\$1'); }
+
+function renderUnifiedDiffBounded(diffText, maxLines) {
+  const all = String(diffText || '').split(/\r?\n/);
+  const lines = all.slice(0, maxLines);
+  let oldLine = 0; let newLine = 0;
+  const html = lines.map(line => {
+    let cls = 'ctx'; let oldText = ''; let newText = '';
+    const hunk = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(line);
+    if (hunk) { oldLine = Number(hunk[1]); newLine = Number(hunk[2]); cls = 'hunk'; }
+    else if (line.startsWith('+++') || line.startsWith('---') || line.startsWith('diff ') || line.startsWith('index ')) cls = 'meta';
+    else if (line.startsWith('+')) { cls = 'add'; newText = String(newLine++); }
+    else if (line.startsWith('-')) { cls = 'del'; oldText = String(oldLine++); }
+    else { oldText = String(oldLine++ || ''); newText = String(newLine++ || ''); }
+    return `<div class="diff-line ${cls}"><span class="diff-ln">${oldText}</span><span class="diff-ln">${newText}</span><code>${esc(line) || '&nbsp;'}</code></div>`;
+  }).join('');
+  const note = all.length > maxLines ? `<div class="diff-truncated">Diff truncated in UI (${maxLines}/${all.length} lines)</div>` : '';
+  return `<div class="unified-diff">${html}</div>${note}`;
 }
 
 /* ---------------- Problems ---------------- */
@@ -212,6 +257,9 @@ export function addTimelineEntry(runId, entry) {
   renderTimeline();
   renderRightTimeline();
   flashTab('timeline');
+  const row = h('div', { class: `task-timeline-entry ${TL_KIND_CLASS[entry.kind] || 'tl-info'}`, dataset: { runId: runId || '' } });
+  row.innerHTML = `<span>${esc(entry.icon || '•')}</span><strong>${esc(TL_KIND_LABEL[entry.kind] || entry.kind || '信息')}</strong><span>${esc(truncate(entry.text || '', 160))}</span>`;
+  appendProgress(row);
 }
 
 export function clearTimeline() {

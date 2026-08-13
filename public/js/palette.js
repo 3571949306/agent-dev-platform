@@ -8,6 +8,7 @@ import { api } from './api.js';
 import * as panels from './panels.js';
 import * as pages from './pages.js';
 import * as files from './files.js';
+import { zoomIn, zoomOut, zoomReset } from './app.js';
 
 let inputEl = null;
 let listEl = null;
@@ -54,7 +55,11 @@ function buildCommands() {
     { id: 'panel.problems', label: '切换 问题面板', hint: 'Ctrl+Shift+R', run: () => toggleBottom('problems') },
     { id: 'view.sidebar', label: '切换 左侧边栏', hint: 'Ctrl+B', run: () => toggleSidebar() },
     { id: 'view.leftFiles', label: '左侧切换到 文件', hint: 'Ctrl+Shift+E', run: () => activateLeft('files') },
-    { id: 'view.leftChats', label: '左侧切换到 对话', run: () => activateLeft('chats') }
+    { id: 'view.leftChats', label: '左侧切换到 对话', run: () => activateLeft('chats') },
+    // B74 — 界面缩放（与快捷键同一实现，不引入第二套逻辑）
+    { id: 'view.zoomIn', label: '放大界面', hint: 'Ctrl+=', run: () => zoomIn() },
+    { id: 'view.zoomOut', label: '缩小界面', hint: 'Ctrl+-', run: () => zoomOut() },
+    { id: 'view.zoomReset', label: '重置缩放 (100%)', hint: 'Ctrl+0', run: () => zoomReset() }
   ];
 }
 

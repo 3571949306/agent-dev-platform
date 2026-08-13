@@ -14,12 +14,15 @@
  *   buildProvider,  // (agent) => provider
  *   agent,          // agent 对象（含 model / provider / api_connection_id）
  *   resolveModel,   // (agent) => { model, ... } 可选
- *   timeoutMs?
+ *   timeoutMs?,
+ *   onModelOutcome? // v2.9.9 Phase B Final（B16.3）— Wire Truth 回调：
+ *                   // ({ requested, actual, ok, latencyMs, error })，只报告真实上线模型
  * }
  */
 function createProviderModelAdapter(opts) {
-  const { buildProvider, agent, resolveModel, timeoutMs = 120000 } = opts;
+  const { buildProvider, agent, resolveModel, timeoutMs = 120000, onModelOutcome } = opts;
   if (typeof buildProvider !== 'function') throw new Error('buildProvider 必填');
+  const reportOutcome = typeof onModelOutcome === 'function' ? onModelOutcome : null;
 
   return {
     name: 'ProviderModelAdapter',
@@ -30,6 +33,7 @@ function createProviderModelAdapter(opts) {
 
       let text = '';
       const buf = [];
+      const t0 = Date.now();
       // v2.9.8 R5 — 内部 AbortController：合并 caller abort 与 adapter timeout，
       // 超时发生时能真正 abort 底层 provider request（只要 provider 遵守 signal），
       // 同时绝不去 mutate caller 的 AbortSignal。
@@ -59,7 +63,24 @@ function createProviderModelAdapter(opts) {
         // 永不 settle（挂死、忽略 abort），run 绝不能跟着挂死——用超时/abort 竞速强制结算。
         const result = await settleBounded(streamPromise, timeoutMs, internalController);
         text = buf.join('') || result.content || '';
+        // B16.3 — Wire Truth：provider 回报的真实上线模型（responseModel）与请求模型对照
+        if (reportOutcome) {
+          try {
+            reportOutcome({
+              requested: modelInfo.model || null,
+              actual: result.responseModel || modelInfo.model || null,
+              ok: true,
+              latencyMs: Date.now() - t0,
+              error: null
+            });
+          } catch { /* 观测回调绝不得影响主链路 */ }
+        }
       } catch (e) {
+        if (reportOutcome) {
+          try {
+            reportOutcome({ requested: modelInfo.model || null, actual: null, ok: false, latencyMs: Date.now() - t0, error: String(e && e.message || e) });
+          } catch { /* noop */ }
+        }
         if (abortSignal && abortSignal.aborted) throw e;
         throw e && e.timeout === true ? e : new Error('模型请求失败: ' + (e.message || e));
       } finally {

@@ -1,4 +1,96 @@
-# Test Report — Agent Dev Platform (v2.9.8)
+# Test Report — Agent Dev Platform (v2.9.9)
+
+## v2.9.9 — Phase B Final Productization & Systems Workbench (2026-08-13)
+
+Starting HEAD: `dab27613fd21955cd9e8997e47be3b9dd5b96097`（v2.9.8 包版本，architecture frozenAtVersion=2.9.7）。本轮完成 Phase B 剩余产品化（PART A 增量审计 + B15-B72），全部使用 fake network provider + real production runtime，paid provider calls = 0，无外部网络依赖。
+
+### PART A Current Increment Audit（重新机器验证，非重做）
+
+| 项 | 证据 | 状态 |
+| --- | --- | --- |
+| A1 Verification Truth | completed≠PASS；PASS/NOT_AVAILABLE/NOT_VERIFIED/failed-no-evidence 四态；Run Center 不从 terminal status 猜验证 | VERIFIED |
+| A2 Child Effective Project Identity | Project A/B 双树；A 视图只含 A+Child A，B/Child B 不混入 | VERIFIED |
+| A3 Event Deduplication | 同对象同 id→1 / 异对象同 eventId→1 / 同内容异 eventId→2；缓存 bounded(≤5000) | VERIFIED |
+| A4 Git Rename | 真实 `git mv`→status=R、oldPath/path 正确、Diff UI 正确 | VERIFIED |
+| A5 Permission Queue | A 显示、B/C 排队；处理 A 不丢 B/C；过期请求不可批准 | VERIFIED |
+| A6 Workflow Cancel Race | 确定性复现 cancel+completion microtask 竞态→只记 CANCELLED（新增回归用例） | VERIFIED |
+| A7 Generator Boundary | READY≠SAVED≠EXECUTED | VERIFIED |
+| A8 Inline Child Library Boundary | Temporary Reviewer 不入 Agent Library，持久化数量不变（新增断言） | VERIFIED |
+
+### Phase B Final（B15-B72）交付与验证
+
+| 块 | 关键机器证明 | 状态 |
+| --- | --- | --- |
+| B15 Connection Manager 3.0 | CONNECTION_SECRET_LEAK=0 / CUSTOM_HEADER_SECRET_LEAK=0 / FALLBACK_MODEL_SOURCE_TRUTH / 状态真话词汇（AVAILABLE/UNAVAILABLE/DEGRADED/UNKNOWN/ERROR）/ 默认连接=路由偏好不旁路 | VERIFIED |
+| B16 Model Router Inspector | MODEL_ROUTE_VISIBLE / SELECTED_WIRE_EQUAL=YES / EXPLICIT_MISSING_NO_FALLBACK / CAPABILITY_EVIDENCE_TRUTH / mismatch→Problem | VERIFIED |
+| B17 Skills/Hooks Workbench | SKILL_PERMISSION_GRANT_UI=0 / HOOK_RAW_SCRIPT_UI=0 / HOOK_TRUSTED_HANDLER_ONLY / 内置受信 handlers | VERIFIED |
+| B18 Computer Workspace 2.0 | COMPUTER_AVAILABILITY_TRUTH / COMPUTER_STOP 真实终止 / NORMAL_CODING_COMPUTER_EXEC=0 | VERIFIED |
+| B19 Terminal Workspace 2.0 | TERMINAL_ACTIVE/HISTORY/OWNER_TRUTH / CANCEL_RESIDUE=0 / cancelled≠timeout / 危险命令必确认 | VERIFIED |
+| B20 Diagnostics Health Center | 18 子系统区段 / DIAGNOSTICS_FALSE_READY=0 / 自检 0 付费 / Runtime Residue | VERIFIED |
+| B21 Problems Center | 去重 / dismiss≠resolved / renderer 错误进 Problems | VERIFIED |
+| B22 Recovery UX | 无 Resume/Continue；Start New Task 新 runId；0 replay | VERIFIED |
+| B23 Page State Contract | 全页 LOADING/EMPTY/READY/ERROR（data-page-state 机器可验） | VERIFIED |
+| B27/B28 Composer 3.0 | 草稿持久化跨重启 / chips / Idle=Send、Running=Stop / 无假附件无假 follow-up | VERIFIED |
+| B29/B30 Onboarding + Boot | 五步智能检测可跳过 / Splash 阶段真话 / BOOT_FAILED 重试不白屏 | VERIFIED |
+| B34/B35 Responsive + Perf | 四分辨率矩阵全 PASS / boot 255ms / 有界渲染 / 性能基线实测 | VERIFIED |
+| B36-B38 Subscription/ErrBoundary/IPC | 导航 Soak listener 稳定 / window.error→Problems / GUI_IPC_CONTRACT 生成 + 静态边界 | VERIFIED |
+| B42-B48 Confirm/Toast/Status/Badges/Persist | 统一确认（目标/后果/可逆）/ 失败必有持久态 / 全局状态优先级 / 徽标 / 持久化白名单 | VERIFIED |
+| B49-B53 GUI Test/Soak | E2E 152（≥150）/ GUI Production / Console Gate / 导航 Soak / 事件 Soak | VERIFIED |
+| B54-B60 产品场景 A-F + Recovery | 真实编码闭环 / 权限拒绝 0 变更 / Cancel≠Timeout / Workflow / Generator 边界 / 外部状态 / Recovery 0 replay | VERIFIED |
+| B61-B62 文档 | GUI_ARCHITECTURE / GUI_IPC_CONTRACT / GUI_TEST_MATRIX / GUI_PERFORMANCE_BASELINE / TEST_REPORT / CHANGELOG / ROADMAP | VERIFIED |
+| B64-B72 无假功能/安全门禁 | contextIsolation=true、nodeIntegration=false / XSS=0 / Secret Leak=0 / 架构 DEFAULT_DENY / 0 付费 / 0 网络依赖 | VERIFIED |
+| B73 极简自明图标 | Activity Bar 全 SVG 线性自明图标，无 emoji（E2E 断言） | VERIFIED |
+| B74 界面缩放 | Ctrl+= / Ctrl+- / Ctrl+0 / Ctrl+滚轮，持久化跨重启（E2E 断言） | VERIFIED |
+
+### 发布门禁（严格串行，全部 PASS）
+
+```text
+npm test（全量单测）:            1715 tests / 1714 pass / 0 fail / 1 skip
+  重复 3/3 PASS（reliability-repeat unit 3）
+test:dynamic-agent(:production)     PASS
+test:model-router(:production)      PASS
+test:skill(:production)             PASS
+test:hook(:production)              PASS
+test:workflow(:production)          PASS
+test:generator(:production)         PASS
+test:architecture(:policy)          PASS（DEFAULT_DENY / 0 unsafe / ALL BLOCKED）
+test:product(:production)           PASS
+test:reliability(:production)(:soak) PASS（production 10/10、soak 20/20）
+test:gui(:production)               PASS（GUI Production 重复 10/10）
+npm run e2e                          152 passed（≥150）
+Provider Abort Critical              20/20 PASS
+Navigation Soak                      100/100 cycles PASS
+```
+
+### 关键机器证明汇总
+
+```text
+CONNECTION_SECRET_LEAK=0            CUSTOM_HEADER_SECRET_LEAK=0
+MODEL_ROUTE_VISIBLE=PASS            MODEL_SELECTED_WIRE_EQUAL=YES
+EXPLICIT_MODEL_NO_FALLBACK=PASS     CAPABILITY_EVIDENCE_TRUTH=PASS
+SKILL_PERMISSION_GRANT_UI=0         HOOK_RAW_SCRIPT_UI=0
+NORMAL_CODING_COMPUTER_EXEC=0       NORMAL_CODING_BROWSER_EXEC=0
+TERMINAL_CANCEL_RESIDUE=0           DIAGNOSTICS_FALSE_READY=0
+RECOVERY_PROVIDER_REPLAY=0          RECOVERY_TOOL_REPLAY=0
+RECOVERY_MUTATION_REPLAY=0          UNEXPECTED_RENDERER_ERRORS=0
+GUI_XSS_EXECUTIONS=0                GUI_SECRET_LEAKS=0
+NAVIGATION_LISTENER_DUPLICATES=0    GUI_ORPHAN_CHANNELS=0
+paidProviderCalls=0                 无外部网络依赖
+```
+
+### 本轮暴露并修复的真实缺陷
+
+1. **自定义 Header 明文跨 IPC**：旧版 `connections.list/get` 直接返回 `headers_json` 明文 → Header 值写入即 DPAPI 加密，Renderer 只见掩码 `••••••••`。
+2. **Workflow cancel 竞态残留**：cancel 挂起窗口内步骤完成可能误记 COMPLETED → 尾部完成守卫检查 `control.cancelled`（新增确定性回归）。
+3. **诊断自检写临时文件**：触发架构门禁 DEFAULT_DENY → 改用 cmd 内建 echo，无 fs.write。
+4. **i18n 回退词汇**：preset/cached 改为真话词汇（回退/未知），同步更新断言。
+
+架构冻结保持：`test:architecture`/`test:architecture-policy` PASS；frozenAtVersion=2.9.7 不变，currentPackageVersion→2.9.9。未新增任何第二套 runtime/router/engine/authority；仅新增 problems/connectionStatus 服务与受信 handlers。
+
+Next: P3 Computer Use Production Hardening。
+
+---
+
 
 ## v2.9.8 — Real Project Reliability Final Completion (2026-08-12)
 

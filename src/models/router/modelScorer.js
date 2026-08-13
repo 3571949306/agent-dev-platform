@@ -6,7 +6,7 @@ const { priceBasisKey } = require('./pricing');
 function round(value) { return Math.round(value * 1000) / 1000; }
 
 function scoreOne(requirements, candidate, costContext = null) {
-  const breakdown = { capabilityEvidence: 0, latency: 0, cost: 0, locality: 0, providerPreference: 0, modelPreference: 0 };
+  const breakdown = { capabilityEvidence: 0, latency: 0, cost: 0, locality: 0, providerPreference: 0, connectionPreference: 0, modelPreference: 0 };
   for (const cap of Object.values(candidate.capabilities)) {
     if (cap && cap.value === true) breakdown.capabilityEvidence += EVIDENCE_WEIGHT[cap.state] || 0;
   }
@@ -39,6 +39,9 @@ function scoreOne(requirements, candidate, costContext = null) {
   if (requirements.preferences.preferLocal) breakdown.locality = candidate.locality === 'local' ? 15 : (candidate.locality === 'unknown' ? -2 : 0);
   const providerIndex = requirements.preferences.preferredProviders.indexOf(candidate.provider);
   if (providerIndex >= 0) breakdown.providerPreference = Math.max(1, 12 - providerIndex);
+  // v2.9.9 Phase B Final（B15.9）— 默认连接偏好：只影响打分排序，硬过滤照旧
+  const connectionIndex = (requirements.preferences.preferredConnectionIds || []).indexOf(candidate.connectionId);
+  if (connectionIndex >= 0) breakdown.connectionPreference = Math.max(1, 14 - connectionIndex);
   const modelIndex = requirements.preferences.preferredModels.indexOf(candidate.modelId);
   if (modelIndex >= 0) breakdown.modelPreference = Math.max(1, 16 - modelIndex);
   for (const key of Object.keys(breakdown)) breakdown[key] = round(breakdown[key]);

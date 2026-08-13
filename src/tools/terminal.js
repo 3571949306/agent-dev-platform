@@ -44,15 +44,26 @@ function killTree(pid) {
 }
 
 class TerminalManager {
-  constructor() { this.runs = new Map(); }
+  constructor() {
+    this.runs = new Map();
+    // B19.2 — 终端执行历史（有界）：只保留最近 N 条已终态记录，
+    // 完整 stdout/stderr 随记录可 backend 查询/审计。
+    this._history = [];
+  }
   cancel(runId) {
     const r = this.runs.get(runId);
     if (!r) return false;
     try { if (r.child && !r.child.killed) { killTree(r.child.pid); r.child.killed = true; } } catch {}
     r.status = 'killed';
+    r.cancelled = true;
     return true;
   }
-  status(runId) { const r = this.runs.get(runId); return r ? { id: r.id, status: r.status, exitCode: r.exitCode } : null; }
+  status(runId) {
+    const r = this.runs.get(runId);
+    if (r) return { id: r.id, status: r.status, exitCode: r.exitCode, owner: r.owner || null };
+    const h = this._history.find(rec => rec.id === runId);
+    return h ? { id: h.id, status: h.status, exitCode: h.exitCode, owner: h.owner || null } : null;
+  }
   /**
    * v2.9.8 R6 — Owned Child Process Truth：仍存活的受管子进程计数。
    * 只有 status='running' 的记录持有活 child；exited/killed/aborted/timeout
@@ -62,6 +73,46 @@ class TerminalManager {
     let n = 0;
     for (const r of this.runs.values()) if (r.status === 'running') n++;
     return n;
+  }
+  /** B19.1 — 活动命令：Command / CWD / Owner / Run / Started / Duration / Status。 */
+  active() {
+    const list = [];
+    for (const r of this.runs.values()) {
+      if (r.status !== 'running') continue;
+      list.push({
+        id: r.id, command: r.command, cwd: r.cwd, owner: r.owner || 'UNKNOWN',
+        agentRunId: r.agentRunId || null, startedAt: r.startTime,
+        durationMs: Date.now() - r.startTime, status: r.status
+      });
+    }
+    return list.sort((a, b) => b.startedAt - a.startedAt);
+  }
+  /** B19.3 — 完整输出（backend 查询/审计用；Renderer 自行 bounded 展示）。 */
+  output(runId) {
+    const rec = this.runs.get(runId) || this._history.find(h => h.id === runId);
+    if (!rec) return null;
+    return {
+      id: rec.id, command: rec.command, cwd: rec.cwd, owner: rec.owner || null,
+      status: rec.status, exitCode: rec.exitCode, durationMs: rec.durationMs ?? null,
+      timeout: !!rec.timedOut, cancelled: !!rec.cancelled,
+      stdout: rec.stdout || '', stderr: rec.stderr || ''
+    };
+  }
+  history(limit = 50) { return this._history.slice(0, limit); }
+  /** 记录终态 → 有界历史（保留完整输出供审计）。 */
+  _finalize(runId) {
+    const rec = this.runs.get(runId);
+    if (!rec || rec._finalized) return;
+    rec._finalized = true;
+    rec.durationMs = Date.now() - rec.startTime;
+    this._history.unshift({
+      id: rec.id, command: rec.command, cwd: rec.cwd, owner: rec.owner || 'UNKNOWN',
+      agentRunId: rec.agentRunId || null, status: rec.status, exitCode: rec.exitCode,
+      startedAt: rec.startTime, durationMs: rec.durationMs,
+      timeout: !!rec.timedOut, cancelled: !!rec.cancelled,
+      stdout: rec.stdout || '', stderr: rec.stderr || ''
+    });
+    if (this._history.length > 50) this._history.length = 50;
   }
   /** v2.9.8 R6 — 清理已终态的审计记录（仅删非 running 条目，不碰活进程）。 */
   pruneTerminal() {
@@ -73,7 +124,11 @@ class TerminalManager {
 
 const terminalManager = new TerminalManager();
 
-async function runCommand(ctx, command, cwd, timeoutMs, usePowershell, runId, abortSignal) {
+/**
+ * B19 — meta：{ owner: USER|MAIN_AGENT|CHILD_AGENT|WORKFLOW, agentRunId, workflowRunId }。
+ * Owner 是真话：谁发起的命令就记谁，绝不混淆。
+ */
+async function runCommand(ctx, command, cwd, timeoutMs, usePowershell, runId, abortSignal, meta = {}) {
   return new Promise((resolve) => {
     let stdout = '', stderr = '';
     const shellBin = usePowershell ? 'powershell.exe' : 'cmd.exe';
@@ -102,11 +157,18 @@ async function runCommand(ctx, command, cwd, timeoutMs, usePowershell, runId, ab
       });
     } catch (e) { return resolve(fail('SPAWN_FAILED', e.message)); }
 
-    terminalManager.runs.set(runId, { id: runId, child, status: 'running', startTime: Date.now(), exitCode: null });
+    terminalManager.runs.set(runId, {
+      id: runId, child, status: 'running', startTime: Date.now(), exitCode: null,
+      command, cwd, owner: meta.owner || 'UNKNOWN', agentRunId: meta.agentRunId || null,
+      workflowRunId: meta.workflowRunId || null,
+      stdout: '', stderr: '', cancelled: false, timedOut: false
+    });
 
     const onData = (type) => (chunk) => {
       const s = chunk.toString();
       if (type === 'out') stdout += s; else stderr += s;
+      const rec = terminalManager.runs.get(runId);
+      if (rec) { if (type === 'out') rec.stdout += s; else rec.stderr += s; }
       if (ctx.emit) ctx.emit('terminal_output', { runId, stream: type, chunk: s });
     };
     child.stdout.on('data', onData('out'));
@@ -116,14 +178,17 @@ async function runCommand(ctx, command, cwd, timeoutMs, usePowershell, runId, ab
     if (timeoutMs && timeoutMs > 0) {
       timer = setTimeout(() => {
         if (child && !child.killed) { killTree(child.pid); child.killed = true; }
-        terminalManager.runs.get(runId).status = 'timeout';
+        const rec = terminalManager.runs.get(runId);
+        if (rec) { rec.status = 'timeout'; rec.timedOut = true; }
+        terminalManager._finalize(runId);
         resolve(fail('TERMINAL_TIMEOUT', `命令超时（${timeoutMs}ms）`, false));
       }, timeoutMs);
     }
     const onAbort = () => {
       if (child && !child.killed) { killTree(child.pid); child.killed = true; }
       const rec = terminalManager.runs.get(runId);
-      if (rec) rec.status = 'aborted';
+      if (rec) { rec.status = 'aborted'; rec.cancelled = true; }
+      terminalManager._finalize(runId);
       resolve(fail('TERMINAL_ABORTED', '命令已被中止', false));
     };
     // 防御：abortSignal 必须是真正的 AbortSignal（含 addEventListener）才挂监听。
@@ -138,12 +203,14 @@ async function runCommand(ctx, command, cwd, timeoutMs, usePowershell, runId, ab
       abortSignal.addEventListener('abort', onAbort, { once: true });
     }
 
-    child.on('error', (err) => { if (timer) clearTimeout(timer); resolve(fail('SPAWN_FAILED', err.message)); });
+    child.on('error', (err) => { if (timer) clearTimeout(timer); terminalManager._finalize(runId); resolve(fail('SPAWN_FAILED', err.message)); });
     child.on('close', (code) => {
       if (timer) clearTimeout(timer);
       if (abortSignal && typeof abortSignal.removeEventListener === 'function') abortSignal.removeEventListener('abort', onAbort);
       const rec = terminalManager.runs.get(runId);
-      if (rec) { rec.status = 'exited'; rec.exitCode = code; }
+      if (rec && rec.status === 'running') { rec.status = 'exited'; rec.exitCode = code; }
+      else if (rec) { rec.exitCode = code; }
+      terminalManager._finalize(runId);
       if (ctx.emit) ctx.emit('terminal_exit', { runId, exitCode: code });
       resolve(ok({ exit_code: code, stdout, stderr, cwd }));
     });
@@ -169,7 +236,10 @@ const tools = [
         const cwd = guard(ctx.projectRoot, args.cwd || '.');
         const runId = 'run_' + Math.random().toString(36).slice(2, 10);
         if (ctx.emit) ctx.emit('terminal_start', { runId, command: args.command, cwd });
-        const res = await runCommand(ctx, args.command, cwd, args.timeout_ms || 120000, args.shell === 'powershell', runId, ctx.abortSignal);
+        // B19.1 — Owner 真话：Workflow 步骤 / Child Agent / Main Agent
+        const owner = ctx.workflowRunId ? 'WORKFLOW' : (ctx.parentRunId ? 'CHILD_AGENT' : 'MAIN_AGENT');
+        const res = await runCommand(ctx, args.command, cwd, args.timeout_ms || 120000, args.shell === 'powershell', runId, ctx.abortSignal,
+          { owner, agentRunId: ctx.runId || null, workflowRunId: ctx.workflowRunId || null });
         return res;
       } catch (e) { return e instanceof PathGuardError ? fail(e.code, e.message) : fail('TERMINAL_FAILED', e.message); }
     }

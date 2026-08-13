@@ -128,34 +128,46 @@ async function renderDiagnostics(body) {
     api.connections(),
     api.diagProduct({ probeExternal: true, probeComputer: true })
   ]);
-  const subsystem = (label, value) => `<tr><td>${esc(label)}</td><td><span class="chip">${esc(value == null ? 'UNKNOWN' : value)}</span></td></tr>`;
+  // B20 — Health Center：每个子系统 Status / Reason / Last Checked / Action；未知就是 UNKNOWN
+  const healthRow = (label, status, reason, lastChecked, action) => {
+    const cls = ['OK', 'READY', 'AVAILABLE', 'FREE', 'OPEN', 'ACTIVE'].includes(status) ? 'ok'
+      : (['UNKNOWN', 'NONE', 'UNSUPPORTED'].includes(status) ? '' : 'bad');
+    return `<tr><td><b>${esc(label)}</b></td><td><span class="chip ${cls}">${esc(status == null ? 'UNKNOWN' : status)}</span></td><td class="small muted">${esc(reason || '—')}</td><td class="small muted">${lastChecked ? esc(fmtTime(lastChecked)) : '—'}</td><td class="small">${action || ''}</td></tr>`;
+  };
+  const residue = product.runtimeResidue || {};
+  const residueItem = (label, value) => `<span class="chip small" title="${esc(label)}">${esc(label)}：${value === null || value === undefined ? 'UNKNOWN' : esc(String(value))}</span> `;
   const productPanel = `<section class="panel">
-    <h3>Product Diagnostics · ${esc(product.version)}</h3>
-    <table class="tbl"><tbody>
-      ${subsystem('Database', product.database && product.database.status)}
-      ${subsystem('Model Connections', `${product.modelConnections.available} available / ${product.modelConnections.unavailable} unavailable / ${product.modelConnections.unknown} unknown`)}
-      ${subsystem('Model Router', product.modelRouter.status)}
-      ${subsystem('主智能体', product.mainAgent.status)}
-      ${subsystem('动态智能体', product.dynamicAgent.status)}
-      ${subsystem('Skills', `${product.skills.count} / ${product.skills.invalid == null ? 'UNKNOWN' : product.skills.invalid} invalid`)}
-      ${subsystem('Hooks', `${product.hooks.count} / ${product.hooks.invalid == null ? 'UNKNOWN' : product.hooks.invalid} invalid`)}
-      ${subsystem('Workflows', `${product.workflows.count} / ${product.workflows.invalid == null ? 'UNKNOWN' : product.workflows.invalid} invalid`)}
-      ${subsystem('Generator', product.generator.status)}
-      ${subsystem('Computer Use', product.computerUse.status)}
-      ${subsystem('Browser', product.browser.status)}
-      ${subsystem('MCP', `${product.mcp.connected} connected`)}
-      ${subsystem('Project Lock', product.projectLock.status)}
+    <h3>Product Health Center · ${esc(product.version)} <button class="btn tiny" id="diag-selftest" title="safe / bounded / 0 paid calls">运行产品自检</button></h3>
+    <div id="diag-selftest-out"></div>
+    <table class="tbl"><thead><tr><th>子系统</th><th>状态</th><th>原因</th><th>最近检查</th><th>建议动作</th></tr></thead><tbody>
+      ${healthRow('Application', product.application && product.application.status, product.application && product.application.reason, product.application && product.application.lastCheckedAt)}
+      ${healthRow('Database', product.database && product.database.status, product.database && product.database.error, product.database && product.database.lastCheckedAt, product.database && product.database.status === 'ERROR' ? '重启应用' : '')}
+      ${healthRow('Project', product.project && product.project.status, product.project && (product.project.name || product.project.reason), product.project && product.project.lastCheckedAt, product.project && product.project.status === 'NONE' ? '<a href="#" data-goto="connections">打开项目</a>' : '')}
+      ${healthRow('主智能体', product.mainAgent && product.mainAgent.status, product.mainAgent && product.mainAgent.reason, product.mainAgent && product.mainAgent.lastCheckedAt, product.mainAgent && product.mainAgent.status === 'ERROR' ? '<a href="#" data-goto="agents">创建主智能体</a>' : '')}
+      ${healthRow('Model Router', product.modelRouter && product.modelRouter.status, product.modelRouter && product.modelRouter.reason, product.modelRouter && product.modelRouter.lastCheckedAt, product.modelRouter && product.modelRouter.status === 'DEGRADED' ? '<a href="#" data-goto="connections">配置可用连接</a>' : '')}
+      ${healthRow('Connections', product.modelConnections ? `${product.modelConnections.available}可用/${product.modelConnections.unavailable}不可用/${product.modelConnections.unknown}未知` : 'UNKNOWN', '状态只来自真实测试结果', product.modelConnections && product.modelConnections.lastCheckedAt, '<a href="#" data-goto="connections">管理连接</a>')}
+      ${healthRow('Skills', product.skills && (product.skills.status || 'READY'), product.skills ? `${product.skills.count} 个，${product.skills.invalid == null ? 'UNKNOWN' : product.skills.invalid} 个无效` : '', product.skills && product.skills.lastCheckedAt, '<a href="#" data-goto="skills">管理 Skills</a>')}
+      ${healthRow('Hooks', product.hooks && (product.hooks.status || 'READY'), product.hooks ? `${product.hooks.count} 个，${product.hooks.invalid == null ? 'UNKNOWN' : product.hooks.invalid} 个无效` : '', product.hooks && product.hooks.lastCheckedAt, '<a href="#" data-goto="skills">管理 Hooks</a>')}
+      ${healthRow('Workflow', product.workflowRuntime && product.workflowRuntime.status, product.workflowRuntime && (product.workflowRuntime.error || `活跃 ${product.workflowRuntime.activeRuns} / 待审批 ${product.workflowRuntime.waitingApproval}`), product.workflowRuntime && product.workflowRuntime.lastCheckedAt, '<a href="#" data-goto="workflows">查看 Workflows</a>')}
+      ${healthRow('Generator', product.generator && product.generator.status, product.generator ? `活动 ${product.generator.active || 0}` : '', product.generator && product.generator.lastCheckedAt, '<a href="#" data-goto="generator">打开 Generator</a>')}
+      ${healthRow('AgentHub', product.agentHub && product.agentHub.status, product.agentHub ? `注册适配器 ${product.agentHub.registeredAdapters}` : '', product.agentHub && product.agentHub.lastCheckedAt, '<a href="#" data-goto="agents">查看智能体</a>')}
+      ${healthRow('外部智能体', product.externalAgents && product.externalAgents.length ? product.externalAgents.map(e2 => `${e2.id}:${e2.status}`).join(' · ') : 'UNKNOWN', product.externalAgents && product.externalAgents.length ? '' : '未注册外部智能体', null, '<a href="#" data-goto="agents">管理外部智能体</a>')}
+      ${healthRow('Computer', product.computerUse && product.computerUse.status, product.computerUse && (product.computerUse.error || (product.computerUse.windowCount != null ? `窗口 ${product.computerUse.windowCount}` : '')), product.computerUse && product.computerUse.lastCheckedAt)}
+      ${healthRow('Browser', product.browser && product.browser.status, product.browser ? `installed=${product.browser.installed} launched=${product.browser.launched}` : '', product.browser && product.browser.lastCheckedAt)}
+      ${healthRow('MCP', product.mcp && product.mcp.status, product.mcp ? `已连接 ${product.mcp.connected}` : '', product.mcp && product.mcp.lastCheckedAt, '<a href="#" data-goto="mcp">管理 MCP</a>')}
+      ${healthRow('Terminal', product.terminal && product.terminal.status, product.terminal && product.terminal.activeProcesses != null ? `活动进程 ${product.terminal.activeProcesses}` : '', product.terminal && product.terminal.lastCheckedAt)}
+      ${healthRow('Project Locks', product.projectLock && product.projectLock.status, product.projectLock ? `锁计数 ${product.projectLock.count}` : '', product.projectLock && product.projectLock.lastCheckedAt)}
+      ${healthRow('Processes', product.processes && product.processes.status, product.processes ? `main pid ${product.processes.mainPid} · terminal ${product.processes.terminalChildren} · computer ${product.processes.computerChildren}` : '', product.processes && product.processes.lastCheckedAt)}
     </tbody></table>
-    <h3 style="margin-top:12px">外部智能体</h3>
-    <table class="tbl"><tbody>${product.externalAgents.map(item => subsystem(`${item.name} (${item.transport})`, item.status)).join('')}</tbody></table>
+    <h3 style="margin-top:12px">Runtime Residue（真实残留，非估计）</h3>
+    <div>${residueItem('Active Runs', residue.activeRuns)}${residueItem('Stale Runs', (residue.staleRuns || []).length)}${residueItem('Dynamic Instances', residue.dynamicInstances)}${residueItem('AgentHub Adapters', residue.agentHubAdapters)}${residueItem('Project Locks', residue.projectLocks)}${residueItem('Terminal Processes', residue.terminalProcesses)}${residueItem('Pending Permissions', residue.pendingPermissions)}${residueItem('Workflow Approval', residue.pendingWorkflowApproval)}${residueItem('Generator Active', residue.generatorActive)}</div>
   </section>`;
   if (!connections.length) {
-    body.innerHTML = productPanel + `<div class="empty">还没有 API 连接。<a href="#" id="diag-goto-api">先到 API 页创建一个连接</a>。</div>`;
+    body.innerHTML = productPanel + `<div class="empty" data-page-state="empty">还没有 API 连接。<a href="#" id="diag-goto-api">先到 API 页创建一个连接</a>。</div>`;
     const g = $('#diag-goto-api', body);
     if (g) g.onclick = e => { e.preventDefault(); open('connections'); };
-    return;
-  }
-  body.innerHTML = productPanel + `
+  } else {
+    body.innerHTML = productPanel + `
     <div class="page-actions">
       <select id="diag-conn">${connections.map(c => `<option value="${c.id}">${esc(c.name)}（${esc(c.provider)}）</option>`).join('')}</select>
       <select id="diag-model"></select>
@@ -181,18 +193,35 @@ async function renderDiagnostics(body) {
       </section>
     </div>`;
 
-  const connSel = $('#diag-conn', body), modelSel = $('#diag-model', body);
-  function fillModels() {
-    const c = connections.find(x => x.id === connSel.value);
-    const models = (c && c.models && c.models.length) ? c.models : (c && c.default_model ? [c.default_model] : []);
-    modelSel.innerHTML = models.map(m => `<option value="${esc(m)}">${esc(m)}</option>`).join('') || '<option value="">（该连接无模型，先去 API 页拉取）</option>';
-  }
-  fillModels();
-  connSel.onchange = fillModels;
+    const connSel = $('#diag-conn', body), modelSel = $('#diag-model', body);
+    function fillModels() {
+      const c = connections.find(x => x.id === connSel.value);
+      const models = (c && c.models && c.models.length) ? c.models.map(m => (typeof m === 'string' ? m : m.id)) : (c && c.default_model ? [c.default_model] : []);
+      modelSel.innerHTML = models.map(m => `<option value="${esc(m)}">${esc(m)}</option>`).join('') || '<option value="">（该连接无模型，先去 API 页拉取）</option>';
+    }
+    fillModels();
+    connSel.onchange = fillModels;
 
-  diagBody = body;
-  await loadDiagExtras(body, connSel.value);
-  $('#diag-run', body).onclick = () => runDiag(body);
+    diagBody = body;
+    await loadDiagExtras(body, connSel.value);
+    $('#diag-run', body).onclick = () => runDiag(body);
+  }
+  // 页面内跳转链接（建议动作）
+  body.querySelectorAll('[data-goto]').forEach(a => a.onclick = e => { e.preventDefault(); open(a.dataset.goto); });
+  // B20.2 — Quick Self Test：safe / bounded / 0 paid calls
+  const selfBtn = $('#diag-selftest', body);
+  if (selfBtn) selfBtn.onclick = async () => {
+    const out = $('#diag-selftest-out', body);
+    selfBtn.disabled = true; out.innerHTML = '<div class="muted small">自检中…（不发起付费调用）</div>';
+    try {
+      const r = await api.diagSelfTest();
+      out.innerHTML = `<div class="${r.ok ? 'muted' : 'error-box'} small">自检${r.ok ? '通过' : '发现 ' + r.failed + ' 个问题'} · ${r.durationMs}ms · paid calls: ${r.paidProviderCalls}</div>
+        <table class="tbl"><thead><tr><th>检查项</th><th>结果</th><th>详情</th></tr></thead><tbody>
+        ${r.results.map(x => `<tr><td>${esc(x.name)}</td><td>${x.ok ? '<span class="chip ok small">PASS</span>' : '<span class="chip bad small">FAIL</span>'}</td><td class="small muted">${esc(x.detail)}</td></tr>`).join('')}
+        </tbody></table>`;
+    } catch (e) { out.innerHTML = `<div class="error-box small">${esc(e.message)}</div>`; }
+    finally { selfBtn.disabled = false; }
+  };
 }
 
 async function runDiag(body) {
@@ -267,7 +296,8 @@ export async function open(page) {
   $$('.topnav button').forEach(b => b.classList.toggle('active', b.dataset.page === page));
   const title = { dashboard: '总览', connections: 'API 连接', agents: '智能体', mcp: 'MCP 服务器', skills: 'Skills', workflows: 'Workflows', generator: 'AI Generator', diagnostics: '能力诊断', settings: '设置' }[page] || page;
   $('#page-title').textContent = title;
-  body.innerHTML = '<div class="muted">加载中…</div>';
+  // B23 — LOADING 态：统一标记，机器可验
+  body.innerHTML = '<div class="muted" data-page-state="loading">加载中…</div>';
   try {
     if (page === 'dashboard') await renderDashboard(body);
     else if (page === 'connections') await renderConnections(body);
@@ -278,7 +308,18 @@ export async function open(page) {
     else if (page === 'generator') await renderGenerator(body);
     else if (page === 'diagnostics') await renderDiagnostics(body);
     else if (page === 'settings') await renderSettings(body);
-  } catch (e) { body.innerHTML = `<div class="err">${esc(e.message)}</div>`; }
+    // B48 — last activity 持久化（绝不持久化任何密钥类数据）
+    api.settingsSet('ui.lastPage', page).catch(() => {});
+  } catch (e) {
+    // B23 — ERROR 态：error code + 简短解释 + 安全时重试，绝不一闪而过
+    const code = (e && e.code) || 'PAGE_ERROR';
+    body.innerHTML = `<div class="page-error" data-page-state="error">
+      <div class="err"><b>${esc(code)}</b>：${esc(e.message || '页面加载失败')}</div>
+      <div class="muted small">页面数据来自 backend IPC；错误不影响其它页面。</div>
+      <button class="btn" id="page-retry">重试</button>
+    </div>`;
+    $('#page-retry').onclick = () => open(page);
+  }
 }
 
 export function refreshIfOpen() { if (current) open(current); }
@@ -321,50 +362,122 @@ async function renderDashboard(body) {
 /* ------------------------------------------------------------------ */
 /* API connections                                                     */
 /* ------------------------------------------------------------------ */
+/* ------------------------------------------------------------------ */
+/* v2.9.9 Phase B Final（B15）— Connection Manager 3.0                 */
+/* B15.1 状态词汇只来自真实测试真话；B15.3/B15.4 密钥/请求头值永远掩码；*/
+/* B15.9 默认连接/模型只是偏好，绝不旁路 Model Router。                */
+/* ------------------------------------------------------------------ */
+
+const CONN_HEADER_MASK = '••••••••';
+
+function connStatusChip(c) {
+  const st = (c.status && c.status.status) || 'UNKNOWN';
+  const label = ZH.connStatus[st] || st;
+  const cls = st === 'AVAILABLE' ? 'ok' : (st === 'DEGRADED' ? 'warn' : (st === 'UNKNOWN' ? '' : 'bad'));
+  const detail = [];
+  if (c.status && typeof c.status.latencyMs === 'number') detail.push(`延迟 ${c.status.latencyMs}ms`);
+  if (c.status && c.status.reason && (st === 'UNAVAILABLE' || st === 'ERROR')) detail.push(c.status.reason);
+  return `<span class="chip ${cls}" title="${esc(detail.join(' · '))}">${esc(label)}</span>`;
+}
+
+function connLatencyCell(c) {
+  const ms = c.status && typeof c.status.latencyMs === 'number' ? c.status.latencyMs : null;
+  return ms === null ? '<span class="muted small">—</span>' : `<span class="mono small">${ms}ms</span>`;
+}
+
+function connDefaultPicker(conn) {
+  // B15.9 — 设默认只写偏好（settings 真源）；实际运行仍由 Model Router 裁决
+  const models = (conn.models || []).map(m => (typeof m === 'string' ? m : (m && m.id) || '')).filter(Boolean);
+  const favs = (conn.models || []).filter(m => m && m.favorite).map(m => m.id);
+  const ordered = [...new Set([...favs, ...models])];
+  openModal(`设置默认连接 — ${conn.name}`, `
+    <div class="muted small">默认连接/模型只是路由偏好：Main Run 仍会经过 Model Router 的硬约束与打分，绝不旁路。</div>
+    <label>默认模型（可选）
+      <select id="def-model">
+        <option value="">不指定（由 Router 自动选择）</option>
+        ${ordered.map(m => `<option value="${esc(m)}">${esc(m)}</option>`).join('')}
+      </select>
+    </label>
+  `, { okText: '设为默认' });
+  onModalOk(async () => {
+    try {
+      await api.connSetDefault(conn.id, $('#def-model').value || null);
+      closeModal(); toast('已设为默认连接（路由偏好）', 'ok'); open('connections');
+    } catch (e) { toast(e.message, 'error'); }
+  });
+}
+
 async function renderConnections(body) {
   const list = await api.connections();
   state.connections = list;
   body.innerHTML = `
     <div class="page-actions"><button class="btn primary" id="conn-smart">⚡ 快速接入</button><button class="btn" id="conn-external">📥 从其他工具导入</button><button class="btn" id="conn-add">+ 手动新建</button>
-      <span class="muted">API Key 使用 Windows DPAPI（safeStorage）加密后存入本地数据库，界面只显示掩码。</span></div>
-    ${list.length ? `<table class="tbl"><thead><tr><th>名称</th><th>协议</th><th>Base URL</th><th>Key</th><th>状态</th><th>模型</th><th>来源</th><th></th></tr></thead><tbody>
+      <span class="muted">API Key 与自定义请求头均加密存储（Windows DPAPI），保存后界面只显示掩码。</span></div>
+    ${list.length ? `<table class="tbl"><thead><tr><th>名称</th><th>协议</th><th>Base URL</th><th>认证</th><th>状态</th><th>延迟</th><th>模型</th><th>最近测试</th><th>来源</th><th></th></tr></thead><tbody>
       ${list.map(c => `<tr>
-        <td><b>${esc(c.name)}</b></td>
+        <td><b>${esc(c.name)}</b>${c.is_default ? ' <span class="chip ok small" title="默认连接只是路由偏好，不旁路 Model Router">默认</span>' : ''}</td>
         <td>${esc((PROVIDERS.find(p => p[0] === c.provider) || [c.provider, c.provider])[1])}</td>
         <td class="mono small">${esc(c.base_url)}</td>
-        <td class="mono small">${esc(c.api_key_masked || '未设置')}</td>
-        <td>${c.tested ? '<span class="chip ok">已连通</span>' : (c.last_error ? `<span class="chip bad" title="${esc(c.last_error)}">失败</span>` : '<span class="chip">未测试</span>')}</td>
+        <td><span class="chip small">${esc(ZH.connAuthMode[c.authMode] || c.authMode || '未知')}</span></td>
+        <td>${connStatusChip(c)}</td>
+        <td>${connLatencyCell(c)}</td>
         <td>${(c.models || []).length}</td>
+        <td class="small muted">${c.status && c.status.lastTestedAt ? esc(fmtTime(c.status.lastTestedAt)) : '从未测试'}</td>
         <td>${c.import_source ? `<span class="chip small">${esc(c.import_source)}</span>` : '<span class="muted small">手动</span>'}</td>
         <td class="right">
-          <button class="btn tiny" data-models="${c.id}">拉取模型</button>
+          <button class="btn tiny" data-test="${c.id}">测试连接</button>
+          <button class="btn tiny" data-models="${c.id}">获取模型</button>
           <button class="btn tiny" data-view="${c.id}">查看模型</button>
-          <button class="btn tiny" data-test="${c.id}">测试</button>
           <button class="btn tiny" data-edit="${c.id}">编辑</button>
+          ${c.is_default
+            ? `<button class="btn tiny" data-undef="${c.id}">取消默认</button>`
+            : `<button class="btn tiny" data-def="${c.id}">设为默认</button>`}
           <button class="btn tiny danger" data-del="${c.id}">删除</button>
         </td></tr>`).join('')}
-    </tbody></table>` : '<div class="empty">还没有 API 连接，点击「快速接入」或「从其他工具导入」开始。</div>'}`;
+    </tbody></table>` : '<div class="empty" data-page-state="empty">尚未配置模型连接。<br><br><button class="btn primary" id="conn-add-empty">添加连接</button></div>'}`;
 
   $('#conn-smart').onclick = () => smartOnboard();
   $('#conn-external').onclick = () => externalImport();
   $('#conn-add').onclick = () => connForm(null);
+  const emptyBtn = $('#conn-add-empty'); if (emptyBtn) emptyBtn.onclick = () => connForm(null);
   body.querySelectorAll('[data-edit]').forEach(b => b.onclick = () => connForm(list.find(c => c.id === b.dataset.edit)));
+  body.querySelectorAll('[data-def]').forEach(b => b.onclick = () => connDefaultPicker(list.find(c => c.id === b.dataset.def)));
+  body.querySelectorAll('[data-undef]').forEach(b => b.onclick = async () => {
+    try { await api.connSetDefault(null, null); toast('已取消默认连接', 'ok'); open('connections'); }
+    catch (e) { toast(e.message, 'error'); }
+  });
   body.querySelectorAll('[data-del]').forEach(b => b.onclick = async () => {
-    if (!await confirmBox('删除连接', '删除后使用该连接的智能体将无法运行，确定？')) return;
+    if (!await confirmBox('删除连接', {
+      target: `连接「${(list.find(c => c.id === b.dataset.del) || {}).name || b.dataset.del}」`,
+      consequence: '使用该连接的智能体将无法运行；连接配置与其模型列表将被删除。',
+      reversibility: '不可逆：密钥密文一并删除，需重新创建并重新测试。'
+    })) return;
     await api.connRemove(b.dataset.del); toast('已删除'); open('connections');
   });
   body.querySelectorAll('[data-test]').forEach(b => b.onclick = async () => {
-    b.textContent = '测试中…'; b.disabled = true;
-    try { const r = await api.connTest(b.dataset.test); toast(r.ok ? `连通，延迟 ${r.latency}ms` : '失败：' + r.message, r.ok ? 'ok' : 'error'); }
-    catch (e) { toast(e.message, 'error'); }
+    // B15.5 — 真实调用 provider test contract；结果刷新后由状态词汇如实呈现
+    b.textContent = ZH.connStatus.testing + '…'; b.disabled = true;
+    try {
+      const r = await api.connTest(b.dataset.test);
+      if (r.ok) toast(`可用，延迟 ${r.latency}ms`, 'ok');
+      else {
+        toast('不可用：' + r.message, 'error');
+        // B43 — 连接失败绝不只 toast：同步进 Problems 持久真源
+        panels.addProblem(`连接测试失败：${r.message}`, { code: 'CONNECTION_TEST_FAILED', relatedKey: b.dataset.test });
+      }
+    } catch (e) {
+      toast(e.message, 'error');
+      panels.addProblem(`连接测试异常：${e.message}`, { code: 'CONNECTION_TEST_ERROR', relatedKey: b.dataset.test });
+    }
     open('connections');
   });
   body.querySelectorAll('[data-models]').forEach(b => b.onclick = async () => {
-    b.textContent = '拉取中…'; b.disabled = true;
+    b.textContent = '获取中…'; b.disabled = true;
     try {
       const r = await api.connModels(b.dataset.models);
-      toast(`已成功获取 ${r.models.length} 个模型`, 'ok');
-      // 触发全局刷新
+      // B15.6 — 来源真话：回退模型不得被描述成刚从 API 获取；其余保持既有成功文案
+      if (r.source === 'preset') toast(`已成功获取 ${r.models.length} 个模型（回退：内置推荐，非 API 实时获取）`, 'warn');
+      else toast(`已成功获取 ${r.models.length} 个模型`, 'ok');
       window.dispatchEvent(new CustomEvent('models-updated', { detail: { connectionId: b.dataset.models } }));
     } catch (e) { toast(e.message, 'error'); }
     open('connections');
@@ -399,7 +512,7 @@ function modelManager(conn) {
     else if (filter !== 'all') filtered = filtered.filter(m => (m.source || 'cached') === filter);
 
     if (!filtered.length) {
-      box.innerHTML = `<div class="empty">没有匹配的模型</div>`;
+      box.innerHTML = `<div class="empty" data-page-state="empty">没有匹配的模型</div>`;
       return;
     }
 
@@ -434,12 +547,16 @@ function modelManager(conn) {
   }
 
   const presetNote = models.some(m => m.source === 'preset')
-    ? `<div class="warn-box">以下包含内置推荐模型（可能不是当前账号全部可用模型）。</div>` : '';
+    ? `<div class="warn-box">回退模型来自内置推荐列表，不是刚从 API 获取；可能不是你账号的全部可用模型。</div>` : '';
+
+  // B15.6 — 数据来源真话：REMOTE / MANUAL / FALLBACK / UNKNOWN 分别计数，绝不混淆
+  const srcCount = (s) => models.filter(m => (m.source || 'cached') === s).length;
+  const srcSummary = `API 获取 ${srcCount('remote')} · 手动 ${srcCount('manual')} · 回退 ${srcCount('preset')} · 未知 ${srcCount('cached')}`;
 
   openModal(`模型管理 — ${conn.name}`, `
     <div class="mm-info">
-      <span>已获取模型：<b>${models.length}</b> 个</span>
-      <span class="muted">每模型独立来源：API 获取 / 手动添加 / 内置推荐 / 本地缓存</span>
+      <span>模型总数：<b>${models.length}</b> 个</span>
+      <span class="muted">${esc(srcSummary)}</span>
     </div>
     ${presetNote}
     <div class="mm-toolbar">
@@ -499,27 +616,55 @@ function modelManager(conn) {
   renderModelList();
 }
 
+/* B15.2 — Add Connection Wizard：Provider / Base URL / API Key / No-auth / Custom Headers / Protocol。
+ * B15.3/B15.4 — API Key 与 Header 值保存后绝不再回显明文；编辑时只给掩码占位，
+ * 保留掩码 = 沿用已存密文，重新输入 = 替换，清空 = 删除。 */
+function connHeaderRow(name = '', value = '') {
+  return `<div class="hdr-row">
+    <input class="hdr-name" placeholder="Header 名称（如 X-Api-Token）" value="${esc(name)}" autocomplete="off">
+    <input class="hdr-value" placeholder="${name ? CONN_HEADER_MASK + '（保留掩码=不修改，清空=删除）' : 'Header 值'}" value="${esc(value)}" autocomplete="off">
+    <button class="btn tiny hdr-del" title="删除此请求头">×</button>
+  </div>`;
+}
+
 function connForm(conn) {
-  const c = conn || { name: '', provider: 'openai', base_url: 'https://api.openai.com/v1', headers: {} };
+  const c = conn || { name: '', provider: 'openai', base_url: 'https://api.openai.com/v1', headers: {}, api_key_masked: '' };
+  const existingHeaders = Object.entries(c.headers || {}); // 值已是掩码（后端投影，绝不含明文）
   openModal(conn ? '编辑连接' : '新建连接', `
     <label>名称<input id="f-name" value="${esc(c.name)}"></label>
     <label>协议
       <select id="f-provider">${PROVIDERS.map(p => `<option value="${p[0]}" ${p[0] === c.provider ? 'selected' : ''}>${esc(p[1])}</option>`).join('')}</select>
     </label>
     <label>Base URL<input id="f-url" value="${esc(c.base_url)}" placeholder="https://api.openai.com/v1"></label>
-    <label>API Key<input id="f-key" type="password" placeholder="${conn && conn.api_key_masked ? esc(conn.api_key_masked) + '（留空表示不修改）' : 'sk-...'}"></label>
-    <label>额外请求头（JSON，可留空）<textarea id="f-headers" rows="3">${esc(Object.keys(c.headers || {}).length ? JSON.stringify(c.headers, null, 2) : '')}</textarea></label>
+    <label>API Key（可留空 = ${conn ? '不修改' : '无认证'}）<input id="f-key" type="password" placeholder="${conn && c.api_key_masked ? esc(c.api_key_masked) + '（留空表示不修改）' : 'sk-…（本地服务可留空）'}"></label>
+    <div class="f-block">
+      <div class="muted small">自定义请求头（可选，值加密存储，保存后只显示掩码）</div>
+      <div id="f-headers-rows">${existingHeaders.length
+        ? existingHeaders.map(([k, v]) => connHeaderRow(k, v)).join('')
+        : ''}</div>
+      <button class="btn tiny" id="f-headers-add">+ 添加请求头</button>
+    </div>
   `, { okText: '保存' });
+  const bindRowDelete = () => $$('#f-headers-rows .hdr-del').forEach(b => b.onclick = () => b.closest('.hdr-row').remove());
+  bindRowDelete();
+  $('#f-headers-add').onclick = () => {
+    $('#f-headers-rows').insertAdjacentHTML('beforeend', connHeaderRow());
+    bindRowDelete();
+  };
   onModalOk(async () => {
-    let headers = {};
-    const raw = $('#f-headers').value.trim();
-    if (raw) { try { headers = JSON.parse(raw); } catch { toast('请求头不是合法 JSON', 'error'); return; } }
+    const headers = {};
+    for (const row of $$('#f-headers-rows .hdr-row')) {
+      const name = row.querySelector('.hdr-name').value.trim();
+      const value = row.querySelector('.hdr-value').value;
+      if (!name) { if (value.trim()) { toast('请求头缺少名称', 'error'); return; } continue; }
+      headers[name] = value; // 掩码占位 = 保留；空 = 删除；其余 = 新值
+    }
     const payload = { name: $('#f-name').value.trim() || '新连接', provider: $('#f-provider').value, base_url: $('#f-url').value.trim(), headers };
     const key = $('#f-key').value;
     if (key) payload.api_key = key;
     try {
       if (conn) await api.connUpdate(conn.id, payload); else await api.connCreate(payload);
-      closeModal(); toast('已保存', 'ok'); open('connections');
+      closeModal(); toast('已保存（密钥与请求头值仅显示掩码）', 'ok'); open('connections');
     } catch (e) { toast(e.message, 'error'); }
   });
 }
@@ -1310,7 +1455,7 @@ async function renderAgents(body) {
         </div>
         <div class="muted small">主智能体不作为普通 Dynamic Definition 编辑。</div>
         <div class="acard-f"><button class="btn tiny" data-ae="${a.id}">编辑</button></div>
-      </div>`).join('') || '<div class="empty">没有主智能体</div>'}</div>
+      </div>`).join('') || '<div class="empty" data-page-state="empty">没有主智能体</div>'}</div>
     <h3>本地智能体</h3>
     <div class="cards">${others.map(a => `
       <div class="acard">
@@ -1323,7 +1468,7 @@ async function renderAgents(body) {
           <span>子智能体：${(a.sub_agent_ids || []).length}</span>
         </div>
         <div class="acard-f"><button class="btn tiny" data-ae="${a.id}">编辑</button><button class="btn tiny danger" data-ad="${a.id}">删除</button></div>
-      </div>`).join('') || '<div class="empty">还没有智能体</div>'}</div>
+      </div>`).join('') || '<div class="empty" data-page-state="empty">还没有智能体</div>'}</div>
     <h3>Dynamic Agent Definitions</h3>
     <div class="muted small">持久化定义库。内联临时子智能体（ephemeral children）只在 Run Detail 可见，不会写入此库。</div>
     <div class="cards">${dynDefs.map(d => {
@@ -1342,7 +1487,7 @@ async function renderAgents(body) {
         </div>
         <div class="muted small">Used By：UNKNOWN（无可靠引用索引，不猜测）</div>
         <div class="acard-f"><button class="btn tiny" data-dyn-edit="${esc(d.id)}">编辑</button>${builtin ? '' : `<button class="btn tiny danger" data-dyn-del="${esc(d.id)}">删除</button>`}</div>
-      </div>`; }).join('') || '<div class="empty">还没有 Dynamic Agent 定义</div>'}</div>
+      </div>`; }).join('') || '<div class="empty" data-page-state="empty">还没有 Dynamic Agent 定义</div>'}</div>
     <h3>外部智能体</h3>
     <div class="cards">${ext.map(a => `
       <div class="acard">
@@ -1351,14 +1496,18 @@ async function renderAgents(body) {
         <div class="acard-meta"><span class="mono small">${esc(a.command || a.endpoint || (a.config && a.config.cliPath) || '')}</span></div>
         ${a.last_status ? `<div class="acard-meta"><span class="chip ${extStatusClass(a.last_status)}">${esc(extStatusText(a.last_status))}</span>${a.last_run_at ? `<span class="muted small">${esc(fmtTime(a.last_run_at))}</span>` : ''}</div>` : ''}
         <div class="acard-f"><button class="btn tiny" data-ee="${a.id}">编辑</button><button class="btn tiny danger" data-ed="${a.id}">删除</button></div>
-      </div>`).join('') || '<div class="empty">没有外部智能体</div>'}</div>`;
+      </div>`).join('') || '<div class="empty" data-page-state="empty">没有外部智能体</div>'}</div>`;
 
   $('#agent-add').onclick = () => agentForm(null, { conns, prompts, tools, agents: native, extAgents: ext });
   $('#dyn-add').onclick = () => dynAgentForm(null);
   $('#ext-add').onclick = () => extForm(null, conns);
   body.querySelectorAll('[data-ae]').forEach(b => b.onclick = () => agentForm(native.find(a => a.id === b.dataset.ae), { conns, prompts, tools, agents: native, extAgents: ext }));
   body.querySelectorAll('[data-ad]').forEach(b => b.onclick = async () => {
-    if (!await confirmBox('删除智能体', '确定删除该智能体？')) return;
+    if (!await confirmBox('删除智能体', {
+      target: '该智能体配置',
+      consequence: '依赖它的对话/委派将失去执行者。',
+      reversibility: '不可逆：需重新创建。'
+    })) return;
     await api.agentRemove(b.dataset.ad); toast('已删除'); open('agents');
   });
   body.querySelectorAll('[data-dyn-edit]').forEach(b => b.onclick = () => dynAgentForm(dynDefs.find(d => d.id === b.dataset.dynEdit)));
@@ -1368,13 +1517,21 @@ async function renderAgents(body) {
     if (def && (def.source === 'builtin' || (def.metadata && def.metadata.source === 'builtin'))) {
       return toast('Built-in 定义不可删除', 'warn');
     }
-    if (!await confirmBox('删除 Dynamic Agent 定义', `确定删除「${b.dataset.dynDel}」？`)) return;
+    if (!await confirmBox('删除 Dynamic Agent 定义', {
+      target: `定义「${b.dataset.dynDel}」`,
+      consequence: '引用该定义的委派将 fail closed。',
+      reversibility: '不可逆：需重新创建。'
+    })) return;
     try { await api.dynDefDelete(b.dataset.dynDel); toast('已删除'); open('agents'); }
     catch (error) { toast(error.message, 'error'); panels.addProblem(`Agent 定义删除失败：${error.message}`); }
   });
   body.querySelectorAll('[data-ee]').forEach(b => b.onclick = () => extForm(ext.find(a => a.id === b.dataset.ee), conns));
   body.querySelectorAll('[data-ed]').forEach(b => b.onclick = async () => {
-    if (!await confirmBox('删除外部智能体', '确定删除？')) return;
+    if (!await confirmBox('删除外部智能体', {
+      target: '该外部智能体注册项',
+      consequence: '其适配器与会话记录不再可用。',
+      reversibility: '不可逆：需重新注册。'
+    })) return;
     await api.extRemove(b.dataset.ed); toast('已删除'); open('agents');
   });
 
@@ -1535,7 +1692,7 @@ async function loadHubCards(body) {
   // v2.7.1 — 渲染所有已注册 Agent（来自 manifests），而不仅是当前可用的。
   // 不可用的 Agent 显示 "不可用" 健康状态，但仍展示卡片（spec §37 要求）。
   if (!Array.isArray(manifests) || !manifests.length) {
-    cardsEl.innerHTML = '<div class="empty">注册表中没有已注册 Agent</div>';
+    cardsEl.innerHTML = '<div class="empty" data-page-state="empty">注册表中没有已注册 Agent</div>';
     return;
   }
   const availById = new Map((available || []).map(a => [a.id, a]));
@@ -1978,7 +2135,7 @@ async function renderMcp(body) {
           <button class="btn tiny danger" data-rm="${s.id}">删除</button>
         </div>
         ${(s.tools || []).length ? `<div class="taglist">${s.tools.map(t => `<span class="tag" title="${esc(t.description || '')}">${esc(t.name)}</span>`).join('')}</div>` : '<div class="muted small">未获取到工具（先点击连接）</div>'}
-      </section>`).join('') : '<div class="empty">还没有 MCP 服务器</div>'}`;
+      </section>`).join('') : '<div class="empty" data-page-state="empty">还没有 MCP 服务器</div>'}`;
 
   $('#mcp-add').onclick = () => mcpForm();
   body.querySelectorAll('[data-c]').forEach(b => b.onclick = async () => {
@@ -2560,89 +2717,228 @@ async function renderWorkflowRunDetail(body, workflowRunId) {
 /* ------------------------------------------------------------------ */
 /* Skills (v2.9.3 Skill Engine — R2/R3/R6)                             */
 /* ------------------------------------------------------------------ */
+/* ------------------------------------------------------------------ */
+/* v2.9.9 Phase B Final（B17）— Skills + Hooks Workbench                */
+/* 权威边界：Skill 可以要求 authority，但绝不得授予 authority；         */
+/* Hook 只能选择受信 handler，绝无脚本/HTTP 输入；GUI 不提供任何        */
+/* “Grant Permission”类选项。                                            */
+/* ------------------------------------------------------------------ */
+
+const HOOK_EVENTS = ['run_start', 'before_model', 'after_model', 'before_tool', 'after_tool', 'before_delegate', 'after_delegate', 'run_end'];
+const HOOK_KINDS = ['observer', 'guard', 'context'];
+
 async function renderSkills(body) {
-  const list = await api.skillList();
+  const [list, hooks, usage] = await Promise.all([
+    api.skillList(),
+    api.hookList().catch(() => []),
+    api.artifactUsage().catch(() => ({ skills: {}, hooks: {} }))
+  ]);
   body.innerHTML = `
-    <div class="page-actions"><button class="btn primary" id="skill-add">+ 新建 Skill</button>
-      <span class="muted">Skill 是可复用的能力包：只能要求工具/权限/模型能力，不能授予任何能力。启用/禁用与内容查看均实时生效。</span></div>
-    ${list.length ? `<table class="tbl"><thead><tr><th>ID</th><th>名称</th><th>描述</th><th>要求</th><th>状态</th><th></th></tr></thead><tbody>
+    <div class="page-actions">
+      <button class="btn primary" id="skill-add">+ 新建 Skill</button>
+      <button class="btn" id="hook-add">+ 新建 Hook</button>
+      <span class="muted">Skill 只能要求工具/权限/模型能力，绝不能授予能力；Hook 只能选择受信 handler。</span>
+    </div>
+    <h3>Skills</h3>
+    ${list.length ? `<table class="tbl"><thead><tr><th>名称</th><th>启用</th><th>描述</th><th>工具要求</th><th>模型要求</th><th>兼容性</th><th>Used By</th><th></th></tr></thead><tbody>
       ${list.map(s => `<tr>
-        <td class="mono small">${esc(s.id)}</td>
-        <td><b>${esc(s.name)}</b>${s.source === 'builtin' ? ' <span class="chip small">内置</span>' : ''}</td>
-        <td class="small">${esc(truncate(s.description || '', 80))}</td>
-        <td class="small">${[...(s.toolRequirements.required || []), ...(s.permissionRequirements.required || []).map(p => 'perm:' + p)].map(t => `<span class="tag">${esc(t)}</span>`).join('') || '<span class="muted">无硬要求</span>'}</td>
+        <td><b>${esc(s.name)}</b>${s.source === 'builtin' ? ' <span class="chip small">内置</span>' : ''}<div class="mono muted small">${esc(s.id)}</div></td>
         <td>${s.enabled ? '<span class="chip ok">启用</span>' : '<span class="chip">禁用</span>'}</td>
+        <td class="small">${esc(truncate(s.description || '', 80))}</td>
+        <td class="small">${[...(s.toolRequirements.required || []), ...(s.toolRequirements.denied || []).map(t => '禁 ' + t)].map(t => `<span class="tag">${esc(t)}</span>`).join('') || '<span class="muted">无</span>'}</td>
+        <td class="small">${s.modelRequirements && s.modelRequirements.required && s.modelRequirements.required.vision ? '<span class="tag">vision</span>' : ''}${s.modelRequirements && s.modelRequirements.required && s.modelRequirements.required.nativeTools ? '<span class="tag">tools</span>' : ''}${!(s.modelRequirements && s.modelRequirements.required && (s.modelRequirements.required.vision || s.modelRequirements.required.nativeTools)) ? '<span class="muted">无</span>' : ''}</td>
+        <td class="small muted">${esc(((s.compatibility && s.compatibility.agentTypes) || []).join('/') || 'native')}</td>
+        <td class="small">${((usage.skills || {})[s.id] || []).map(u => `<span class="chip small">${esc(u)}</span>`).join('') || '<span class="muted">未引用</span>'}</td>
         <td class="right">
           <button class="btn tiny" data-view="${esc(s.id)}">查看</button>
+          ${s.source === 'builtin' ? '' : `<button class="btn tiny" data-edit-skill="${esc(s.id)}">编辑</button>`}
           ${s.enabled ? `<button class="btn tiny" data-disable="${esc(s.id)}">禁用</button>` : `<button class="btn tiny" data-enable="${esc(s.id)}">启用</button>`}
           ${s.source === 'builtin' ? '' : `<button class="btn tiny danger" data-del="${esc(s.id)}">删除</button>`}
         </td></tr>`).join('')}
-    </tbody></table>` : '<div class="empty">还没有 Skill，点击「+ 新建 Skill」创建。</div>'}`;
+    </tbody></table>` : '<div class="empty" data-page-state="empty">还没有 Skill，点击「+ 新建 Skill」创建。</div>'}
+    <h3 style="margin-top:18px">Hooks</h3>
+    ${hooks.length ? `<table class="tbl"><thead><tr><th>名称</th><th>Event</th><th>Kind</th><th>Handler</th><th>启用</th><th>Filters</th><th>Used By</th><th></th></tr></thead><tbody>
+      ${hooks.map(hk => `<tr>
+        <td><b>${esc(hk.name)}</b><div class="mono muted small">${esc(hk.id)}</div></td>
+        <td class="mono small">${esc(hk.event)}</td>
+        <td><span class="chip small ${hk.kind === 'guard' ? 'warn' : ''}">${esc(hk.kind)}</span></td>
+        <td class="mono small">${esc(hk.handlerId)}</td>
+        <td>${hk.enabled ? '<span class="chip ok">启用</span>' : '<span class="chip">禁用</span>'}</td>
+        <td class="small muted">${esc(truncate(JSON.stringify(hk.filters || {}), 60))}</td>
+        <td class="small">${((usage.hooks || {})[hk.id] || []).map(u => `<span class="chip small">${esc(u)}</span>`).join('') || '<span class="muted">未引用</span>'}</td>
+        <td class="right">
+          <button class="btn tiny" data-hook-view="${esc(hk.id)}">查看</button>
+          ${hk.enabled ? `<button class="btn tiny" data-hook-disable="${esc(hk.id)}">禁用</button>` : `<button class="btn tiny" data-hook-enable="${esc(hk.id)}">启用</button>`}
+          <button class="btn tiny danger" data-hook-del="${esc(hk.id)}">删除</button>
+        </td></tr>`).join('')}
+    </tbody></table>` : '<div class="empty" data-page-state="empty">还没有 Hook。Hook 只能绑定受信 handler，不接受任何脚本输入。</div>'}`;
 
-  $('#skill-add').onclick = () => skillForm();
+  $('#skill-add').onclick = () => skillForm(null);
+  $('#hook-add').onclick = () => hookForm();
   body.querySelectorAll('[data-view]').forEach(b => b.onclick = () => skillView(b.dataset.view));
+  body.querySelectorAll('[data-edit-skill]').forEach(b => b.onclick = async () => skillForm(await api.skillGet(b.dataset.editSkill)));
   body.querySelectorAll('[data-enable]').forEach(b => b.onclick = async () => { await api.skillEnable(b.dataset.enable); open('skills'); });
   body.querySelectorAll('[data-disable]').forEach(b => b.onclick = async () => { await api.skillDisable(b.dataset.disable); open('skills'); });
   body.querySelectorAll('[data-del]').forEach(b => b.onclick = async () => {
-    if (!await confirmBox('删除 Skill', `确定删除 Skill「${b.dataset.del}」？已引用的 Agent 将解析失败（fail closed）。`)) return;
+    if (!await confirmBox('删除 Skill', {
+      target: `Skill「${b.dataset.del}」`,
+      consequence: '已引用它的 Agent/Workflow 将解析失败（fail closed）。',
+      reversibility: '不可逆：需重新创建。'
+    })) return;
     try { await api.skillDelete(b.dataset.del); toast('已删除', 'ok'); open('skills'); } catch (e) { toast(e.message, 'error'); }
+  });
+  body.querySelectorAll('[data-hook-view]').forEach(b => b.onclick = async () => hookView(await api.hookGet(b.dataset.hookView)));
+  body.querySelectorAll('[data-hook-enable]').forEach(b => b.onclick = async () => { try { await api.hookEnable(b.dataset.hookEnable); open('skills'); } catch (e) { toast(e.message, 'error'); } });
+  body.querySelectorAll('[data-hook-disable]').forEach(b => b.onclick = async () => { try { await api.hookDisable(b.dataset.hookDisable); open('skills'); } catch (e) { toast(e.message, 'error'); } });
+  body.querySelectorAll('[data-hook-del]').forEach(b => b.onclick = async () => {
+    if (!await confirmBox('删除 Hook', {
+      target: `Hook「${b.dataset.hookDel}」`,
+      consequence: '引用它的 Agent/Workflow 会 fail closed。',
+      reversibility: '不可逆：需重新创建。'
+    })) return;
+    try { await api.hookDelete(b.dataset.hookDel); toast('已删除', 'ok'); open('skills'); } catch (e) { toast(e.message, 'error'); }
   });
 }
 
+/* B17.2 — Skill Detail Tabs：Overview / Instructions / Requirements / Compatibility / References */
 async function skillView(id) {
   const s = await api.skillGet(id);
   if (!s) { toast('Skill 不存在', 'error'); return; }
   const req = s.toolRequirements || {};
   const perm = s.permissionRequirements || {};
   const model = s.modelRequirements || {};
+  const compat = s.compatibility || {};
   const vision = model.required && model.required.vision;
+  const tabs = ['Overview', 'Instructions', 'Requirements', 'Compatibility', 'References'];
+  const sections = {
+    overview: `<div class="muted small">${esc(s.description || '')}</div>
+      <table class="tbl kv"><tbody>
+        <tr><td>ID</td><td class="mono">${esc(s.id)}</td></tr>
+        <tr><td>启用</td><td>${s.enabled ? '是' : '否'}</td></tr>
+        <tr><td>来源</td><td>${esc(s.source || 'custom')}</td></tr>
+        <tr><td>依赖 Skill</td><td>${(s.requiresSkills || []).map(esc).join(', ') || '无'}</td></tr>
+      </tbody></table>
+      <div class="warn-box">Skill 可以要求 authority，但绝不得授予 authority。此处没有任何“授予权限”选项。</div>`,
+    instructions: `<pre class="skill-pre">${esc(s.instructions || '（无 instructions）')}</pre>`,
+    requirements: `<h4>工具要求</h4>
+      <div class="taglist">
+        ${(req.required || []).map(t => `<span class="tag">需 ${esc(t)}</span>`).join('')}
+        ${(req.optional || []).map(t => `<span class="tag muted">可选 ${esc(t)}</span>`).join('')}
+        ${(req.denied || []).map(t => `<span class="tag bad">禁 ${esc(t)}</span>`).join('')}
+      </div>
+      <h4>权限要求（仅要求，运行时仍由 PermissionEngine 裁决）</h4>
+      <div class="taglist">${(perm.required || []).map(p => `<span class="tag">需 ${esc(p)}</span>`).join('') || '<span class="muted small">无</span>'}</div>
+      <h4>模型要求</h4>
+      <div class="muted small">${esc(JSON.stringify(model) || '无')}</div>
+      ${vision ? '<div class="muted small">⚠ 要求 vision 模型：路由时强制淘汰纯文本模型（R6）。</div>' : ''}`,
+    compatibility: `<table class="tbl kv"><tbody>
+        <tr><td>Agent 类型</td><td>${esc(((compat.agentTypes) || []).join(', ') || 'native')}</td></tr>
+        <tr><td>平台</td><td>${esc(((compat.platforms) || []).join(', ') || 'windows')}</td></tr>
+        <tr><td>项目信号</td><td>${esc(((compat.projectSignals) || []).join(', ') || '无')}</td></tr>
+      </tbody></table>`,
+    references: `<div class="muted small">依赖 Skill：${(s.requiresSkills || []).map(esc).join(', ') || '无'}</div>
+      <pre class="small">${esc(truncate(JSON.stringify(s, null, 2), 3000))}</pre>`
+  };
   openModal(`Skill: ${esc(s.id)}` + (s.enabled ? '' : '（已禁用）'), `
-    <div class="muted small">${esc(s.description || '')}</div>
-    <h4>Instructions</h4>
-    <pre class="skill-pre">${esc(s.instructions || '')}</pre>
-    <h4>工具要求</h4>
-    <div class="taglist">
-      ${(req.required || []).map(t => `<span class="tag">需 ${esc(t)}</span>`).join('')}
-      ${(req.optional || []).map(t => `<span class="tag muted">可选 ${esc(t)}</span>`).join('')}
-      ${(req.denied || []).map(t => `<span class="tag bad">禁 ${esc(t)}</span>`).join('')}
-    </div>
-    <h4>权限要求</h4>
-    <div class="taglist">${(perm.required || []).map(p => `<span class="tag">需 ${esc(p)}</span>`).join('') || '<span class="muted small">无</span>'}</div>
-    <h4>模型要求</h4>
-    <div class="muted small">${JSON.stringify(model) || '无'}</div>
-    ${vision ? '<div class="muted small">⚠ 要求 vision 模型：路由时强制淘汰纯文本模型（R6）。</div>' : ''}
-    <div class="muted small">依赖：${(s.requiresSkills || []).map(esc).join(', ') || '无'}</div>
-  `);
+    <div class="run-detail-tabs">${tabs.map((t, i) => `<button class="run-detail-tab ${i === 0 ? 'active' : ''}" data-skill-tab="${t.toLowerCase()}">${t}</button>`).join('')}</div>
+    <div id="skill-tab-body">${sections.overview}</div>
+  `, { noFooter: true });
+  document.querySelectorAll('[data-skill-tab]').forEach(b => b.onclick = () => {
+    document.querySelectorAll('[data-skill-tab]').forEach(x => x.classList.toggle('active', x === b));
+    $('#skill-tab-body').innerHTML = sections[b.dataset.skillTab];
+  });
 }
 
-function skillForm() {
-  openModal('新建 Skill', `
-    <label>ID<input id="s-id" placeholder="my-skill"></label>
-    <label>名称<input id="s-name" placeholder="My Skill"></label>
-    <label>描述<input id="s-desc" placeholder="简短描述"></label>
-    <label>Instructions<textarea id="s-ins" rows="6" placeholder="专家指导文本，将注入 Agent 的 system prompt（位于 Safety Contract 之下）"></textarea></label>
-    <label>必需工具（逗号分隔）<input id="s-req" placeholder="read_file, search"></label>
-    <label>禁用工具（逗号分隔）<input id="s-den" placeholder="write_file, apply_patch"></label>
-    <label>必需权限（逗号分隔）<input id="s-perm" placeholder="filesystem.read"></label>
-  `, { okText: '创建' });
+/* B17.3 — Skill 编辑（新建/更新）：一律经现有 Skill validator；无权限授予选项 */
+function skillForm(existing) {
+  const s = existing || {};
+  const req = s.toolRequirements || {};
+  const perm = s.permissionRequirements || {};
+  const compat = s.compatibility || {};
+  openModal(existing ? `编辑 Skill：${existing.id}` : '新建 Skill', `
+    ${existing ? '' : '<label>ID<input id="s-id" placeholder="my-skill"></label>'}
+    <label>名称<input id="s-name" value="${esc(s.name || '')}" placeholder="My Skill"></label>
+    <label>描述<input id="s-desc" value="${esc(s.description || '')}" placeholder="简短描述"></label>
+    <label>Instructions<textarea id="s-ins" rows="6" placeholder="专家指导文本，将注入 Agent 的 system prompt（位于 Safety Contract 之下）">${esc(s.instructions || '')}</textarea></label>
+    <label>必需工具（逗号分隔）<input id="s-req" value="${esc((req.required || []).join(', '))}" placeholder="read_file, search"></label>
+    <label>禁用工具（逗号分隔）<input id="s-den" value="${esc((req.denied || []).join(', '))}" placeholder="write_file, apply_patch"></label>
+    <label>必需权限（逗号分隔，仅要求不授予）<input id="s-perm" value="${esc((perm.required || []).join(', '))}" placeholder="filesystem.read"></label>
+    <label>兼容 Agent 类型（逗号分隔）<input id="s-compat" value="${esc((compat.agentTypes || ['native']).join(', '))}" placeholder="native"></label>
+  `, { okText: existing ? '保存' : '创建' });
   onModalOk(async () => {
+    const split = (v) => (v && v.trim() ? v.split(/\s*,\s*/).filter(Boolean) : []);
     const definition = {
-      id: $('#s-id').value.trim(),
+      ...(existing ? {} : { id: $('#s-id').value.trim() }),
       name: $('#s-name').value.trim(),
       description: $('#s-desc').value.trim(),
       instructions: $('#s-ins').value,
-      tags: [],
-      toolRequirements: {
-        required: $('#s-req').value.trim() ? $('#s-req').value.trim().split(/\s*,\s*/) : [],
-        optional: [],
-        denied: $('#s-den').value.trim() ? $('#s-den').value.trim().split(/\s*,\s*/) : []
-      },
-      permissionRequirements: { required: $('#s-perm').value.trim() ? $('#s-perm').value.trim().split(/\s*,\s*/) : [] },
-      modelRequirements: {},
-      compatibility: { agentTypes: ['native'], platforms: ['windows'], projectSignals: [] },
-      metadata: {}
+      tags: s.tags || [],
+      toolRequirements: { required: split($('#s-req').value), optional: req.optional || [], denied: split($('#s-den').value) },
+      permissionRequirements: { required: split($('#s-perm').value) },
+      modelRequirements: s.modelRequirements || {},
+      compatibility: { agentTypes: split($('#s-compat').value), platforms: compat.platforms || ['windows'], projectSignals: compat.projectSignals || [] },
+      metadata: s.metadata || {}
     };
-    try { await api.skillCreate(definition); toast('已创建', 'ok'); closeModal(); open('skills'); }
+    try {
+      // 校验与落库全部由现有 Skill validator/registry 完成；失败会报错并保留原状
+      if (existing) await api.skillUpdate(existing.id, definition);
+      else await api.skillCreate(definition);
+      toast(existing ? '已保存（经 Skill validator 校验）' : '已创建', 'ok'); closeModal(); open('skills');
+    } catch (e) { toast(e.message, 'error'); }
+  });
+}
+
+/* B17.5/B17.7 — Hook Detail：真实事件词汇 + Guard 可视化（可阻断执行，不可授予权限） */
+async function hookView(hk) {
+  if (!hk) { toast('Hook 不存在', 'error'); return; }
+  const filters = hk.filters || {};
+  openModal(`Hook: ${esc(hk.id)}` + (hk.enabled ? '' : '（已禁用）'), `
+    <table class="tbl kv"><tbody>
+      <tr><td>名称</td><td>${esc(hk.name)}</td></tr>
+      <tr><td>Event</td><td class="mono">${esc(hk.event)}</td></tr>
+      <tr><td>Kind</td><td>${esc(hk.kind)}</td></tr>
+      <tr><td>Handler（受信）</td><td class="mono">${esc(hk.handlerId)}</td></tr>
+      <tr><td>Priority / Timeout</td><td>${hk.priority ?? 0} / ${hk.timeoutMs ?? 5000}ms</td></tr>
+    </tbody></table>
+    ${hk.kind === 'guard' ? '<div class="warn-box">Guard Hook：可以阻断执行（block），但绝不能授予权限。</div>' : ''}
+    <div class="warn-box">所有 Hook 只能观察 / 阻断 / 追加有界上下文，永远不能授予能力或权限。</div>
+    <h4>Filters</h4>
+    <pre class="small">${esc(JSON.stringify(filters, null, 2) || '{}')}</pre>
+  `);
+}
+
+/* B17.6 — Hook 编辑器：handler 只能从受信列表选择；无 JavaScript/eval/shell/HTTP 输入 */
+async function hookForm() {
+  let handlers = [];
+  try { handlers = await api.hookHandlersList(); } catch { handlers = []; }
+  if (!handlers.length) { toast('当前没有已注册的受信 handler，无法创建 Hook', 'warn'); return; }
+  openModal('新建 Hook', `
+    <label>ID<input id="h-id" placeholder="my-hook"></label>
+    <label>名称<input id="h-name" placeholder="My Hook"></label>
+    <label>描述<input id="h-desc" placeholder="简短描述"></label>
+    <label>Event
+      <select id="h-event">${HOOK_EVENTS.map(ev => `<option value="${ev}">${ev}</option>`).join('')}</select>
+    </label>
+    <label>Kind
+      <select id="h-kind">${HOOK_KINDS.map(k => `<option value="${k}">${k}</option>`).join('')}</select>
+    </label>
+    <label>受信 Handler（只能选择，不能输入脚本）
+      <select id="h-handler">${handlers.map(hd => `<option value="${esc(hd)}">${esc(hd)}</option>`).join('')}</select>
+    </label>
+    <div class="muted small">Hook 不接受 JavaScript / shell / HTTP webhook 输入；handler 只来自平台受信注册表。</div>
+  `, { okText: '创建' });
+  onModalOk(async () => {
+    const definition = {
+      id: $('#h-id').value.trim(),
+      name: $('#h-name').value.trim(),
+      description: $('#h-desc').value.trim(),
+      event: $('#h-event').value,
+      kind: $('#h-kind').value,
+      handlerId: $('#h-handler').value,
+      filters: {},
+      config: {}
+    };
+    try { await api.hookCreate(definition); toast('已创建（仅受信 handler）', 'ok'); closeModal(); open('skills'); }
     catch (e) { toast(e.message, 'error'); }
   });
 }
@@ -2674,6 +2970,14 @@ async function renderSettings(body) {
             <option value="compact" ${curDensity === 'compact' ? 'selected' : ''}>紧凑</option>
           </select>
         </label>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h3>引导</h3>
+      <div class="row">
+        <span class="muted small">重新打开首次使用引导（打开项目 / 配置模型 / 测试连接 / 主智能体 / 首个任务）。</span>
+        <button class="btn tiny" id="set-reopen-onboarding">重新打开引导</button>
       </div>
     </section>
 
@@ -2713,6 +3017,8 @@ async function renderSettings(body) {
     </section>`;
 
   $('#p-add').onclick = () => promptForm(null);
+  const reopenOnboarding = $('#set-reopen-onboarding');
+  if (reopenOnboarding) reopenOnboarding.onclick = () => window.dispatchEvent(new CustomEvent('adp-reopen-onboarding'));
   const setThemeEl = $('#set-theme');
   if (setThemeEl) setThemeEl.onchange = async () => { await theme.setTheme(setThemeEl.value); toast('已应用主题', 'ok'); };
   const setDensityEl = $('#set-density');

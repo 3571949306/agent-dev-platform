@@ -24,6 +24,7 @@ const gates = [
   ['test:product:production', ['scripts/product-production-smoke.js']],
   ['test:reliability', ['scripts/run-tests.js', 'reliability']],
   ['test:reliability:production', ['scripts/reliability-production-smoke.js']],
+  ['test:reliability:soak', ['scripts/run-tests.js', 'reliabilitySoak']],
   ['test:gui', ['scripts/run-tests.js', 'guiWorkbench']],
   ['test:gui:production', ['scripts/gui-production-smoke.js']],
   ['e2e', [require.resolve('@playwright/test/cli'), 'test']]

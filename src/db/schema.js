@@ -33,6 +33,9 @@ CREATE TABLE IF NOT EXISTS api_connections (
   tested_at TEXT,
   last_error TEXT DEFAULT '',
   latency_ms INTEGER,
+  -- v2.9.9 Phase B Final（B15.1）：测试真话状态（''=从未测试 / ok / failed / error），
+  -- 连接状态词汇（AVAILABLE/UNAVAILABLE/DEGRADED/UNKNOWN/ERROR）只由此列推导。
+  test_state TEXT DEFAULT '',
   enabled INTEGER DEFAULT 1,
   import_source TEXT DEFAULT '',          -- v2.5.0: 来源标识 manual/codex/claude-code/opencode/ccswitch-local/environment/env-file/json-file/toml-file/smart-paste
   import_source_path TEXT DEFAULT '',     -- v2.5.0: 来源路径（仅元数据，不含原文）
@@ -488,6 +491,9 @@ CREATE TABLE IF NOT EXISTS model_route_decisions (
   input_tokens INTEGER,
   output_tokens INTEGER,
   error_code TEXT,
+  -- v2.9.9 Phase B Final（B16.3）— Wire Truth：请求模型 vs 真实上线模型
+  requested_model TEXT,
+  actual_model TEXT,
   created_at TEXT,
   updated_at TEXT
 );
@@ -497,6 +503,30 @@ CREATE TABLE IF NOT EXISTS settings (
   key TEXT PRIMARY KEY,
   value_json TEXT
 );
+
+-- v2.9.9 Phase B Final（B21）— Problems Center 持久化真源。
+-- 同一稳定问题按 stable_key 去重（occur_count/last_seen_at），绝不刷屏；
+-- dismiss != resolved：只有真实条件消失才能 RESOLVED。
+CREATE TABLE IF NOT EXISTS problems (
+  id TEXT PRIMARY KEY,
+  stable_key TEXT NOT NULL,
+  time TEXT,
+  last_seen_at TEXT,
+  severity TEXT NOT NULL,
+  source TEXT NOT NULL,
+  code TEXT NOT NULL,
+  message TEXT DEFAULT '',
+  run_id TEXT,
+  project_id TEXT,
+  related_json TEXT DEFAULT '{}',
+  status TEXT NOT NULL DEFAULT 'ACTIVE',
+  occur_count INTEGER DEFAULT 1,
+  resolved_at TEXT,
+  created_at TEXT,
+  updated_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_problems_stable ON problems(stable_key, status);
+CREATE INDEX IF NOT EXISTS idx_problems_status ON problems(status, time);
 
 CREATE TABLE IF NOT EXISTS runs (
   id TEXT PRIMARY KEY,
@@ -575,6 +605,8 @@ const COLUMN_MIGRATIONS = [
   ['api_connections', 'import_source', 'TEXT', "''"],
   ['api_connections', 'import_source_path', 'TEXT', "''"],
   ['api_connections', 'enabled', 'INTEGER', '1'],
+  // v2.9.9 Phase B Final（B15.1）：连接测试真话状态列
+  ['api_connections', 'test_state', 'TEXT', "''"],
   // v2.7.0 — Agent Integration Hub columns
   // (capabilities_json already exists in the SCHEMA, so it is intentionally
   //  omitted here to avoid a duplicate ADD COLUMN.)
@@ -597,6 +629,9 @@ const COLUMN_MIGRATIONS = [
   ['model_route_decisions', 'conversation_id', 'TEXT'],
   ['model_route_decisions', 'root_run_id', 'TEXT'],
   ['model_route_decisions', 'parent_run_id', 'TEXT'],
+  // v2.9.9 Phase B Final（B16.3）— Wire Truth 列：请求模型 / 真实上线模型
+  ['model_route_decisions', 'requested_model', 'TEXT'],
+  ['model_route_decisions', 'actual_model', 'TEXT'],
   // v2.9.5 closure: standalone Workflow Tool hooks retain Workflow identity without impersonating an Agent Run.
   ['hook_invocations', 'workflow_run_id', 'TEXT'],
   ['hook_invocations', 'workflow_step_id', 'TEXT']

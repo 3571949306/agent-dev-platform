@@ -8,7 +8,7 @@ const expanded = new Set();
 
 export async function render() {
   const box = $('#left-files');
-  if (!state.project) { box.innerHTML = '<div class="empty">未打开项目</div>'; return; }
+  if (!state.project) { box.innerHTML = '<div class="empty" data-page-state="empty">未打开项目</div>'; return; }
   box.innerHTML = `<div class="file-toolbar"><button class="icon-btn" data-file-refresh title="Refresh">↻</button><button class="icon-btn" data-file-collapse title="Collapse all">⊟</button><button class="icon-btn" data-file-new title="Create File">+F</button><button class="icon-btn" data-folder-new title="Create Folder">+D</button></div><div class="tree-root"><div class="tree-head" title="${esc(state.project.root_path)}">${esc(state.project.name)}</div><div id="tree"></div></div>`;
   box.querySelector('[data-file-refresh]').onclick = () => render();
   box.querySelector('[data-file-collapse]').onclick = () => { expanded.clear(); render(); };
@@ -99,7 +99,11 @@ async function renamePrompt(item) {
 
 async function deletePrompt(item) {
   const request = await api.requestDeleteFile(item.path);
-  const confirmed = await confirmBox('Delete', `Delete ${item.path}? This cannot be undone.`);
+  const confirmed = await confirmBox('Delete', {
+    target: item.path,
+    consequence: '该文件将从磁盘删除。',
+    reversibility: '不可逆（除非有 git/备份）。'
+  });
   if (!confirmed) return;
   try { await api.deleteFile(request.path, request.token); await render(); toast('Deleted: ' + item.path, 'ok'); }
   catch (error) { toast(error.message, 'error'); }

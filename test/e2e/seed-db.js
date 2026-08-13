@@ -21,6 +21,10 @@ if (!store.settings.get('_initialized')) {
   seedDefaults(store);
   store.settings.set('_initialized', true);
 }
+// E2E fixture 代表「已配置过的既有用户」：关闭首次使用引导，
+// 真实首启用户（空库）仍会看到完整 Onboarding 2.0。
+store.settings.set('onboarding.completed', true);
+store.settings.set('onboarding.skipped', false);
 
 const projects = store.projects.list();
 const proj = projects[0] || store.projects.create({ name: 'E2E 测试项目', rootPath: ROOT });

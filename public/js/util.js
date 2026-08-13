@@ -57,9 +57,24 @@ export function onModalOk(fn) {
   if (b) b.onclick = fn;
 }
 
-export function confirmBox(title, message) {
+/**
+ * B42 — 统一破坏性确认：目标 / 后果 / 可逆性三要素。
+ * 兼容旧签名 confirmBox(title, '文本')；新签名传 { target, consequence, reversibility }。
+ */
+export function confirmBox(title, messageOrSpec) {
+  let html;
+  if (messageOrSpec && typeof messageOrSpec === 'object') {
+    const s = messageOrSpec;
+    html = `<div class="confirm-spec">
+      <div class="confirm-row"><b>目标</b><div class="muted">${esc(s.target || '—')}</div></div>
+      <div class="confirm-row"><b>后果</b><div class="muted">${esc(s.consequence || '—')}</div></div>
+      <div class="confirm-row"><b>可逆性</b><div class="muted">${esc(s.reversibility || '—')}</div></div>
+    </div>`;
+  } else {
+    html = `<p class="muted">${esc(messageOrSpec)}</p>`;
+  }
   return new Promise(resolve => {
-    openModal(title, `<p class="muted">${esc(message)}</p>`, { okText: '确认' });
+    openModal(title, html, { okText: '确认' });
     onModalOk(() => { closeModal(); resolve(true); });
     const c = $('#modal [data-act="cancel"]');
     if (c) c.onclick = () => { closeModal(); resolve(false); };

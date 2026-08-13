@@ -198,6 +198,8 @@ test('Canonical Main entry auto-creates two inline children, consumes results, n
     chain = buildChain({ projectRoot, fakeProvider });
     const conversation = store.conversations.create({ projectId: chain.project.id, agentId: chain.agent.id, title: 'Canonical task' });
     const convCountBefore = store.conversations.list(chain.project.id).length;
+    // A8 — Inline Child Library Boundary：记录运行前 Agent Library 持久化快照
+    const defsBefore = store.agentDefinitions.list().map(d => d.id).sort();
 
     const started = await chain.productEntry.mainAgent.run({ conversationId: conversation.id, agentId: chain.agent.id, goal: '让两个专门 Agent 分别审查代码和测试' });
     const mainTerminal = await waitTerminal(chain.runManager, started.runId, 40000);
@@ -237,6 +239,17 @@ test('Canonical Main entry auto-creates two inline children, consumes results, n
     // INLINE_CHILD_NO_NEW_CHAT — 用户 conversation 数量不变
     const convCountAfter = store.conversations.list(chain.project.id).length;
     assert.strictEqual(convCountAfter, convCountBefore, 'no new user conversation created by inline children');
+
+    // A8 — Inline Child Library Boundary：Temporary Reviewer/Test Analyst 只是任务级实例，
+    // Agent Library 持久化数量与内容绝不变（inline definition 不得落入 definition store）。
+    const defsAfter = store.agentDefinitions.list().map(d => d.id).sort();
+    assert.deepStrictEqual(defsAfter, defsBefore, 'persisted Agent Library count/ids unchanged by inline children');
+    const inlineNames = ['Temporary Reviewer', 'Temporary Test Analyst'];
+    for (const name of inlineNames) {
+      assert.ok(!store.agentDefinitions.list().some(d => d.name === name), `inline child "${name}" must never be persisted into Agent Library`);
+    }
+    console.log('INLINE_CHILD_LIBRARY_UNCHANGED=PASS');
+    console.log('INLINE_CHILD_LIBRARY_PERSISTED_NEW=0');
 
     // Dynamic instances disposed
     await settleTo(() => chain.factory.listInstances().length === 0, 8000);

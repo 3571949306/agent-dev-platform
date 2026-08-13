@@ -114,6 +114,8 @@ body { background: var(--bg); color: var(--text); font-family: var(--sans); font
 #activity-bar .abtn:hover { background: var(--bg3); color: var(--text); }
 #activity-bar .abtn.active { background: var(--bg3); color: var(--text); box-shadow: inset 2px 0 0 var(--accent); }
 #activity-bar .ab-ico { font-size: 17px; line-height: 1; }
+/* v2.9.9 Phase B Final（B73）— 极简线性图标：统一 19px 描边风格，继承按钮颜色 */
+#activity-bar .ab-ico svg { width: 19px; height: 19px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; display: block; }
 
 #left { width: 250px; background: var(--bg2); border-right: 1px solid var(--border); display: flex; flex-direction: column; flex: none; }
 .left-tabs, .bottom-tabs { display: flex; border-bottom: 1px solid var(--border); flex: none; }
@@ -621,3 +623,33 @@ pre.preview { max-height: 60vh; overflow: auto; }
   #resize-inspector { display: none; }
   .file-meta { display: none; }
 }
+
+/* v2.9.9 Phase B Final（B15.2/B15.4）— 连接向导自定义请求头行编辑器 */
+.f-block { margin: 10px 0; }
+.hdr-row { display: grid; grid-template-columns: 1fr 1.4fr auto; gap: 6px; margin-bottom: 6px; }
+.hdr-row input { width: 100%; }
+.hdr-del { min-width: 28px; }
+
+
+
+/* v2.9.9 Phase B Final (B27.1) Composer context chips */
+.composer-chips { display: flex; gap: 6px; padding: 6px 10px 0; flex-wrap: wrap; }
+.composer-chips .chip { cursor: default; }
+
+/* v2.9.9 Phase B Final (B30) Boot Experience */
+#boot-splash { position: fixed; inset: 0; background: var(--bg, #0d1117); display: flex; align-items: center; justify-content: center; z-index: 9999; }
+.boot-card { min-width: 320px; padding: 28px 32px; border: 1px solid var(--border, #30363d); border-radius: 10px; }
+.boot-card h2 { margin: 0 0 14px; font-size: 18px; }
+.boot-steps { list-style: none; margin: 0; padding: 0; }
+.boot-steps li { padding: 4px 0; color: var(--muted, #8b949e); font-size: 13px; }
+.boot-steps li.boot-active { color: var(--fg, #e6edf3); }
+.boot-steps li.boot-done { color: var(--green, #3fb950); }
+.boot-steps li.boot-done::after { content: ' \2713'; }
+
+/* v2.9.9 Phase B Final (B42) unified destructive confirmation */
+.confirm-spec { display: flex; flex-direction: column; gap: 10px; }
+.confirm-row b { display: block; margin-bottom: 2px; font-size: 12px; }
+.term-pre { white-space: pre-wrap; word-break: break-all; background: rgba(255,255,255,.03); padding: 8px; border-radius: 6px; max-height: 240px; overflow: auto; }
+.term-err { color: var(--red, #f85149); }
+.route-advanced summary { cursor: pointer; margin-top: 8px; }
+.prob-msg { flex: 1; min-width: 120px; word-break: break-all; }

@@ -406,8 +406,11 @@ test('R6 restart truth: persisted active Run/Workflow/Generator settle honest te
     assert.strictEqual(store.workflowAudit.listByRun('wf-restart-1').length, auditBefore, 'no replayed audit trail');
     // 已终态记录不会被二次处理（automatic resume 不存在）
     const secondPass = recoverInterruptedRuntime({ store, runManager: new RunManager({ store }) });
-    assert.deepStrictEqual(secondPass, { runs: 0, workflows: 0, workflowSteps: 0, generatorDrafts: 0 },
+    assert.deepStrictEqual(
+      { runs: secondPass.runs, workflows: secondPass.workflows, workflowSteps: secondPass.workflowSteps, generatorDrafts: secondPass.generatorDrafts },
+      { runs: 0, workflows: 0, workflowSteps: 0, generatorDrafts: 0 },
       'recovery is idempotent: nothing is resumed or replayed');
+    assert.deepStrictEqual(secondPass.snapshot.interruptedRuns, [], 'no interrupted runs remain after idempotent pass');
     console.log('R6_RESTART_TRUTH agent=interrupted workflow=FAILED generator=FAILED providerReplay=0 toolReplay=0 fsMutations=0 stepReplay=0 autoResume=NO');
   } finally {
     try { store.getDb().close(); } catch { /* best effort */ }

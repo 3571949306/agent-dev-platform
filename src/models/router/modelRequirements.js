@@ -7,7 +7,7 @@ const { normalizeCurrency, normalizePriceUnit, toPerMillion } = require('./prici
 const DEFAULT_REQUIREMENTS = Object.freeze({
   schemaVersion: 1,
   required: Object.freeze({ text: true, vision: false, nativeTools: false, streaming: false, minContextWindow: null }),
-  preferences: Object.freeze({ latency: 'ignore', cost: 'ignore', preferLocal: false, preferredProviders: Object.freeze([]), preferredModels: Object.freeze([]) }),
+  preferences: Object.freeze({ latency: 'ignore', cost: 'ignore', preferLocal: false, preferredProviders: Object.freeze([]), preferredModels: Object.freeze([]), preferredConnectionIds: Object.freeze([]) }),
   constraints: Object.freeze({
     allowedConnectionIds: Object.freeze([]), deniedConnectionIds: Object.freeze([]),
     allowedProviders: Object.freeze([]), deniedProviders: Object.freeze([]),
@@ -77,6 +77,8 @@ function normalizeModelRequirements(input = {}) {
   if (typeof preferences.preferLocal !== 'boolean') throw invalid('requirements.preferences.preferLocal', 'must be boolean');
   preferences.preferredProviders = stringList(preferences.preferredProviders, 'requirements.preferences.preferredProviders');
   preferences.preferredModels = stringList(preferences.preferredModels, 'requirements.preferences.preferredModels');
+  // v2.9.9 Phase B Final（B15.9）— 默认连接只是打分偏好，绝不旁路 Router 硬约束
+  preferences.preferredConnectionIds = stringList(preferences.preferredConnectionIds, 'requirements.preferences.preferredConnectionIds');
 
   const constraints = { ...DEFAULT_REQUIREMENTS.constraints, ...constraintsInput };
   for (const key of ['allowedConnectionIds', 'deniedConnectionIds', 'allowedProviders', 'deniedProviders', 'allowedModels', 'deniedModels']) {

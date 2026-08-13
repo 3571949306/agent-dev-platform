@@ -23,7 +23,7 @@ export async function loadConversations() {
 function renderChatList() {
   const box = $('#left-chats');
   if (!state.conversations.length) {
-    box.innerHTML = `<div class="empty">还没有对话<br><span class="muted">点击「+ 新对话」开始</span></div>`;
+    box.innerHTML = `<div class="empty" data-page-state="empty">还没有对话<br><span class="muted">点击「+ 新对话」开始</span></div>`;
     return;
   }
   box.innerHTML = state.conversations.map(c => {
@@ -44,7 +44,11 @@ function renderChatList() {
   box.querySelectorAll('[data-del]').forEach(b => {
     b.onclick = async (e) => {
       e.stopPropagation();
-      if (!await confirmBox('删除对话', '该对话及其消息将被永久删除，确定？')) return;
+      if (!await confirmBox('删除对话', {
+        target: '该对话及其全部消息',
+        consequence: '对话与消息记录将被永久删除；关联 Run 记录仍可在运行列表查看。',
+        reversibility: '不可逆。'
+      })) return;
       await api.convRemove(b.dataset.del);
       if (state.conv && state.conv.id === b.dataset.del) { state.conv = null; msgsEl().innerHTML = emptyChat(); }
       await loadConversations();
@@ -78,6 +82,10 @@ export async function openConversation(id) {
   const conv = await api.convGet(id);
   if (!conv) return;
   state.conv = conv;
+  // B48 — last conversation 持久化（按项目隔离；只存会话 ID，绝不存密钥）
+  if (state.project && state.project.id) {
+    api.settingsSet(`ui.lastConversation.${state.project.id}`, id).catch(() => {});
+  }
   if (conv.agent_id) {
     state.agentId = conv.agent_id;
     const sel = $('#agent-select');
@@ -86,6 +94,50 @@ export async function openConversation(id) {
   renderChatList();
   await renderHistory(conv);
   panels.setActiveConversation(id);
+  await restoreComposerDraft(); // B27.4 — 按会话恢复未发送草稿
+}
+
+/* ---------------- B27 Composer 3.0：草稿持久化 + 上下文 Chips ----------------
+ * 草稿按 project/conversation 隔离，持久化在统一 settings 真源；
+ * 切页面/重启 Renderer 后恢复；发送后清空。
+ * 附件：backend 没有可靠附件 contract 之前绝不建假附件入口（B27.6）。 */
+let draftTimer = null;
+function draftKey() {
+  const pid = (state.project && state.project.id) || 'no-project';
+  const cid = (state.conv && state.conv.id) || 'new';
+  return `composer.draft.${pid}.${cid}`;
+}
+export async function restoreComposerDraft() {
+  const input = $('#input');
+  if (!input) return;
+  let saved = '';
+  try { saved = await api.settingsGet(draftKey(), '') || ''; } catch { saved = ''; }
+  input.value = saved;
+  renderComposerChips();
+}
+export function clearComposerDraft() {
+  try { api.settingsSet(draftKey(), '').catch(() => {}); } catch { /* settings 不可用时不阻塞 */ }
+}
+export function bindComposerDraft() {
+  const input = $('#input');
+  if (!input || input.dataset.draftBound) return;
+  input.dataset.draftBound = '1';
+  input.addEventListener('input', () => {
+    if (draftTimer) clearTimeout(draftTimer);
+    draftTimer = setTimeout(() => { api.settingsSet(draftKey(), input.value).catch(() => {}); }, 300);
+    renderComposerChips();
+  });
+}
+export function renderComposerChips() {
+  const box = $('#composer-chips');
+  if (!box) return;
+  const agent = state.agents.find(a => a.id === state.agentId) || state.agents.find(a => a.is_main) || null;
+  // B27.2/B27.3 — 默认主智能体 + 模型缺省为 Auto（仍由 Model Router 裁决）
+  const modelLabel = agent && agent.type !== 'external' ? (agent.model || 'Auto') : '—';
+  box.innerHTML = `
+    <span class="chip small" title="Project">项目：${esc(state.project ? state.project.name : '未打开')}</span>
+    <span class="chip small" title="Agent">智能体：${esc(agent ? agent.name + (agent.is_main ? '（主）' : '') : '主智能体')}</span>
+    <span class="chip small" title="模型偏好仍由 Model Router 裁决">模型：${esc(modelLabel)}</span>`;
 }
 
 async function renderHistory(conv) {
@@ -276,6 +328,7 @@ export async function send() {
 
   msgsEl().appendChild(userBubble(text));
   input.value = '';
+  clearComposerDraft(); // B27.4 — 发送成功后草稿清空
   // runId 以主进程返回的为准（本地不预生成，避免终态防重入误判）
   startRun(state.conv.id);
   startWatchdog(state.conv.id);
@@ -370,7 +423,9 @@ export async function stop() {
 
 function setRunning(v, label) {
   state.running = v;
+  // B28 — Idle: Send；Running: Stop（绝不提供假的 mid-run follow-up 入口）
   $('#btn-stop').classList.toggle('hidden', !v);
+  $('#btn-send').classList.toggle('hidden', v);
   $('#btn-send').disabled = v;
   $('#status-dot').className = 'dot' + (v ? ' busy' : '');
   // v2.3.1: 终态时状态栏显示中文终态标签（已完成/失败/已取消/超时/已中断），否则就绪

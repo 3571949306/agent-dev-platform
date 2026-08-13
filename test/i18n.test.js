@@ -44,8 +44,9 @@ test('i18n 显示层映射正确', async () => {
 
   assert.strictEqual(i18n.sourceName('remote'), 'API 获取');
   assert.strictEqual(i18n.sourceName('manual'), '手动添加');
-  assert.strictEqual(i18n.sourceName('preset'), '内置推荐');
-  assert.strictEqual(i18n.sourceName('cached'), '本地缓存');
+  // B15.6 真话词汇：preset 是回退（内置推荐），绝不冒充 API 获取
+  assert.strictEqual(i18n.sourceName('preset'), '回退（内置推荐）');
+  assert.strictEqual(i18n.sourceName('cached'), '未知（本地缓存）');
 });
 
 test('i18n 未知 ID 安全回退为原文', async () => {

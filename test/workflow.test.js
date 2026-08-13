@@ -528,3 +528,67 @@ test('R7 approval rejection is USER_REJECTED and later steps never start', async
   assert.strictEqual(run.errorCode, 'USER_REJECTED');
   assert.strictEqual(calls, 0);
 });
+
+/* v2.9.9 Phase B Final — PART A6 — Workflow Cancel Race（deterministic）。
+ * cancel() 在 agentHub.cancel 处挂起（cancelled=true 但 terminal 尚未写入）时，
+ * 被取消步骤的挂起 continuation 恰好恢复并完成：尾部完成守卫必须检查
+ * control.cancelled，最终状态只能是 CANCELLED，绝不得记录 COMPLETED。 */
+test('A6 cancel + completion microtask race records CANCELLED only, never COMPLETED', async () => {
+  const terminalStatuses = [];
+  let resolveStep = null;
+  let resolveHubCancel = null;
+  let executorEntered = false;
+
+  const engine = createWorkflowEngine({
+    agentHub: {
+      // cancel 的可控挂起点：模拟真实 agentHub.cancel 的异步耗时
+      cancel: async () => { await new Promise(resolve => { resolveHubCancel = resolve; }); }
+    },
+    executors: {
+      agent: ({ control }) => {
+        executorEntered = true;
+        control.activeAgentRunId = 'fixture-agent-run-race';
+        return new Promise(resolve => { resolveStep = resolve; });
+      }
+    },
+    emit: (type, payload) => {
+      if (type === 'workflow:state' && payload && payload.status) terminalStatuses.push(payload.status);
+    }
+  });
+  engine.registry.create(definition({
+    steps: [{
+      id: 'inspect',
+      type: 'agent',
+      dependsOn: [],
+      config: { goal: 'Inspect ' + ref('input.target'), target: { mode: 'main' }, skillIds: [], hookIds: [] },
+      timeoutMs: 30000,
+      retry: { maxAttempts: 1 },
+      onFailure: 'fail'
+    }]
+  }));
+  const started = await engine.runtime.run('workflow-a', { input: { target: 'race-fixture' } });
+
+  // 等 executor 真正进入挂起（步骤 RUNNING）
+  for (let i = 0; i < 400 && !executorEntered; i++) await new Promise(resolve => setTimeout(resolve, 5));
+  assert.strictEqual(executorEntered, true, 'step executor must be pending when cancel starts');
+
+  // 1) cancel 启动：设置 cancelled=true 后挂在 agentHub.cancel（terminal 尚未写入）
+  const cancelPromise = engine.runtime.cancel(started.workflowRunId);
+  for (let i = 0; i < 400 && !resolveHubCancel; i++) await new Promise(resolve => setTimeout(resolve, 5));
+  assert.ok(resolveHubCancel, 'cancel must be suspended inside agentHub.cancel');
+
+  // 2) 竞态窗口：步骤 continuation 在 cancel 的 terminalWorkflow 之前恢复并完成
+  resolveStep({ output: { summary: 'late completion inside cancel window' } });
+  await new Promise(resolve => setTimeout(resolve, 20)); // 尾部守卫此时已执行（未修复则会写 COMPLETED）
+
+  // 3) 放行 cancel 收尾
+  resolveHubCancel();
+  await cancelPromise;
+  const run = await engine.runtime.wait(started.workflowRunId);
+
+  assert.strictEqual(run.status, 'CANCELLED', 'cancelled workflow must never be recorded COMPLETED');
+  assert.ok(!terminalStatuses.includes('COMPLETED'), 'no COMPLETED state may ever be emitted');
+  assert.ok(terminalStatuses.includes('CANCELLED'), 'CANCELLED terminal state emitted exactly as truth');
+  console.log('WORKFLOW_CANCEL_RACE=CANCELLED_ONLY');
+  console.log('WORKFLOW_CANCEL_RACE_COMPLETED_RECORDED=0');
+});

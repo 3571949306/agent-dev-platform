@@ -30,16 +30,30 @@ function reg(channel, fn) {
   });
 }
 
-function resolveConfiguredMainModel({ agent, agentId, conversationId, resolveRuntimeModel, buildProvider, resolveModelFor }) {
+function resolveConfiguredMainModel({ agent, agentId, conversationId, resolveRuntimeModel, buildProvider, resolveModelFor, routingDefaults = null }) {
   const hasExplicitBinding = !!(agent.api_connection_id && agent.model);
   const autoRequested = !hasExplicitBinding && (
     agent.routingMode === 'auto' || agent.routing_mode === 'auto' || agent.modelRoutingMode === 'auto'
     || (agent.workspace && agent.workspace.modelRoutingMode === 'auto')
   );
   if (typeof resolveRuntimeModel === 'function' && (hasExplicitBinding || autoRequested)) {
+    // B15.9 — 默认连接/模型是偏好不是旁路：只注入 preferences 打分项，
+    // explicit 模式与全部硬约束不受影响；Agent 自身 requirements 优先。
+    const baseRequirements = agent.modelRequirements || (agent.workspace && agent.workspace.modelRequirements) || {};
+    let requirements = baseRequirements;
+    if (!hasExplicitBinding && routingDefaults && (routingDefaults.connectionId || routingDefaults.modelId)) {
+      const prefs = { ...((baseRequirements && baseRequirements.preferences) || {}) };
+      if (routingDefaults.connectionId) {
+        prefs.preferredConnectionIds = [...(prefs.preferredConnectionIds || []), routingDefaults.connectionId];
+      }
+      if (routingDefaults.modelId) {
+        prefs.preferredModels = [...(prefs.preferredModels || []), routingDefaults.modelId];
+      }
+      requirements = { ...(baseRequirements || {}), preferences: prefs };
+    }
     const resolution = resolveRuntimeModel({
       mode: hasExplicitBinding ? 'explicit' : 'auto',
-      requirements: agent.modelRequirements || (agent.workspace && agent.workspace.modelRequirements) || {},
+      requirements,
       explicit: hasExplicitBinding ? { connectionId: agent.api_connection_id, modelId: agent.model } : null,
       context: { agent, agentId: agent.id || agentId, runId: null, conversationId: conversationId || null, timeoutMs: 120000 }
     });
@@ -103,7 +117,14 @@ function register(deps, registrar = reg) {
     if (useInjectedModel && injectedModel) {
       model = injectedModel;
     } else if (effectiveAgent) {
-      const resolution = resolveConfiguredMainModel({ agent: effectiveAgent, agentId, conversationId, resolveRuntimeModel, buildProvider, resolveModelFor });
+      const resolution = resolveConfiguredMainModel({
+        agent: effectiveAgent, agentId, conversationId, resolveRuntimeModel, buildProvider, resolveModelFor,
+        // B15.9 — 默认连接/模型偏好来自统一 settings 真源（可为空）
+        routingDefaults: {
+          connectionId: store.settings.get('defaultConnectionId', null),
+          modelId: store.settings.get('defaultModelId', null)
+        }
+      });
       model = resolution.modelAdapter;
       modelSelection = resolution.selection || null;
     } else {

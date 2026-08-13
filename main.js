@@ -1,8 +1,32 @@
 'use strict';
-const { app, BrowserWindow, shell } = require('electron');
+const { app, BrowserWindow, shell, Menu } = require('electron');
 const { spawn } = require('child_process');
 const path = require('path');
 const fs = require('fs');
+
+// v2.9.9 Phase B Final（B74）— 应用菜单：保留编辑菜单（复制/粘贴等输入快捷键），
+// 视图菜单提供缩放项；缩放统一由 Renderer 的 applyZoom 生效（经既有 agent:event 通道下发，
+// 不新增 preload/IPC 面），避免 Electron 原生 zoom 与界面 CSS zoom 双重叠加。
+function sendZoomEvent(win, type) {
+  try { if (win && !win.isDestroyed()) win.webContents.send('agent:event', { type }); } catch { /* noop */ }
+}
+function buildAppMenu() {
+  return Menu.buildFromTemplate([
+    { role: 'editMenu', label: '编辑' },
+    {
+      label: '视图',
+      submenu: [
+        { label: '放大', accelerator: 'CmdOrCtrl+=', click: (_mi, win) => sendZoomEvent(win, 'zoom:in') },
+        { label: '缩小', accelerator: 'CmdOrCtrl+-', click: (_mi, win) => sendZoomEvent(win, 'zoom:out') },
+        { label: '重置缩放', accelerator: 'CmdOrCtrl+0', click: (_mi, win) => sendZoomEvent(win, 'zoom:reset') },
+        { type: 'separator' },
+        { role: 'togglefullscreen', label: '切换全屏' },
+        { role: 'toggleDevTools', label: '开发者工具' }
+      ]
+    },
+    { role: 'windowMenu', label: '窗口' }
+  ]);
+}
 
 // v2.3.1 (GUI E2E)：独立 userData —— E2E 用临时目录跑真实 GUI，绝不污染真实用户数据。
 if (process.env.ADP_USER_DATA) {
@@ -278,7 +302,10 @@ function createWindow(port) {
   return win;
 }
 
-app.whenReady().then(bootstrap);
+app.whenReady().then(() => {
+  try { Menu.setApplicationMenu(buildAppMenu()); } catch { /* 菜单构建失败不阻塞启动 */ }
+  return bootstrap();
+});
 
 app.on('window-all-closed', () => {
   closeHttpServer();

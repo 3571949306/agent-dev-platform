@@ -9,11 +9,17 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
+/* v2.9.9 Phase B Final（B18）— Computer Workspace 2.0 真话基础：
+ * 活动 PowerShell 子进程追踪（Stop 必须真实 cancel）+ 有界动作历史。 */
+const activeChildren = new Set();
+const ACTION_HISTORY_LIMIT = 100;
+
 function ps(script, timeoutMs = 30000) {
   return new Promise((resolve) => {
     const child = spawn('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', script], { windowsHide: true });
+    activeChildren.add(child);
     let out = '', err = '', settled = false;
-    const done = (v) => { if (!settled) { settled = true; clearTimeout(timer); resolve(v); } };
+    const done = (v) => { if (!settled) { settled = true; clearTimeout(timer); activeChildren.delete(child); resolve(v); } };
     // A hung PowerShell child would otherwise wedge the whole Agent loop.
     const timer = setTimeout(() => { try { child.kill(); } catch { /* already gone */ } done({ ok: false, error: 'PowerShell 执行超时' }); }, timeoutMs);
     child.stdout.on('data', d => out += d.toString());
@@ -54,8 +60,59 @@ if (-not $p) { @{ok=$false; error="no window"} | ConvertTo-Json -Compress; exit 
 }
 
 class ComputerManager {
-  async listWindows() {
-    const r = await ps(`Get-Process | Where-Object { $_.MainWindowTitle } | ForEach-Object { @{pid=$_.Id; title=$_.MainWindowTitle} } | ConvertTo-Json -Compress`);
+  constructor() {
+    // B18.4 — 动作历史（有界）：只记录真实发生的 computer 动作
+    this._history = [];
+  }
+
+  recordAction(action, detail = {}, ok = true, error = null) {
+    this._history.unshift({ action, detail, ok, error: error || null, at: new Date().toISOString() });
+    if (this._history.length > ACTION_HISTORY_LIMIT) this._history.length = ACTION_HISTORY_LIMIT;
+    return this._history;
+  }
+
+  history(limit = ACTION_HISTORY_LIMIT) { return this._history.slice(0, limit); }
+
+  activeCount() { return activeChildren.size; }
+
+  /** B18.5 — Stop：真实 kill 所有活动 computer 子进程（绝不只是 UI 状态）。 */
+  stopActive() {
+    let stopped = 0;
+    for (const child of [...activeChildren]) {
+      try { child.kill(); stopped += 1; } catch { /* already gone */ }
+    }
+    activeChildren.clear();
+    this.recordAction('stop', { stopped }, true);
+    return { ok: true, stopped };
+  }
+
+  /**
+   * B18.1 — Availability 真话：AVAILABLE / UNAVAILABLE / UNSUPPORTED / UNKNOWN / ERROR。
+   * 只做真实探测，绝不因「页面存在」或「没报错」就报 AVAILABLE。
+   */
+  async availability() {
+    if (process.platform !== 'win32') {
+      return { status: 'UNSUPPORTED', reason: `platform ${process.platform} not supported`, checkedAt: new Date().toISOString() };
+    }
+    try {
+      const probe = await ps('$PSVersionTable.PSVersion.ToString()', 8000);
+      if (!probe.ok) return { status: 'ERROR', reason: probe.error, checkedAt: new Date().toISOString() };
+      const win = await this.listWindows(6000);
+      if (!win.ok) return { status: 'ERROR', reason: win.error, checkedAt: new Date().toISOString() };
+      return { status: 'AVAILABLE', reason: 'probe ok', checkedAt: new Date().toISOString() };
+    } catch (e) {
+      return { status: 'ERROR', reason: String(e && e.message || e), checkedAt: new Date().toISOString() };
+    }
+  }
+
+  async listWindows(timeoutMs = 30000) {
+    // B18.2 — 窗口标题 + 进程名 + 是否前台（focused），全部来自真实枚举
+    const r = await ps(`Add-Type @"
+using System; using System.Runtime.InteropServices;
+public class FG { [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow(); [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid); }
+"@
+$h = [FG]::GetForegroundWindow(); $fpid = [uint32]0; [FG]::GetWindowThreadProcessId($h, [ref]$fpid) | Out-Null
+Get-Process | Where-Object { $_.MainWindowTitle } | ForEach-Object { @{pid=$_.Id; title=$_.MainWindowTitle; process=$_.ProcessName; focused=($_.Id -eq $fpid)} } | ConvertTo-Json -Compress`, timeoutMs);
     if (!r.ok) return { ok: false, error: r.error };
     let arr = r.data; if (typeof arr === 'string') { try { arr = JSON.parse(arr); } catch { arr = []; } }
     if (!Array.isArray(arr)) arr = arr ? [arr] : [];
@@ -302,18 +359,39 @@ function createComputerTools() {
     computer_get_window_text: async (c, a) => manager.getWindowText(a.title)
   };
   // Normalize to the runtime tool contract: { ok, data } | { ok:false, error }
+  // B18.4 — 每次真实执行都进动作历史（只记动作类型与目标，不记敏感内容）
+  const HISTORY_ACTION = {
+    computer_list_windows: 'list_windows',
+    computer_focus_window: 'focus_window',
+    computer_screenshot: 'screenshot',
+    computer_screenshot_window: 'screenshot',
+    computer_press_keys: 'key',
+    computer_click_at: 'click',
+    computer_get_ui_tree: 'ui_tree',
+    computer_click_control: 'click',
+    computer_type_text: 'input_text',
+    computer_set_control_value: 'input_text',
+    computer_get_window_text: 'read_text'
+  };
   const execs = {};
   for (const [name, fn] of Object.entries(raw)) {
     execs[name] = async (ctx, a) => {
       try {
         const r = await fn(ctx, a || {});
-        if (r && r.ok === false) return { ok: false, error: r.error || { code: 'COMPUTER_ERROR', message: '操作失败' } };
+        if (r && r.ok === false) {
+          manager.recordAction(HISTORY_ACTION[name] || name, { title: a && a.title, x: a && a.x, y: a && a.y }, false, String(r.error && r.error.message || r.error || ''));
+          return { ok: false, error: r.error || { code: 'COMPUTER_ERROR', message: '操作失败' } };
+        }
+        manager.recordAction(HISTORY_ACTION[name] || name, { title: a && a.title, x: a && a.x, y: a && a.y }, true);
         const { ok, ...rest } = (r && typeof r === 'object') ? r : { value: r };
         return { ok: true, data: rest };
-      } catch (e) { return { ok: false, error: { code: 'COMPUTER_ERROR', message: e.message } }; }
+      } catch (e) {
+        manager.recordAction(HISTORY_ACTION[name] || name, { title: a && a.title }, false, e.message);
+        return { ok: false, error: { code: 'COMPUTER_ERROR', message: e.message } };
+      }
     };
   }
   return { defs, execs, manager };
 }
 
-module.exports = { ComputerManager, createComputerTools, manager, escapeSendKeys, psLiteral };
+module.exports = { ComputerManager, createComputerTools, manager, escapeSendKeys, psLiteral, ps };

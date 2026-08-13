@@ -1,6 +1,6 @@
 # Changelog
 
-## v2.9.9 (in progress) — Unified GUI / UX & Product Workbench (Phase B)
+## v2.9.9 — Unified GUI / UX & Product Workbench (Phase B Final)
 
 Phase B is delivered incrementally on top of the frozen v2.9.8 reliability closure. Items below are VERIFIED only where a machine/E2E proof exists; the remainder stays NOT_STARTED rather than claimed.
 
@@ -14,7 +14,31 @@ Phase B is delivered incrementally on top of the frozen v2.9.8 reliability closu
 - B26 Quick Open: Ctrl+P opens a file-search overlay sharing the palette UI; it queries a new bounded `files:listAll` IPC endpoint (walks the project root only, skips `node_modules`/`.git`/build dirs and hidden dirs, capped at 5000 entries so huge repos never block the renderer). Selecting a file opens the existing read-only preview (`files.preview`). The renderer never touches the filesystem directly; the endpoint is guarded to the current project root.
 - E2E proof: `gui-main-path` case 10 switches theme→light + density→compact and asserts persistence; case 11 opens the command palette via Ctrl+Shift+P, filters to 设置, executes it (settings opens, palette closes) and closes via Esc; case 12 creates a temp project, Ctrl+P Quick Open filters `hello-quickopen`, opens the read-only preview modal, then cleans up; full E2E now 68/68. No existing DOM contract broken.
 
-Remaining Phase B (B1 workbench shell/activity bar, B4 file explorer, B5–B9 task workspace/action cards/diff/run center/run tree, B10–B23 permission/workflow/generator/agents/connections/computer/diagnostics/error-center, B27–B30 composer/onboarding/boot, B34–B48 responsive/perf/subscription/status-vocabulary/i18n, B49–B61 expanded E2E + GUI smoke/soak + production scenarios, B62–B72 docs/gates) is NOT_STARTED and will not be claimed until each has observable proof.
+### Phase B Final Productization（本轮，全部 VERIFIED）
+
+- PART A 增量审计（A1-A8）全部重新机器验证：Verification Truth（completed≠PASS）、Child Effective Project Identity、Event Dedupe（bounded）、真实 git mv、Permission Queue（过期不可批准）、Workflow Cancel Race 确定性回归（新增：cancel 挂起窗口内步骤完成仍只记 CANCELLED）、Generator 边界、Inline Child 不入 Agent Library（新增断言）。
+- B15 Connection Manager 3.0：连接状态真话词汇（AVAILABLE/UNAVAILABLE/DEGRADED/UNKNOWN/ERROR，新增 test_state 列）；自定义 Header 值写入即加密、保存后永掩码（修复：旧版 headers_json 明文跨 IPC 的泄露面）；模型来源真话（REMOTE/MANUAL/FALLBACK/UNKNOWN）；默认连接/模型只作 Router 打分偏好（新增 preferredConnectionIds，绝不旁路硬约束）。
+- B16 Model Router Inspector：Run Detail 新增 Model 页签（Requested/Connection/Selected/Wire/Mode/Reasons/Decision ID）；selected≠wire → MODEL MISMATCH + 自动进 Problems；explicit 缺失 FAIL CLOSED；能力证据 TESTED/DECLARED/INFERRED/UNKNOWN 不混淆。
+- B17 Skills/Hooks Workbench：统一高级功能区（库/详情/编辑/Used By）；Hook 编辑器仅能选择受信 handler（内置 observer/context/read-only guard），无任何脚本/HTTP 输入；Skill UI 零授权入口。
+- B18 Computer Workspace 2.0：真实可用性探测词汇、窗口列表（进程/前台）、动作历史（有界）、Stop 真实终止活动子进程；普通编码任务 Computer/Browser exposure 保持 OFF。
+- B19 Terminal Workspace 2.0：活动命令（Command/CWD/Owner/Started/Duration/Status）、有界历史、完整输出 backend 可查、进程树 Cancel；Owner 真话（USER/MAIN_AGENT/CHILD_AGENT/WORKFLOW）；cancelled≠timeout；危险命令即使用户亲自输入也必须确认（backend 双重把关）；Renderer 终端 DOM ≤200KB。
+- B20 Diagnostics Health Center：18 个子系统区段（Status/Reason/Last Checked/Action）+ Runtime Residue 真话 + Quick Self-Test（safe/bounded/0 paid calls）；未知就是 UNKNOWN，禁止 fake READY。
+- B21 Problems Center：持久化问题真源（severity/source/code/runId/status）；稳定问题去重（occurrences 计数）；dismiss≠resolved；renderer window.error/unhandledrejection 统一进 Problems。
+- B22 Recovery UX：启动检测中断 Run/Workflow/Generator，Recovery Center 展示现场；绝无 Resume/Continue execution；Start New Task 只生成新任务草稿（新 runId）；0 provider/tool/mutation replay。
+- B23 页面状态契约：全部管理页 LOADING/EMPTY/READY/ERROR 机器可验标记（data-page-state），ERROR 态带 code+重试。
+- B27/B28 Composer 3.0：上下文 chips（项目/智能体/模型）、草稿按项目+会话持久化（settings 真源，重启恢复）、Idle=Send/Running=Stop；无假附件、无假 mid-run follow-up。
+- B29/B30 Onboarding 2.0 + Boot：五步清单智能检测可跳过、Settings 可重开；启动 Splash 阶段真话（Database→Runtime→Project→Interface），BOOT_FAILED 带重试，绝不白屏。
+- B34/B35：四分辨率矩阵（1280×720 自动收 Inspector，中心工作区不消失）；性能测量钩子 + perf E2E 基线（boot/切页/2000行文件/1000事件/500终端更新，只记机器结果）。
+- B36/B37/B38：导航 Soak 100 轮 listener 稳定、1 事件→1 反应；全局错误边界；docs/GUI_IPC_CONTRACT.md 自动生成（193 通道分类）+ 静态边界测试（renderer 无 node/DB/第二权威/eval/localStorage，孤儿通道=0）。
+- B42-B48：统一破坏性确认（目标/后果/可逆性）；Toast 只用于小事，失败必有持久态；全局产品状态优先级映射（Critical>权限>运行中>锁>降级>就绪）；活动栏徽标（权限/审批/Generator/问题）；UI 持久化白名单（绝不存密钥类数据）。
+- B49-B53：E2E 扩充至 ≥150（operations.spec / product-scenarios.spec / perf.spec）；GUI Production 与 Console Gate、导航 Soak、事件 Soak。
+- B54-B60：产品场景 A-F + Recovery 场景 E2E 真话验证（权限拒绝 0 变更、Generator 保存 0 执行、Recovery 0 replay 等）。
+- B61/B62：docs/GUI_PERFORMANCE_BASELINE.md、GUI_ARCHITECTURE.md、GUI_IPC_CONTRACT.md、GUI_TEST_MATRIX.md、TEST_REPORT 更新。
+- B64-B72：无假功能/无假状态；contextIsolation=true/nodeIntegration=false；XSS 硬化（window.__XSS 恒 undefined）；Secret Leak Gate（DOM/console/Problems/Diagnostics 0 泄露）；架构门禁 DEFAULT_DENY；全测试 0 付费调用、0 网络依赖。
+- B73 极简自明图标：Activity Bar 全部改为 SVG 线性自明图标（对话=气泡/文件=文件夹/运行=播放圆/智能体=机器人/Workflows=节点流/Generator=魔杖/Skills=扳手/电脑=显示器/连接=插头/MCP=服务器/诊断=心电/总览=柱状图/设置=齿轮），无 emoji，一眼即懂；aria-label/title/DOM 契约不变。
+- B74 界面缩放：Ctrl+= 放大 / Ctrl+- 缩小 / Ctrl+0 重置 / Ctrl+滚轮缩放；缩放经统一 applyZoom（CSS zoom）持久化到 settings 并跨重启恢复；命令面板提供放大/缩小/重置命令；应用菜单「视图」提供同等入口（不新增 IPC 面）。
+
+Earlier Phase B increments (B1 workbench shell/activity bar, B4 file explorer, B5–B10 task workspace/action cards/diff/run center/run tree/permission center, B11–B14 workflow/generator/agents/external, B24–B26 palette/shortcuts/quick-open, B31–B33 theme/density/a11y) were delivered and VERIFIED in previous v2.9.9-pre increments; Phase B Final (this round) completes B15–B72 plus B73/B74. Final gate numbers are recorded in docs/TEST_REPORT.md（全量单测 1715 / E2E 152 / 全部重复门禁 PASS）。
 
 ## v2.9.8 — Real Project Reliability
 

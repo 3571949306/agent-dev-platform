@@ -7,6 +7,52 @@
   <link rel="stylesheet" href="/css/style.css">
 </head>
 <body>
+  <!-- v2.9.9 Phase B Final（B30）— Boot Experience：启动阶段真话展示，绝不白屏。
+       内联脚本在 app.js 之前运行；阶段更新与移除由 app.js 完成。 -->
+  <div id="boot-splash">
+    <div class="boot-card">
+      <h2>Agent Dev Platform</h2>
+      <ul class="boot-steps">
+        <li data-boot-stage="database">正在启动 Database…</li>
+        <li data-boot-stage="runtime">正在启动 Runtime…</li>
+        <li data-boot-stage="project">正在加载 Project…</li>
+        <li data-boot-stage="interface">正在加载 Interface…</li>
+      </ul>
+      <div id="boot-error" class="hidden">
+        <div class="err" id="boot-error-msg"></div>
+        <div class="row" style="margin-top:8px">
+          <button class="btn primary" onclick="location.reload()">重试</button>
+        </div>
+      </div>
+    </div>
+  </div>
+  <script>
+    window.__adpBootStage = function (stage) {
+      try {
+        var items = document.querySelectorAll('#boot-splash [data-boot-stage]');
+        var order = ['database', 'runtime', 'project', 'interface'];
+        var idx = order.indexOf(stage);
+        items.forEach(function (li) {
+          var i = order.indexOf(li.getAttribute('data-boot-stage'));
+          if (i < idx) li.className = 'boot-done';
+          else if (i === idx) li.className = 'boot-active';
+        });
+      } catch (e) { /* splash 失败不阻塞启动 */ }
+    };
+    window.__adpBootFailed = function (component, message) {
+      try {
+        var box = document.getElementById('boot-error');
+        var msg = document.getElementById('boot-error-msg');
+        if (box && msg) {
+          msg.textContent = 'BOOT_FAILED · ' + (component || 'UNKNOWN') + '：' + (message || '启动失败');
+          box.classList.remove('hidden');
+        }
+      } catch (e) { /* noop */ }
+    };
+    window.__adpBootStage('database');
+    // B35 — 性能基线：boot 起点标记（机器测量用，非 UI）
+    window.__adpPerfBootStart = (window.performance && performance.now) ? performance.now() : Date.now();
+  </script>
   <div id="app">
     <header id="topbar">
       <div class="brand">
@@ -24,22 +70,26 @@
     <div id="body">
       <!-- v2.9.9 Phase B（B1）— Activity Bar：左侧窄活动栏，替代顶部横向堆叠的 Framework 页面。
            每个按钮用 aria-label + title 保留可达/可测试名称。 -->
+      <!-- v2.9.9 Phase B Final（B73）— 极简自明线性图标（24×24 / stroke=currentColor）：
+           对话=气泡、文件=文件夹、运行=播放圆、智能体=机器人、Workflows=节点流、
+           Generator=魔杖、Skills=扳手工具箱、电脑=显示器、连接=插头、MCP=服务器、
+           诊断=心电监护、总览=柱状图、设置=齿轮。图标只换视觉，aria-label/title/DOM 契约不变。 -->
       <nav id="activity-bar" aria-label="活动栏">
-        <button class="abtn" data-act="chat" aria-label="对话" title="对话"><span class="ab-ico">💬</span></button>
-        <button class="abtn" data-act="files" aria-label="文件" title="文件"><span class="ab-ico">📁</span></button>
-        <button class="abtn" data-act="runs" aria-label="运行" title="运行"><span class="ab-ico">⚡</span></button>
+        <button class="abtn" data-act="chat" aria-label="对话" title="对话"><span class="ab-ico"><svg viewBox="0 0 24 24"><path d="M4 6a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H9.5L5 19.5V16H6a2 2 0 0 1-2-2z"/><path d="M8.5 10h7"/></svg></span></button>
+        <button class="abtn" data-act="files" aria-label="文件" title="文件"><span class="ab-ico"><svg viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4.2l1.8 2H19a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg></span></button>
+        <button class="abtn" data-act="runs" aria-label="运行" title="运行"><span class="ab-ico"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.6"/><path d="M10.2 8.8l5 3.2-5 3.2z"/></svg></span></button>
         <div class="ab-spacer"></div>
-        <button class="abtn" data-page="agents" aria-label="智能体" title="智能体"><span class="ab-ico">🤖</span></button>
-        <button class="abtn" data-page="workflows" aria-label="Workflows" title="Workflows"><span class="ab-ico">🔀</span></button>
-        <button class="abtn" data-page="generator" aria-label="AI Generator" title="AI Generator"><span class="ab-ico">✨</span></button>
-        <button class="abtn" data-page="skills" aria-label="Skills" title="Skills"><span class="ab-ico">🧠</span></button>
-        <button class="abtn" data-act="computer" aria-label="电脑控制" title="电脑控制"><span class="ab-ico">🖥️</span></button>
-        <button class="abtn" data-page="connections" aria-label="API 连接" title="API 连接"><span class="ab-ico">🔌</span></button>
-        <button class="abtn" data-page="mcp" aria-label="MCP" title="MCP"><span class="ab-ico">🧩</span></button>
-        <button class="abtn" data-page="diagnostics" aria-label="能力诊断" title="能力诊断"><span class="ab-ico">🩺</span></button>
-        <button class="abtn" data-page="dashboard" aria-label="总览" title="总览"><span class="ab-ico">📊</span></button>
+        <button class="abtn" data-page="agents" aria-label="智能体" title="智能体"><span class="ab-ico"><svg viewBox="0 0 24 24"><path d="M12 3.5v2.5"/><circle cx="12" cy="3" r="0.6"/><rect x="5.5" y="7.5" width="13" height="10" rx="2.5"/><path d="M9.3 12.2h.01M14.7 12.2h.01"/><path d="M9.5 15h5"/></svg></span></button>
+        <button class="abtn" data-page="workflows" aria-label="Workflows" title="Workflows"><span class="ab-ico"><svg viewBox="0 0 24 24"><circle cx="6" cy="5.5" r="2.2"/><circle cx="18" cy="12" r="2.2"/><circle cx="6" cy="18.5" r="2.2"/><path d="M8.2 5.5H14a3 3 0 0 1 3 3v1.3"/><path d="M15.8 12H10a3 3 0 0 0-3 3v1.3"/></svg></span></button>
+        <button class="abtn" data-page="generator" aria-label="AI Generator" title="AI Generator"><span class="ab-ico"><svg viewBox="0 0 24 24"><path d="M5 19L14.5 9.5"/><path d="M13 7l4 4"/><path d="M17.5 3.5l.7 1.8 1.8.7-1.8.7-.7 1.8-.7-1.8-1.8-.7 1.8-.7z"/></svg></span></button>
+        <button class="abtn" data-page="skills" aria-label="Skills" title="Skills / Hooks"><span class="ab-ico"><svg viewBox="0 0 24 24"><path d="M14.9 6.2a3.6 3.6 0 0 0-4.8 4.8L4.5 16.6a1.9 1.9 0 0 0 2.9 2.9l5.6-5.6a3.6 3.6 0 0 0 4.8-4.8l-2.3 2.3-2.5-2.5z"/></svg></span></button>
+        <button class="abtn" data-act="computer" aria-label="电脑控制" title="电脑控制"><span class="ab-ico"><svg viewBox="0 0 24 24"><rect x="3" y="4.5" width="18" height="12" rx="1.5"/><path d="M9 20h6M12 16.5V20"/></svg></span></button>
+        <button class="abtn" data-page="connections" aria-label="API 连接" title="API 连接"><span class="ab-ico"><svg viewBox="0 0 24 24"><path d="M9 3.5V8M15 3.5V8"/><path d="M7 8h10v2.2a5 5 0 0 1-5 5 5 5 0 0 1-5-5z"/><path d="M12 15.2V18a2.5 2.5 0 0 1-2.5 2.5H7"/></svg></span></button>
+        <button class="abtn" data-page="mcp" aria-label="MCP" title="MCP 服务器"><span class="ab-ico"><svg viewBox="0 0 24 24"><rect x="4" y="4.5" width="16" height="6" rx="1.2"/><rect x="4" y="13.5" width="16" height="6" rx="1.2"/><path d="M7.5 7.5h.01M7.5 16.5h.01"/></svg></span></button>
+        <button class="abtn" data-page="diagnostics" aria-label="能力诊断" title="能力诊断 / 健康中心"><span class="ab-ico"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.6"/><path d="M6.5 12h2.4l1.6-3.2 2.6 6.4 1.6-3.2h2.4"/></svg></span></button>
+        <button class="abtn" data-page="dashboard" aria-label="总览" title="总览"><span class="ab-ico"><svg viewBox="0 0 24 24"><path d="M5.5 20v-7M12 20V5.5M18.5 20v-10"/><path d="M3.5 20h17"/></svg></span></button>
         <div class="ab-spacer"></div>
-        <button class="abtn" data-page="settings" aria-label="设置" title="设置"><span class="ab-ico">⚙️</span></button>
+        <button class="abtn" data-page="settings" aria-label="设置" title="设置"><span class="ab-ico"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3.1"/><path d="M12 2.8v2.6M12 18.6v2.6M2.8 12h2.6M18.6 12h2.6M5.5 5.5l1.9 1.9M16.6 16.6l1.9 1.9M18.5 5.5l-1.9 1.9M7.4 16.6l-1.9 1.9"/></svg></span></button>
       </nav>
 
       <aside id="left">
@@ -73,6 +123,7 @@
             </div>
             <div id="messages"></div>
             <div id="composer">
+              <div id="composer-chips" class="composer-chips"></div>
               <textarea id="input" placeholder="输入自然语言需求，例如：分析这个项目为什么构建失败并修复…（Enter 发送，Shift+Enter 换行）"></textarea>
               <div class="composer-actions">
                 <span class="hint" id="composer-hint"></span>

@@ -53,10 +53,59 @@ function normalizeModels(models) {
   }).filter(Boolean);
 }
 
+/* v2.9.9 Phase B Final（B15.3/B15.4）— Custom Header Secret Rules。
+ * Header 值与 API Key 同等对待：写入即加密，读取只给掩码，
+ * 解密值只在 main 进程 getDecrypted 边界内出现，绝不进入 Renderer。 */
+const HEADER_MASK = '••••••••';
+
+/** 写入边界：明文 header 值 → 加密存储（空值直接丢弃，不保留空名条目）。 */
+function encryptHeaderValues(headers = {}) {
+  const out = {};
+  for (const [k, v] of Object.entries(headers || {})) {
+    if (v === null || v === undefined || v === '') continue;
+    out[k] = sec.encrypt(String(v));
+  }
+  return out;
+}
+
+/** 读取边界（存储态 → 掩码）。旧版明文值同样只暴露掩码。 */
+function maskHeaderValues(stored = {}) {
+  const out = {};
+  for (const [k, v] of Object.entries(stored || {})) out[k] = v ? HEADER_MASK : '';
+  return out;
+}
+
+/** 解密边界（仅 main 进程）。旧版明文值（无 enc:/obf: 前缀）原样可读；空值丢弃。 */
+function decryptHeaderValues(stored = {}) {
+  const out = {};
+  for (const [k, v] of Object.entries(stored || {})) { if (v) out[k] = sec.decrypt(String(v)); }
+  return out;
+}
+
+/** Renderer-safe 投影：绝不携带 api_key_enc / headers_json / 明文 header 值。 */
+function connectionPublic(r) {
+  const stored = p(r.headers_json, {});
+  const headerNames = Object.keys(stored);
+  return {
+    id: r.id, name: r.name, provider: r.provider, base_url: r.base_url,
+    api_key_masked: r.api_key_masked || '',
+    has_key: !!r.api_key_masked,
+    headers: maskHeaderValues(stored),
+    header_names: headerNames,
+    has_custom_headers: headerNames.some(k => stored[k]),
+    models: normalizeModels(p(r.models_json, [])),
+    tested: r.tested, tested_at: r.tested_at || null,
+    test_state: r.test_state || '',
+    last_error: r.last_error || '', latency_ms: r.latency_ms ?? null,
+    enabled: r.enabled, import_source: r.import_source || '', import_source_path: r.import_source_path || '',
+    created_at: r.created_at, updated_at: r.updated_at
+  };
+}
+
 const connections = {
   list() {
-    return db().prepare('SELECT id,name,provider,base_url,api_key_masked,headers_json,models_json,tested,tested_at,last_error,latency_ms,enabled,import_source,import_source_path,created_at,updated_at FROM api_connections ORDER BY created_at').all()
-      .map(r => ({ ...r, headers: p(r.headers_json, {}), models: normalizeModels(p(r.models_json, [])), has_key: !!r.api_key_masked }));
+    return db().prepare('SELECT * FROM api_connections ORDER BY created_at').all()
+      .map(connectionPublic);
   },
   /** Public, secret-free projection consumed by ModelCatalog. Header values never cross this boundary. */
   listForModelRouting() {
@@ -76,13 +125,13 @@ const connections = {
   get(id) {
     const r = db().prepare('SELECT * FROM api_connections WHERE id=?').get(id);
     if (!r) return null;
-    return { ...r, headers: p(r.headers_json, {}), models: normalizeModels(p(r.models_json, [])), has_key: !!r.api_key_masked };
+    return connectionPublic(r);
   },
-  /** returns connection with decrypted key (main process only) */
+  /** returns connection with decrypted key + header values (main process only) */
   getDecrypted(id) {
     const r = db().prepare('SELECT * FROM api_connections WHERE id=?').get(id);
     if (!r) return null;
-    return { ...r, api_key: sec.decrypt(r.api_key_enc), headers: p(r.headers_json, {}), models: normalizeModels(p(r.models_json, [])) };
+    return { ...r, api_key: sec.decrypt(r.api_key_enc), headers: decryptHeaderValues(p(r.headers_json, {})), models: normalizeModels(p(r.models_json, [])) };
   },
   create(body) {
     const id = uuid(); const t = now();
@@ -90,16 +139,28 @@ const connections = {
     db().prepare(`INSERT INTO api_connections (id,name,provider,base_url,api_key_enc,api_key_masked,headers_json,models_json,tested,enabled,import_source,import_source_path,created_at,updated_at)
       VALUES (?,?,?,?,?,?,?,?,0,?,?,?,?,?)`)
       .run(id, body.name || '新连接', body.provider || 'openai', body.base_url || 'https://api.openai.com/v1',
-        sec.encrypt(key), sec.mask(key), j(body.headers || {}), j(body.models || []),
+        sec.encrypt(key), sec.mask(key), j(encryptHeaderValues(body.headers || {})), j(body.models || []),
         body.enabled === false ? 0 : 1, body.import_source || '', body.import_source_path || '', t, t);
     return connections.get(id);
   },
   update(id, body) {
-    const cur = connections.get(id); if (!cur) return null;
+    const cur = db().prepare('SELECT * FROM api_connections WHERE id=?').get(id); if (!cur) return null;
     const name = body.name ?? cur.name;
     const provider = body.provider ?? cur.provider;
     const baseUrl = body.base_url ?? cur.base_url;
-    const headers = body.headers ? j(body.headers) : cur.headers_json;
+    // B15.4：header 值掩码占位（HEADER_MASK）= 保留已存密文；空值 = 清空；其余 = 新值加密。
+    let headersJson = cur.headers_json;
+    if (body.headers !== undefined) {
+      const stored = p(cur.headers_json, {});
+      const next = {};
+      for (const [k, v] of Object.entries(body.headers || {})) {
+        if (!k) continue;
+        if (v === HEADER_MASK) { if (stored[k]) next[k] = stored[k]; }
+        else if (v === null || v === undefined || v === '') { /* 空值 = 删除该 header */ }
+        else next[k] = sec.encrypt(String(v));
+      }
+      headersJson = j(next);
+    }
     const models = body.models ? j(body.models) : cur.models_json;
     let enc = cur.api_key_enc, masked = cur.api_key_masked;
     if (body.api_key !== undefined) {
@@ -114,13 +175,15 @@ const connections = {
     const importSource = body.import_source ?? cur.import_source;
     const importSourcePath = body.import_source_path ?? cur.import_source_path;
     db().prepare(`UPDATE api_connections SET name=?,provider=?,base_url=?,api_key_enc=?,api_key_masked=?,headers_json=?,models_json=?,tested=?,tested_at=?,last_error=?,latency_ms=?,enabled=?,import_source=?,import_source_path=?,updated_at=? WHERE id=?`)
-      .run(name, provider, baseUrl, enc, masked, headers, models, tested ? 1 : 0, testedAt, lastError, latency, enabled, importSource, importSourcePath, now(), id);
+      .run(name, provider, baseUrl, enc, masked, headersJson, models, tested ? 1 : 0, testedAt, lastError, latency, enabled, importSource, importSourcePath, now(), id);
     return connections.get(id);
   },
-  setTestResult(id, { ok, error, latency }) {
+  /** B15.1/B15.5 — 测试真话：kind 只能是 'ok'|'failed'|'error'，状态词汇由真实结果决定。 */
+  setTestResult(id, { ok, error, latency, kind }) {
     const cur = connections.get(id); if (!cur) return null;
-    db().prepare('UPDATE api_connections SET tested=?,tested_at=?,last_error=?,latency_ms=? WHERE id=?')
-      .run(ok ? 1 : 0, ok ? now() : cur.tested_at, error || '', latency ?? null, id);
+    const state = kind === 'error' ? 'error' : (ok ? 'ok' : 'failed');
+    db().prepare('UPDATE api_connections SET tested=?,tested_at=?,last_error=?,latency_ms=?,test_state=? WHERE id=?')
+      .run(ok ? 1 : 0, ok ? now() : cur.tested_at, error || '', latency ?? null, state, id);
     return connections.get(id);
   },
   setModels(id, models) {
@@ -618,6 +681,12 @@ const modelRouteDecisions = {
         value.outputTokens ?? null, value.errorCode || null, now(), id);
     return result.changes > 0;
   },
+  /** B16.3 — Wire Truth：记录请求模型与真实上线模型（selected != wire 由调用方裁决）。 */
+  recordWireModel(id, { requested = null, actual = null } = {}) {
+    const result = db().prepare('UPDATE model_route_decisions SET requested_model=?,actual_model=?,updated_at=? WHERE id=?')
+      .run(requested || null, actual || null, now(), id);
+    return result.changes > 0;
+  },
   bindRunIdentity(id, identity = {}) {
     if (!identity.runId || typeof identity.runId !== 'string') return false;
     const result = db().prepare(`UPDATE model_route_decisions
@@ -634,6 +703,52 @@ const settings = {
   get(key, def) { const r = db().prepare('SELECT value_json FROM settings WHERE key=?').get(key); return r ? p(r.value_json, def) : def; },
   set(key, value) { db().prepare('INSERT INTO settings (key,value_json) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value_json=?').run(key, j(value), j(value)); return value; },
   all() { const rows = db().prepare('SELECT key,value_json FROM settings').all(); const o = {}; rows.forEach(r => o[r.key] = p(r.value_json, null)); return o; }
+};
+
+// ---------- problems (v2.9.9 Phase B Final B21) ----------
+function problemRow(r) {
+  return r ? { ...r, related: p(r.related_json, {}) } : null;
+}
+const problems = {
+  create(input) {
+    const id = uuid(); const t = now();
+    db().prepare(`INSERT INTO problems (id,stable_key,time,last_seen_at,severity,source,code,message,run_id,project_id,related_json,status,occur_count,resolved_at,created_at,updated_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,1,NULL,?,?)`)
+      .run(id, input.stableKey, t, t, input.severity, input.source, input.code, input.message || '',
+        input.runId || null, input.projectId || null, j(input.related || {}), input.status || 'ACTIVE', t, t);
+    return problemRow(db().prepare('SELECT * FROM problems WHERE id=?').get(id));
+  },
+  /** 同一稳定问题的重复上报：只累加计数与刷新 last_seen，绝不新建刷屏条目。 */
+  reoccur(id, message) {
+    db().prepare('UPDATE problems SET occur_count=occur_count+1,last_seen_at=?,message=?,updated_at=? WHERE id=?')
+      .run(now(), message ?? db().prepare('SELECT message FROM problems WHERE id=?').get(id)?.message ?? '', now(), id);
+    return problemRow(db().prepare('SELECT * FROM problems WHERE id=?').get(id));
+  },
+  findOpenByStableKey(stableKey) {
+    const r = db().prepare("SELECT * FROM problems WHERE stable_key=? AND status IN ('ACTIVE','DISMISSED') ORDER BY created_at DESC LIMIT 1").get(stableKey);
+    return problemRow(r);
+  },
+  setStatus(id, status) {
+    const resolvedAt = status === 'RESOLVED' ? now() : null;
+    db().prepare('UPDATE problems SET status=?,resolved_at=?,updated_at=? WHERE id=?').run(status, resolvedAt, now(), id);
+    return problemRow(db().prepare('SELECT * FROM problems WHERE id=?').get(id));
+  },
+  get(id) { return problemRow(db().prepare('SELECT * FROM problems WHERE id=?').get(id)); },
+  list({ status = null, limit = 200 } = {}) {
+    const rows = status
+      ? db().prepare('SELECT * FROM problems WHERE status=? ORDER BY last_seen_at DESC LIMIT ?').all(status, limit)
+      : db().prepare("SELECT * FROM problems WHERE status IN ('ACTIVE','DISMISSED') ORDER BY last_seen_at DESC LIMIT ?").all(limit);
+    return rows.map(problemRow);
+  },
+  countActive() {
+    return db().prepare("SELECT COUNT(*) AS n FROM problems WHERE status='ACTIVE'").get().n;
+  },
+  /** 有界保留：RESOLVED 只保留最近 N 条，避免无限增长。 */
+  pruneResolved(keep = 200) {
+    db().prepare(`DELETE FROM problems WHERE status='RESOLVED' AND id NOT IN (
+      SELECT id FROM problems WHERE status='RESOLVED' ORDER BY resolved_at DESC LIMIT ?)`).run(keep);
+    return true;
+  }
 };
 
 // v2.7.0 — Agent Hub preferences（持久化在 settings 表的 agent_hub_prefs 键）
@@ -1245,7 +1360,7 @@ function migrateFromJson(jsonPath) {
       db().prepare(`INSERT INTO api_connections (id,name,provider,base_url,api_key_enc,api_key_masked,headers_json,models_json,tested,tested_at,created_at,updated_at)
         VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`)
         .run(id, c.name || '连接', c.provider || 'openai', c.base_url || 'https://api.openai.com/v1',
-          sec.encrypt(c.api_key || ''), sec.mask(c.api_key || ''), j(c.headers || {}), j(c.models || []), c.tested ? 1 : 0, c.tested_at || null, t, t);
+          sec.encrypt(c.api_key || ''), sec.mask(c.api_key || ''), j(encryptHeaderValues(c.headers || {})), j(c.models || []), c.tested ? 1 : 0, c.tested_at || null, t, t);
       c._newId = id;
     });
     // prompts
@@ -1290,7 +1405,7 @@ module.exports = {
   projects, connections, models, prompts, skills, agents, externalAgents,
   conversations, messages, events, tasks, runs, agentMessages, tools, mcpServers,
   memories, checkpoints, fileChanges, usage, modelCalls, permissionGrants, audit, permissionDecisions, settings, agentPrefs, extAgentConfigs,
-  externalAgentSessions, externalAgentAuthStates, agentDefinitions, agentTemplates, modelRouteDecisions,
+  externalAgentSessions, externalAgentAuthStates, agentDefinitions, agentTemplates, modelRouteDecisions, problems,
   skillDefinitions, hookDefinitions, hookInvocations,
   workflowDefinitions, workflowExecutions, workflowStepExecutions, workflowAudit,
   generatorDrafts, generatorAudit,

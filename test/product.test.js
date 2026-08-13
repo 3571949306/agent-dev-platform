@@ -71,7 +71,15 @@ test('cold-start recovery terminates stale Agent, Workflow, approval, and Genera
 
     const newManager = new RunManager({ store });
     const recovered = recoverInterruptedRuntime({ store, runManager: newManager, now: () => '2026-08-11T00:00:00.000Z' });
-    assert.deepStrictEqual(recovered, { runs: 1, workflows: 1, workflowSteps: 1, generatorDrafts: 1 });
+    assert.deepStrictEqual(
+      { runs: recovered.runs, workflows: recovered.workflows, workflowSteps: recovered.workflowSteps, generatorDrafts: recovered.generatorDrafts },
+      { runs: 1, workflows: 1, workflowSteps: 1, generatorDrafts: 1 });
+    // B22 — 快照必须在标记终态之前采集到真实阶段
+    assert.strictEqual(recovered.snapshot.interruptedRuns.length, 1);
+    assert.strictEqual(recovered.snapshot.interruptedRuns[0].runId, run.id);
+    assert.strictEqual(recovered.snapshot.interruptedRuns[0].lastStage, 'requesting_model');
+    assert.strictEqual(recovered.snapshot.interruptedWorkflows.length, 1);
+    assert.strictEqual(recovered.snapshot.interruptedDrafts.length, 1);
     assert.strictEqual(store.runs.get(run.id).status, 'interrupted');
     assert.strictEqual(store.workflowExecutions.get('workflow-stale-run').status, 'FAILED');
     assert.strictEqual(store.workflowExecutions.get('workflow-stale-run').errorCode, 'WORKFLOW_INTERRUPTED');

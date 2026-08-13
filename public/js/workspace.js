@@ -119,16 +119,77 @@ async function renderRunDetail(run) {
   const runId = run.id || run.runId;
   const [events, children] = await Promise.all([api.runEvents(runId).catch(() => []), api.runChildren(runId).catch(() => [])]);
   const box = $('#workspace-run-view');
-  const tabs = ['Overview', 'Timeline', 'Children', 'Tools', 'Files', 'Tests', 'Audit'];
+  // v2.9.9 Phase B Final（B16）— Model Routing 页签：这次到底用了哪个模型
+  const tabs = ['Overview', 'Timeline', 'Children', 'Tools', 'Files', 'Tests', 'Model', 'Audit'];
   box.innerHTML = `<div class="run-detail-head"><div><strong>${esc(run.goal || 'Run')}</strong><div class="mono muted">${esc(runId)}</div></div><span class="chip">${esc(statusLabel(run.status))}</span></div><div class="run-detail-tabs">${tabs.map((name, i) => `<button class="run-detail-tab ${i === 0 ? 'active' : ''}" data-run-detail="${name.toLowerCase()}">${name}</button>`).join('')}</div><div id="run-detail-body"></div>`;
   const data = { run, events, children };
-  const show = name => {
+  const show = async (name) => {
     box.querySelectorAll('.run-detail-tab').forEach(button => button.classList.toggle('active', button.dataset.runDetail === name));
+    if (name === 'model') {
+      $('#run-detail-body').innerHTML = '<div class="empty">加载中…</div>';
+      $('#run-detail-body').innerHTML = await renderModelRoutingSection(runId);
+      return;
+    }
     $('#run-detail-body').innerHTML = renderRunSection(name, data);
     $('#run-detail-body').querySelectorAll('[data-child-run]').forEach(button => button.onclick = () => openRun(button.dataset.childRun));
   };
   box.querySelectorAll('.run-detail-tab').forEach(button => button.onclick = () => show(button.dataset.runDetail));
-  show('overview');
+  await show('overview');
+}
+
+/* ---------------- B16 Model Router Inspector ---------------- */
+const ROUTE_REASON_SIMPLE = {
+  HIGHEST_DETERMINISTIC_SCORE: '自动选择：确定性打分最高',
+  EXPLICIT_EXACT_MATCH: '指定模型：精确匹配',
+  HARD_CONSTRAINTS_SATISFIED: '满足全部硬性约束',
+  TOOL_CAPABILITY_REQUIRED: '满足工具调用要求',
+  CAPABILITY_REQUIRED_TOOLS: '满足工具调用要求',
+  COST_COMPARISON_SKIPPED_MIXED_BASIS: '价格单位不一致，跳过成本比较'
+};
+const CAPABILITY_EVIDENCE_LABEL = { tested: 'TESTED', declared: 'DECLARED', inferred: 'INFERRED', unknown: 'UNKNOWN' };
+
+function routeSimpleReason(decision) {
+  const codes = ((decision && decision.reasons) || []).map(r => r.code || r);
+  const toolRelated = codes.some(c => /TOOL/.test(String(c)));
+  if (decision && decision.mode === 'explicit') return '指定模型：精确匹配';
+  if (toolRelated) return '自动选择：满足工具调用要求';
+  const first = codes.find(c => ROUTE_REASON_SIMPLE[c]);
+  return first ? ROUTE_REASON_SIMPLE[first] : '自动选择：确定性打分最高';
+}
+
+async function renderModelRoutingSection(runId) {
+  let routing = null;
+  try { routing = await api.runModelRouting(runId); } catch (e) { return `<div class="empty">无法加载路由信息：${esc(e.message)}</div>`; }
+  if (!routing || !routing.decision) return '<div class="empty">本次 Run 没有 Model Router 决策记录（未经过 Router 的旧链路或尚未发起模型调用）。</div>';
+  const d = routing.decision;
+  const wire = routing.wire || {};
+  const wireUnknown = wire.actual === null || wire.actual === undefined;
+  const mismatch = wire.equal === false;
+  const caps = routing.capabilities || {};
+  const capBadge = (key, label) => {
+    const cap = caps[key];
+    if (!cap || cap.value === undefined || cap.value === null) return '';
+    const evidence = CAPABILITY_EVIDENCE_LABEL[cap.state] || 'UNKNOWN';
+    const on = cap.value === true;
+    return `<span class="chip ${on ? 'ok' : ''} small" title="证据：${evidence}${cap.source ? ' · ' + esc(cap.source) : ''}">${esc(label)}${on ? ' ✓' : ' ✗'} · ${evidence}</span> `;
+  };
+  return `
+  <table class="tbl kv"><tbody>
+    <tr><td>Requested</td><td>${esc(d.requested || 'Auto')}</td></tr>
+    <tr><td>Route Mode</td><td>${esc(d.mode)}</td></tr>
+    <tr><td>Connection</td><td class="mono">${esc(d.connectionId || '—')}</td></tr>
+    <tr><td>Selected Model</td><td class="mono">${esc(d.selectedModel || '—')}</td></tr>
+    <tr><td>Actual Wire Model</td><td class="mono">${wireUnknown ? '<span class="muted">尚未产生真实调用</span>' : esc(wire.actual)}
+      ${mismatch ? ' <span class="chip bad">MODEL MISMATCH</span>' : (wire.equal === true ? ' <span class="chip ok">SELECTED == WIRE</span>' : '')}</td></tr>
+    <tr><td>Capabilities</td><td>${capBadge('text', 'Text')}${capBadge('vision', 'Vision')}${capBadge('nativeTools', 'Tools')}${capBadge('contextWindow', 'Context')}${Object.keys(caps).length ? '' : '<span class="muted">尚未探测（UNKNOWN）</span>'}</td></tr>
+    <tr><td>Route Reason</td><td>${esc(routeSimpleReason(d))}</td></tr>
+    <tr><td>Decision ID</td><td class="mono small">${esc(d.decisionId)}</td></tr>
+    ${d.errorCode ? `<tr><td>Error</td><td><span class="chip bad">${esc(d.errorCode)}</span> ${d.mode === 'explicit' ? '<span class="muted small">（显式指定模型缺失时 FAIL CLOSED，绝不回退）</span>' : ''}</td></tr>` : ''}
+  </tbody></table>
+  <details class="route-advanced"><summary>Advanced（候选 / 硬过滤 / 打分）</summary>
+    <div class="muted small">Score: ${d.score === null || d.score === undefined ? '—' : d.score} · Reasons: ${(d.reasons || []).map(r => esc(r.code || r)).join(', ') || '—'}</div>
+    <pre class="small">${esc(truncate(JSON.stringify({ requirements: d.requirements, rejectedCandidates: d.rejectedCandidates }, null, 2), 4000))}</pre>
+  </details>`;
 }
 
 function renderRunSection(name, { run, events, children }) {
@@ -225,6 +286,20 @@ async function initLayout() {
   $('#inspector-collapse').onclick = () => toggleInspector();
   window.addEventListener('layout-toggle-sidebar', () => toggleSidebar());
   window.addEventListener('layout-toggle-bottom', event => toggleBottom(event.detail && event.detail.tab));
+  // B34 — 小桌面（≤ 1366 宽）自动收起 Inspector，中心工作区绝不消失；
+  // 用户可手动重开。只自动收起，绝不自动展开（不代替用户决策）。
+  let resizeTimer = null;
+  window.addEventListener('resize', () => {
+    if (resizeTimer) clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(() => {
+      const right = $('#right');
+      if (window.innerWidth <= 1366 && right && !right.classList.contains('hidden')) {
+        layout.inspectorCollapsed = true;
+        applyLayout(layout);
+        saveLayout();
+      }
+    }, 200);
+  });
 }
 
 let layout = {};

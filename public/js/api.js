@@ -53,6 +53,9 @@ export const api = {
   connRemove: (id) => call('connections:remove', id),
   connTest: (id) => call('connections:test', id),
   connModels: (id) => call('connections:models', id),
+  // v2.9.9 Phase B Final（B15.9）— 默认连接/模型（偏好，绝不旁路 Model Router）
+  connGetDefaults: () => call('connections:getDefaults'),
+  connSetDefault: (connectionId, modelId) => call('connections:setDefault', connectionId, modelId),
 
   // onboarding (v2.4.0 Smart API)
   onboardingPresets: () => call('onboarding:presets'),
@@ -83,6 +86,27 @@ export const api = {
   diagModelCalls: (limit) => call('diagnostics:modelCalls', limit),
   diagMismatches: () => call('diagnostics:mismatches'),
   diagProduct: (options) => call('diagnostics:product', options),
+  // v2.9.9 Phase B Final（B20.2）— 产品自检（safe / bounded / 0 paid calls）
+  diagSelfTest: () => call('diagnostics:selfTest'),
+
+  // v2.9.9 Phase B Final（B22）— Recovery Center（无 Resume Runtime，绝无复活旧 Run）
+  recoverySummary: () => call('recovery:summary'),
+  recoveryDismiss: () => call('recovery:dismiss'),
+  recoveryNewTaskDraft: (runId) => call('recovery:newTaskDraft', runId),
+
+  // v2.9.9 Phase B Final（B29）— Onboarding 2.0（智能检测，可跳过，可重开）
+  onboardingStatus: () => call('onboarding:status'),
+  onboardingComplete: (skipped) => call('onboarding:complete', skipped),
+
+  // v2.9.9 Phase B Final（B21）— Problems Center（持久化真源，dismiss != resolved）
+  problemsList: (options) => call('problems:list', options),
+  problemsCountActive: () => call('problems:countActive'),
+  problemsDismiss: (id) => call('problems:dismiss', id),
+  problemsResolve: (id) => call('problems:resolve', id),
+  problemsReport: (input) => call('problems:report', input),
+
+  // v2.9.9 Phase B Final（B16）— Run Model Routing Inspector
+  runModelRouting: (runId) => call('runs:modelRouting', runId),
 
   // prompts / skills
   prompts: () => call('prompts:list'),
@@ -110,6 +134,10 @@ export const api = {
   hookEnable: (id) => call('hook:enable', id),
   hookDisable: (id) => call('hook:disable', id),
   hookAudit: (limit) => call('hook:audit:list', limit),
+  // v2.9.9 Phase B Final（B17.6）— 受信 handler 只能选择，不能输入脚本
+  hookHandlersList: () => call('hook:handlers:list'),
+  // v2.9.9 Phase B Final（B17.1/B17.4）— Skill/Hook Used By
+  artifactUsage: () => call('artifactUsage'),
 
   // v2.9.5 Workflow Engine
   workflowList: () => call('workflow:list'),
@@ -203,11 +231,21 @@ export const api = {
   memories: (layer, projectId) => call('memories:list', layer, projectId),
 
   // terminal / computer / browser
-  termRun: (cmd) => call('terminal:run', cmd),
+  termRun: (cmd, opts) => call('terminal:run', cmd, opts),
   termCancel: (id) => call('terminal:cancel', id),
+  // v2.9.9 Phase B Final（B19）— Terminal Workspace 2.0
+  termRiskCheck: (cmd) => call('terminal:riskCheck', cmd),
+  termActive: () => call('terminal:active'),
+  termHistory: (limit) => call('terminal:history', limit),
+  termOutput: (runId) => call('terminal:output', runId),
   computerWindows: () => call('computer:windows'),
   computerShot: () => call('computer:screenshot'),
   computerFocus: (t) => call('computer:focus', t),
+  // v2.9.9 Phase B Final（B18）— Computer Workspace 2.0
+  computerAvailability: () => call('computer:availability'),
+  computerHistory: (limit) => call('computer:history', limit),
+  computerActive: () => call('computer:active'),
+  computerStop: () => call('computer:stop'),
   browserStatus: () => call('browser:status'),
 
   // v2.7.0 — Agent Integration Hub

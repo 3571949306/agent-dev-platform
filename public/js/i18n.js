@@ -220,12 +220,12 @@ export const ZH = {
     run_timeout: '运行超时',
     run_interrupted: '运行已中断',
   },
-  // 模型来源
+  // 模型来源（B15.6 真话词汇：REMOTE / MANUAL / FALLBACK / UNKNOWN）
   source: {
     remote: 'API 获取',
     manual: '手动添加',
-    preset: '内置推荐',
-    cached: '本地缓存',
+    preset: '回退（内置推荐）',
+    cached: '未知（本地缓存）',
   },
   // 能力
   cap: {
@@ -276,6 +276,23 @@ export const ZH = {
     UNAVAILABLE: '不可用',
     UNKNOWN: '未知',
     ERROR: '出错',
+  },
+  // v2.9.9 Phase B Final（B15.1）— 连接状态词汇：只来自真实测试结果，未知就是未知
+  connStatus: {
+    AVAILABLE: '可用',
+    UNAVAILABLE: '不可用',
+    DEGRADED: '已降级',
+    UNKNOWN: '未测试',
+    ERROR: '测试异常',
+    testing: '测试中',
+  },
+  // v2.9.9 Phase B Final（B15.1）— 认证模式：只描述存储形态，不代表凭据有效
+  connAuthMode: {
+    API_KEY: 'API Key',
+    API_KEY_HEADERS: 'API Key + 请求头',
+    CUSTOM_HEADERS: '自定义请求头',
+    NO_AUTH: '无认证',
+    UNKNOWN: '未知',
   },
 };
 

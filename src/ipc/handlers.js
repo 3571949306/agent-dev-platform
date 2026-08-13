@@ -26,6 +26,8 @@ const { RunManager } = require('../agent/runManager');
 // v2.9.9 Phase B PART A（A1/A2）— Verification Truth 与 Effective Project Identity 唯一裁决源
 const { resolveRunVerificationStatus } = require('../agent/runVerification');
 const { resolveRunProjectId } = require('../agent/runProjectIdentity');
+// v2.9.9 Phase B Final（B15.1）— 连接状态词汇唯一推导源（绝不猜测）
+const { resolveConnectionStatus, resolveAuthMode } = require('../services/connectionStatus');
 // v2.6.0 — Main Agent Runtime（自主编码闭环）。独立 IPC 模块，避免 handlers.js 膨胀。
 const mainAgentIpc = require('./mainAgent');
 // v2.7.0 — Agent Integration Hub
@@ -187,7 +189,11 @@ const runtimeModelResolver = createRuntimeModelResolver({
       model: selection.selected.modelId,
       max_tokens: baseAgent.max_tokens || 4096
     };
-    return createProviderModelAdapter({ buildProvider, agent, resolveModel: resolveModelFor, timeoutMs: context.timeoutMs || 120000 });
+    // B16.3 — Wire Truth 接线：selected model 与真实上线模型对照，mismatch 进 Problems
+    return createProviderModelAdapter({
+      buildProvider, agent, resolveModel: resolveModelFor, timeoutMs: context.timeoutMs || 120000,
+      onModelOutcome: (outcome) => reportModelOutcome(selection.decisionId, outcome)
+    });
   }
 });
 const dynamicAgentFactory = createAgentFactory({
@@ -222,6 +228,25 @@ const hookEngine = createHookEngine({
   auditStore: store.hookInvocations
 });
 setHookRuntime(hookEngine);
+
+// v2.9.9 Phase B Final（B17.6）— 平台内置受信 handlers：
+// 只能观察 / 阻断 / 追加有界上下文，绝不授予任何能力或权限。
+// Hook 编辑器只允许从这些受信 handlerId 中选择（无 JS/eval/shell/HTTP 输入）。
+hookEngine.handlerRegistry.register('builtin.observer.event-log', (payload) => ({
+  annotations: { observedEvent: payload.event, hookId: payload.hookId, runId: payload.runId, at: new Date().toISOString() }
+}));
+hookEngine.handlerRegistry.register('builtin.context.utc-timestamp', () => ({
+  context: `当前 UTC 时间：${new Date().toISOString()}（内置 Hook 注入，仅供参考）`
+}));
+hookEngine.handlerRegistry.register('builtin.guard.read-only', (payload) => {
+  // 只读守卫：拦截写类工具。可阻断执行，但绝不授予权限。
+  const WRITE_LIKE = new Set(['write_file', 'apply_patch', 'delete_file', 'create_file', 'terminal_run', 'rename_file']);
+  const actor = payload.toolName || payload.actionType;
+  if (actor && WRITE_LIKE.has(actor)) {
+    return { decision: 'block', reason: `内置只读守卫：禁止写类操作 ${actor}` };
+  }
+  return { decision: 'continue' };
+});
 
 // v2.9.5 Workflow Engine: durable orchestration over the existing AgentHub,
 // Tool gate, PermissionEngine, Skill, Hook, and Model Router infrastructure.
@@ -303,6 +328,10 @@ const claudeCodeAdapter = new ClaudeCodeAgentAdapter({
 });
 agentHub.register(claudeCodeAdapter);
 
+// v2.9.9 Phase B Final（B21）— Problems Center 唯一真源：持久化、去重、
+// dismiss != resolved。所有子系统的问题都上报到这里，绝不停留在 toast。
+const problemCenter = (require('../services/problemCenter').createProblemCenter)({ store, emit });
+
 const productDiagnostics = createProductDiagnostics({
   version: require('../../package.json').version,
   store,
@@ -322,7 +351,12 @@ const productDiagnostics = createProductDiagnostics({
   // v2.9.9 Phase B（B20）— Diagnostics 接入新增产品区域的真实状态
   pendingPermissions,
   workflowRuntime: workflowEngine.runtime,
-  agentHub
+  agentHub,
+  // v2.9.9 Phase B Final（B20）— Runtime Residue / Problem Integration / Self Test
+  terminalManager: require('../tools/terminal').terminalManager,
+  runManager,
+  problemCenter,
+  getCurrentProject: () => currentProjectId ? store.projects.get(currentProjectId) : null
 });
 
 let shutdownPromise = null;
@@ -422,6 +456,25 @@ const probeManager = new (require('../providers/onboarding').ProbeManager)({ emi
 
 function emit(type, payload) {
   if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('agent:event', { ...(payload || {}), type });
+}
+
+// B16.3 — Wire Truth：每次真实模型调用后记录 requested vs actual；
+// selected != wire 时同时产生 Diagnostics Problem（MODEL_MISMATCH）。
+function reportModelOutcome(decisionId, outcome) {
+  try {
+    if (decisionId && outcome && outcome.ok) {
+      store.modelRouteDecisions.recordWireModel(decisionId, { requested: outcome.requested, actual: outcome.actual });
+    }
+    if (outcome && outcome.ok && outcome.requested && outcome.actual && outcome.requested !== outcome.actual) {
+      problemCenter.report({
+        severity: 'ERROR', source: 'Model', code: 'MODEL_MISMATCH',
+        message: `Selected model "${outcome.requested}" != actual wire model "${outcome.actual}"`,
+        related: { decisionId, requested: outcome.requested, actual: outcome.actual },
+        // 同一模型对的 mismatch 是同一稳定问题（不同 decision 不重复刷屏）
+        relatedKey: `${outcome.requested}->${outcome.actual}`
+      });
+    }
+  } catch { /* 观测链路绝不得影响主链路 */ }
 }
 
 function rebuildMcpToolMap() {
@@ -899,16 +952,55 @@ function register(window) {
   reg('projects:current', () => currentProjectId ? store.projects.get(currentProjectId) : null);
 
   // connections
-  reg('connections:list', () => store.connections.list());
-  reg('connections:create', (body) => store.connections.create(body));
-  reg('connections:update', (id, body) => store.connections.update(id, body));
-  reg('connections:remove', (id) => store.connections.remove(id));
+  // B15.9 — 默认连接/模型只是偏好，绝不代表路由旁路；持久化在统一 settings 真源。
+  const connectionWithStatus = (c) => {
+    if (!c) return c;
+    const defaults = {
+      connectionId: store.settings.get('defaultConnectionId', null),
+      modelId: store.settings.get('defaultModelId', null)
+    };
+    return {
+      ...c,
+      status: resolveConnectionStatus(c),
+      authMode: resolveAuthMode(c),
+      is_default: defaults.connectionId === c.id,
+      default_model: defaults.connectionId === c.id ? (defaults.modelId || null) : null
+    };
+  };
+  reg('connections:list', () => store.connections.list().map(connectionWithStatus));
+  reg('connections:create', (body) => connectionWithStatus(store.connections.create(body)));
+  reg('connections:update', (id, body) => connectionWithStatus(store.connections.update(id, body)));
+  reg('connections:remove', (id) => {
+    // 被删除的连接若是默认，必须如实清空默认（不留下悬空偏好）
+    if (store.settings.get('defaultConnectionId', null) === id) {
+      store.settings.set('defaultConnectionId', null);
+      store.settings.set('defaultModelId', null);
+    }
+    return store.connections.remove(id);
+  });
+  reg('connections:getDefaults', () => ({
+    connectionId: store.settings.get('defaultConnectionId', null),
+    modelId: store.settings.get('defaultModelId', null)
+  }));
+  reg('connections:setDefault', (connectionId, modelId) => {
+    if (connectionId !== null && !store.connections.get(connectionId)) throw new Error('连接不存在');
+    store.settings.set('defaultConnectionId', connectionId || null);
+    store.settings.set('defaultModelId', connectionId ? (modelId || null) : null);
+    return { connectionId: connectionId || null, modelId: connectionId ? (modelId || null) : null };
+  });
   reg('connections:test', async (id) => {
     const c = store.connections.get(id); if (!c) throw new Error('连接不存在');
     const conn = store.connections.getDecrypted(id);
-    const r = await providers.getProvider(conn).testConnection();
-    store.connections.setTestResult(id, { ok: r.ok, error: r.ok ? '' : r.message, latency: r.latency });
-    return r;
+    // B15.5 — 必须真实调用现有 provider test contract；测试动作本身崩溃 → ERROR 真话。
+    try {
+      const r = await providers.getProvider(conn).testConnection();
+      store.connections.setTestResult(id, { ok: r.ok, error: r.ok ? '' : r.message, latency: r.latency, kind: r.ok ? 'ok' : 'failed' });
+      return r;
+    } catch (e) {
+      const message = String(e && e.message || e || 'TEST_CRASHED');
+      store.connections.setTestResult(id, { ok: false, error: message, latency: null, kind: 'error' });
+      return { ok: false, message, latency: null };
+    }
   });
   reg('connections:models', async (id) => {
     const conn = store.connections.getDecrypted(id);
@@ -967,6 +1059,124 @@ function register(window) {
   reg('diagnostics:modelCalls', (limit) => store.modelCalls.list(limit || 100));
   reg('diagnostics:mismatches', () => store.modelCalls.mismatches());
   reg('diagnostics:product', (options) => productDiagnostics.inspect(options || {}));
+  // B20.2 — Quick Self Test：safe / bounded / 0 paid calls（绝不发起真实模型调用）
+  reg('diagnostics:selfTest', () => productDiagnostics.selfTest());
+
+  // v2.9.9 Phase B Final（B22）— Recovery Center：
+  // 只展示真实中断记录与新建任务草稿；没有 Resume Runtime，绝无 Resume 按钮，
+  // 新任务 = 新 run（新 runId），绝不复活旧 terminal run。
+  reg('recovery:summary', () => {
+    const last = store.settings.get('recovery.last', null);
+    if (!last || last.dismissed) return null;
+    return last;
+  });
+  reg('recovery:dismiss', () => {
+    const last = store.settings.get('recovery.last', null);
+    if (last) store.settings.set('recovery.last', { ...last, dismissed: true });
+    return { ok: true };
+  });
+  reg('recovery:newTaskDraft', (runId) => {
+    const last = store.settings.get('recovery.last', null);
+    const runs = (last && last.snapshot && last.snapshot.interruptedRuns) || [];
+    const run = runs.find(r => r.runId === runId) || runs[0] || null;
+    const stage = run && run.lastStage && run.lastStage !== 'unknown' ? `上一次中断时所处阶段：${run.lastStage}。` : '';
+    const ref = run ? `（上次 Run ${String(run.runId).slice(0, 8)}，已中断，不会被恢复）` : '';
+    return { draft: `继续处理上一次中断的任务${ref}：请先检查当前文件与测试状态，确认无副作用后继续未完成的工作。${stage}` };
+  });
+
+  // v2.9.9 Phase B Final（B29）— Onboarding 2.0 智能检测：全部来自真实状态，
+  // 已具备的步骤如实跳过；绝不强制引导（可 Skip，可稍后从设置重开）。
+  reg('onboarding:status', async () => {
+    const hasProject = (() => { try { return store.projects.list().length > 0; } catch { return false; } })();
+    let connectionOk = false; let connectionUntested = 0;
+    try {
+      const conns = store.connections.list();
+      connectionUntested = conns.filter(c => !c.tested).length;
+      connectionOk = conns.some(c => (c.test_state === 'ok') || c.tested === 1 || c.tested === true);
+    } catch { /* keep false */ }
+    let mainAgentOk = false;
+    try { mainAgentOk = !!store.agents.list().find(a => a.is_main); } catch { /* keep false */ }
+    const completed = !!store.settings.get('onboarding.completed', false);
+    const skipped = !!store.settings.get('onboarding.skipped', false);
+    return {
+      steps: {
+        openProject: hasProject,
+        configureModel: connectionOk || connectionUntested > 0,
+        testConnection: connectionOk,
+        verifyMainAgent: mainAgentOk,
+        runFirstTask: completed // 首个任务完成与否无法从外部推断时用 completed 真话兼底
+      },
+      allReady: hasProject && connectionOk && mainAgentOk,
+      completed,
+      skipped
+    };
+  });
+  reg('onboarding:complete', (skipped) => {
+    store.settings.set('onboarding.completed', !skipped);
+    store.settings.set('onboarding.skipped', !!skipped);
+    return { ok: true };
+  });
+
+  // v2.9.9 Phase B Final（B21）— Problems Center：持久化问题真源。
+  // dismiss != resolved；resolve 需要真实条件消失（verify 由 backend 裁决）。
+  reg('problems:list', (options) => problemCenter.list(options || {}));
+  reg('problems:countActive', () => problemCenter.countActive());
+  reg('problems:dismiss', (id) => problemCenter.dismiss(id));
+  reg('problems:resolve', (id) => {
+    const problem = store.problems.get(id);
+    if (!problem) throw new Error('问题不存在');
+    // 真话优先：MODEL_MISMATCH 等运行性问题只有在后续调用不再 mismatch 时才可 resolve；
+    // 用户主动 resolve 时 backend 如实检查已知条件。
+    return problemCenter.resolve(id);
+  });
+  // Renderer 自身捕获的错误（B37 Error Boundary）进入统一 Problems，source 固定 System
+  reg('problems:report', (input) => {
+    const safe = input || {};
+    return problemCenter.report({
+      severity: ['INFO', 'WARNING', 'ERROR', 'CRITICAL'].includes(safe.severity) ? safe.severity : 'ERROR',
+      source: 'System',
+      code: String(safe.code || 'RENDERER_ERROR').slice(0, 120),
+      message: String(safe.message || '').slice(0, 2000),
+      relatedKey: safe.relatedKey ? String(safe.relatedKey).slice(0, 200) : null
+    }).problem;
+  });
+
+  // v2.9.9 Phase B Final（B16）— Run Model Routing Inspector 数据源：
+  // Requested / Connection / Selected / Actual Wire / Mode / Fallback / Capabilities / Reasons / Decision ID。
+  reg('runs:modelRouting', (runId) => {
+    if (!runId) return null;
+    const decisions = store.modelRouteDecisions.list(500).filter(d => d.run_id === runId || d.root_run_id === runId);
+    const decision = decisions.find(d => d.run_id === runId) || decisions[0] || null;
+    if (!decision) return { runId, decision: null, wire: null, capabilities: null };
+    const selectedModel = decision.model_id || null;
+    const wireRequested = decision.requested_model || selectedModel;
+    const wireActual = decision.actual_model || null;
+    const wireEqual = wireActual === null ? null : wireActual === selectedModel;
+    // 能力证据：只呈现真实探测/声明值，不猜（TESTED/DECLARED/INFERRED/UNKNOWN）
+    let capabilities = null;
+    if (decision.connection_id && selectedModel) {
+      capabilities = store.models.caps(decision.connection_id, selectedModel) || null;
+    }
+    return {
+      runId,
+      decision: {
+        decisionId: decision.id,
+        mode: decision.mode,
+        requested: (decision.requirements && decision.requirements.requestedModel) || (decision.mode === 'explicit' ? selectedModel : 'Auto'),
+        connectionId: decision.connection_id,
+        selectedModel,
+        score: decision.score,
+        reasons: decision.reasons || [],
+        rejectedCandidates: decision.rejectedCandidates || [],
+        requirements: decision.requirements || {},
+        status: decision.status,
+        errorCode: decision.error_code,
+        createdAt: decision.created_at
+      },
+      wire: { requested: wireRequested, actual: wireActual, equal: wireEqual },
+      capabilities
+    };
+  });
   // v2.3.2 (P0-2 诊断)：E2E 超时排查用 —— 返回所有活跃 Run + 按 conversation 索引，
   // 让测试在断言失败时能立刻看到 RunManager 真实状态（status / stage / lastActivityAt / error）。
   reg('diagnostics:dumpRuns', () => ({
@@ -1213,17 +1423,37 @@ function register(window) {
   });
 
   // ---------- terminal panel (user-initiated) ----------
-  reg('terminal:run', async (command) => {
+  // B19.6 — 用户直接从 Terminal Workspace 输入的命令同样必须经过既有危险命令规则：
+  // 高风险命令需要显式确认令牌，绝不因为「用户自己输入」就绕过安全边界。
+  reg('terminal:riskCheck', (command) => {
+    const term = require('../tools/terminal');
+    return { highRisk: term.isHighRisk(String(command || '')) };
+  });
+  reg('terminal:run', async (command, opts = {}) => {
     const proj = currentProjectId ? store.projects.get(currentProjectId) : null;
     if (!proj) throw new Error('未打开项目');
     const term = require('../tools/terminal');
+    const cmd = String(command || '');
+    if (term.isHighRisk(cmd) && !(opts && opts.confirmDangerous === true)) {
+      // 不执行，如实告知需要确认（GUI 弹统一破坏性确认）
+      return { needsConfirmation: true, highRisk: true, command: cmd };
+    }
     const runId = crypto.randomUUID();
     const ctx = { projectRoot: proj.root_path, emit };
-    emit('terminal_start', { runId, command, source: 'user' });
-    const r = await term.runCommand(ctx, command, proj.root_path, 300000, false, runId, null);
+    emit('terminal_start', { runId, command: cmd, source: 'user', owner: 'USER' });
+    const r = await term.runCommand(ctx, cmd, proj.root_path, 300000, false, runId, null, { owner: 'USER', agentRunId: null });
     return r.ok ? r.data : { error: r.error };
   });
   reg('terminal:cancel', (runId) => require('../tools/terminal').terminalManager.cancel(runId));
+  // B19.1/B19.2/B19.3 — 活动命令 / 有界历史 / 完整输出（backend 审计真源）
+  reg('terminal:active', () => require('../tools/terminal').terminalManager.active());
+  reg('terminal:history', (limit) => require('../tools/terminal').terminalManager.history(limit || 50).map(rec => ({
+    // 列表视图默认只给截断预览；完整输出走 terminal:output
+    ...rec,
+    stdout: String(rec.stdout || '').slice(0, 2000),
+    stderr: String(rec.stderr || '').slice(0, 2000)
+  })));
+  reg('terminal:output', (runId) => require('../tools/terminal').terminalManager.output(runId));
 
   // ---------- v2.4.0 Smart API Onboarding ----------
   const onboarding = require('../providers/onboarding');
@@ -1395,6 +1625,11 @@ function register(window) {
   reg('computer:windows', () => computer.manager.listWindows());
   reg('computer:screenshot', () => computer.manager.screenshot());
   reg('computer:focus', (title) => computer.manager.focusWindow(title));
+  // v2.9.9 Phase B Final（B18）— Availability 真话 / 动作历史 / 真实 Stop
+  reg('computer:availability', () => computer.manager.availability());
+  reg('computer:history', (limit) => computer.manager.history(limit || 100));
+  reg('computer:active', () => ({ active: computer.manager.activeCount() }));
+  reg('computer:stop', () => computer.manager.stopActive());
   reg('browser:status', () => browser.manager.status());
 
   // ---------- events / logs / system ----------
@@ -1679,6 +1914,39 @@ function register(window) {
   ipcMain.handle('hook:enable', (e, id) => hookPublic(hookEngine.registry.enable(id)));
   ipcMain.handle('hook:disable', (e, id) => hookPublic(hookEngine.registry.disable(id)));
   ipcMain.handle('hook:audit:list', (e, limit) => hookEngine.audit.list(limit));
+  // B17.6 — Trusted Handlers：Hook 编辑器只能从已注册的受信 handlerId 中选择，
+  // 绝不接受 JavaScript / eval / shell / HTTP webhook 输入；此处只暴露 id 列表。
+  ipcMain.handle('hook:handlers:list', () => hookEngine.handlerRegistry.list());
+
+  // B17.1/B17.4 — Used By：Skill/Hook 被哪些 Dynamic Agent 定义与 Workflow 步骤引用
+  ipcMain.handle('artifactUsage', () => {
+    const skillUse = new Map(); const hookUse = new Map();
+    const note = (map, id, label) => {
+      if (!id || typeof id !== 'string') return;
+      if (!map.has(id)) map.set(id, []);
+      const list = map.get(id);
+      if (!list.includes(label)) list.push(label);
+    };
+    const parseJson = (row, key) => {
+      if (row[key] && typeof row[key] === 'object') return row[key];
+      try { return JSON.parse(row[key + '_json'] || '{}'); } catch { return {}; }
+    };
+    for (const row of store.agentDefinitions.list()) {
+      const def = parseJson(row, 'definition');
+      const label = `Agent 定义：${def.name || row.id}`;
+      for (const id of [...((def.skills && def.skills.required) || []), ...((def.skills && def.skills.optional) || [])]) note(skillUse, id, label);
+      for (const id of [...((def.hooks && def.hooks.required) || []), ...((def.hooks && def.hooks.optional) || [])]) note(hookUse, id, label);
+    }
+    for (const row of store.workflowDefinitions.list()) {
+      const def = parseJson(row, 'definition');
+      const label = `Workflow：${def.name || row.id}`;
+      for (const step of def.steps || []) {
+        for (const id of (step.config && step.config.skillIds) || []) note(skillUse, id, label);
+        for (const id of (step.config && step.config.hookIds) || []) note(hookUse, id, label);
+      }
+    }
+    return { skills: Object.fromEntries(skillUse), hooks: Object.fromEntries(hookUse) };
+  });
 
   // v2.9.5 Workflow Engine IPC. Definitions are data only; runtime calls keep
   // all authority in the existing AgentHub and Tool execution paths.
@@ -1974,7 +2242,19 @@ async function initServices() {
   // v2.3.1 (P1-14): 应用上次被关闭 —— 数据库里所有非终态 Run 统一标记 interrupted，
   // GUI 绝不恢复旧 Spinner。
   projectLock.clearAll();
-  try { recoverInterruptedRuntime({ store, runManager }); } catch (e) { console.log('[runtimeRecovery] recovery failed: ' + e.message); }
+  try {
+    const recovery = recoverInterruptedRuntime({ store, runManager });
+    // B22 — 持久化 Recovery 快照：仅供 Recovery Center 展示与新建任务草稿，绝不复活旧 Run
+    const snap = recovery && recovery.snapshot;
+    if (snap && (snap.interruptedRuns.length || snap.interruptedWorkflows.length || snap.interruptedDrafts.length)) {
+      store.settings.set('recovery.last', {
+        at: new Date().toISOString(),
+        dismissed: false,
+        recovered: { runs: recovery.runs, workflows: recovery.workflows, generatorDrafts: recovery.generatorDrafts },
+        snapshot: snap
+      });
+    }
+  } catch (e) { console.log('[runtimeRecovery] recovery failed: ' + e.message); }
   const targets = store.mcpServers.list().filter(s => s.status === 'connected');
   // Reconnect in parallel: one dead server must not delay the others, and a
   // hung handshake is bounded by the client-side timeout.

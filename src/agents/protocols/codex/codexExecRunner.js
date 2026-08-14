@@ -114,6 +114,7 @@ function createCodexExecRunner({ supervisor } = {}) {
       env: o.env,
       timeoutMs: o.timeoutMs,
       signal: o.signal,
+      runId: o.runId || null,
       captureOutput: false // stdout 是 JSONL 协议流，由 decoder 增量消费
     });
 
@@ -163,7 +164,7 @@ function createCodexExecRunner({ supervisor } = {}) {
       if (errTail) errors.push(`stderr: ${errTail}`);
     }
 
-    return {
+    const result = {
       status,
       threadId,
       summary: acc.summary,
@@ -174,6 +175,13 @@ function createCodexExecRunner({ supervisor } = {}) {
       errors,
       exitCode: exit.code != null ? exit.code : null
     };
+    // Internal lifecycle metadata remains readable by CodexAgentAdapter while
+    // preserving the public structured-result key contract.
+    Object.defineProperties(result, {
+      quiesced: { value: exit.quiesced !== false, enumerable: false },
+      residual: { value: exit.residual || 0, enumerable: false }
+    });
+    return result;
   }
 
   return { run, buildExecArgs };

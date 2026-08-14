@@ -16,7 +16,7 @@
  * 「把仓库事实与运行时事实翻译成 evidence」。
  */
 
-const { createVerificationRegistry } = require('./verificationRegistry');
+const { createVerificationRegistry, createVerificationFingerprint } = require('./verificationRegistry');
 const { VERIFICATION_LEVEL, formatLevel } = require('./verificationLevel');
 
 /**
@@ -47,6 +47,21 @@ const DIM = {
   NOT_DETECTED: '未检测到'
 };
 
+// One process-long default registry. Production injects the same registry into
+// Hub + verification service + this describer; this fallback keeps isolated
+// module consumers long-lived instead of rebuilding evidence on every render.
+const DEFAULT_REGISTRY = createVerificationRegistry();
+
+function ensureBaseline(reg, agentId, base) {
+  const existing = reg.getEvidence(agentId);
+  if (base.implementation && !existing.some(e => e.type === 'implementation' && e.source === base.implementation)) {
+    reg.record(agentId, { type: 'implementation', status: 'pass', source: base.implementation });
+  }
+  if (base.fixture && !existing.some(e => e.type === 'fixture' && e.source === base.fixture)) {
+    reg.record(agentId, { type: 'fixture', status: 'pass', source: base.fixture });
+  }
+}
+
 /**
  * 判断运行时是否真的完成过协议握手。
  *
@@ -68,6 +83,19 @@ function protocolInitializedFrom(agentId, a) {
   return false;
 }
 
+function buildVerificationFingerprint(agentId, availability) {
+  const a = availability || {};
+  const version = a.version || (a.health && a.health.runtime && a.health.runtime.nodeVersion) || '';
+  return createVerificationFingerprint({
+    agentId,
+    transport: a.transport || '',
+    runtime: a.runtime || a.adapterRuntime || '',
+    version,
+    executableIdentity: a.executablePath || a.path || '',
+    configurationIdentity: `${a.configured === true}:${a.mode || ''}:${a.transport || ''}`
+  });
+}
+
 /**
  * 计算单个 Agent 的验证画像。
  *
@@ -79,31 +107,27 @@ function protocolInitializedFrom(agentId, a) {
  *   evidence: object[]
  * }}
  */
-function describeAgentVerification(agentId, availability) {
+function describeAgentVerification(agentId, availability, registry = DEFAULT_REGISTRY) {
   const a = availability || null;
   const base = BASELINE_EVIDENCE[agentId] || {};
-  const reg = createVerificationRegistry();
-
-  if (base.implementation) {
-    reg.record(agentId, { type: 'implementation', status: 'pass', source: base.implementation });
-  }
-  if (base.fixture) {
-    reg.record(agentId, { type: 'fixture', status: 'pass', source: base.fixture });
-  }
+  const reg = registry;
+  ensureBaseline(reg, agentId, base);
 
   // ── 运行时证据（只在真的探测到时才记录）──
-  const detected = !!(a && (a.available === true || a.detected === true));
+  const detected = !!(a && (a.installed === true || a.detected === true || a.available === true));
   const version = (a && (a.version || (a.health && a.health.runtime && a.health.runtime.nodeVersion))) || '';
+  const fingerprint = buildVerificationFingerprint(agentId, a || {});
+  reg.setFingerprint(agentId, fingerprint);
   if (detected && version) {
-    reg.record(agentId, { type: 'local_detection', status: 'pass', version: String(version), source: 'runtime detect()' });
+    reg.record(agentId, { type: 'local_detection', status: 'pass', version: String(version), source: 'runtime detect()', projectFingerprint: fingerprint, adapterRuntime: a && a.runtime || '' });
   } else if (detected) {
     // 探测到进程/服务但拿不到版本号 —— 记 fail，保证不会被误当成 LOCAL_DETECTION
-    reg.record(agentId, { type: 'local_detection', status: 'fail', source: 'runtime detect()（无版本号）' });
+    reg.record(agentId, { type: 'local_detection', status: 'fail', source: 'runtime detect()（无版本号）', projectFingerprint: fingerprint, reason: 'VERSION_UNKNOWN' });
   }
 
   const protocolOk = protocolInitializedFrom(agentId, a);
   if (protocolOk) {
-    reg.record(agentId, { type: 'protocol', status: 'pass', source: 'runtime initialize/session 握手' });
+    reg.record(agentId, { type: 'protocol', status: 'pass', source: 'runtime initialize/session 握手', projectFingerprint: fingerprint, adapterRuntime: a && a.runtime || '' });
   }
 
   const level = reg.getLevel(agentId);
@@ -124,7 +148,18 @@ function describeAgentVerification(agentId, availability) {
     level,
     levelLabel: formatLevel(level),
     dimensions,
-    evidence: reg.getEvidence(agentId)
+    evidence: reg.getEvidence(agentId),
+    installed: detected,
+    configured: !!(a && a.configured),
+    availability: a && a.availability || 'UNKNOWN',
+    health: a && a.healthStatus || 'unknown',
+    authentication: authState || 'UNKNOWN',
+    transport: a && a.transport || '',
+    runtime: a && a.runtime || '',
+    version: version || null,
+    lastVerified: (reg.getEvidence(agentId).slice(-1)[0] || {}).timestamp || null,
+    realTaskVerified: level === VERIFICATION_LEVEL.REAL_AGENT_TASK_VERIFIED,
+    lastFailure: [...reg.getEvidence(agentId)].reverse().find(e => e.status === 'fail') || null
   };
 }
 
@@ -134,18 +169,20 @@ function describeAgentVerification(agentId, availability) {
  * @param {Array<{id:string}>} available
  * @returns {Record<string, object>}
  */
-function describeAll(manifests, available) {
+function describeAll(manifests, available, registry = DEFAULT_REGISTRY) {
   const byId = new Map((available || []).filter(Boolean).map(a => [a.id, a]));
   const out = {};
   for (const m of (manifests || [])) {
     if (!m || !m.id) continue;
-    out[m.id] = describeAgentVerification(m.id, byId.get(m.id) || null);
+    out[m.id] = describeAgentVerification(m.id, byId.get(m.id) || null, registry);
   }
   return out;
 }
 
 module.exports = {
   BASELINE_EVIDENCE,
+  DEFAULT_REGISTRY,
+  buildVerificationFingerprint,
   describeAgentVerification,
   describeAll
 };

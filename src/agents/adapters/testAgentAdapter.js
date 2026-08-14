@@ -21,6 +21,7 @@ class TestAgentAdapter extends BaseAgentAdapter {
     this._available = config.available !== false;
     this._healthStatus = config.healthStatus || 'healthy';
     this._maxConcurrency = config.maxConcurrency || 1;
+    this._activeRunCount = 0;
     this._startFails = !!config.startFails;
     this._resultText = config.resultText || 'Test agent completed';
     this._delayMs = config.delayMs || 0;
@@ -37,7 +38,11 @@ class TestAgentAdapter extends BaseAgentAdapter {
     this.capabilities = this._capabilities;
   }
 
-  get activeRunCount() { return 0; }
+  get activeRunCount() { return this._activeRunCount; }
+  set activeRunCount(value) {
+    const count = Number(value);
+    this._activeRunCount = Number.isFinite(count) ? Math.max(0, count) : 0;
+  }
 
   getManifest() {
     if (this.manifest && Object.keys(this.manifest).length > 0) {

@@ -572,6 +572,21 @@ CREATE TABLE IF NOT EXISTS external_agent_auth_states (
   detail TEXT DEFAULT '',
   updated_at TEXT
 );
+
+-- P4 — sanitized VerificationRegistry persistence backend. This table is not
+-- a second source of truth: the process-long registry owns level calculation
+-- and filters runtime evidence by the active runtime fingerprint.
+CREATE TABLE IF NOT EXISTS external_agent_verification_evidence (
+  verification_id TEXT PRIMARY KEY,
+  agent_id TEXT NOT NULL,
+  type TEXT NOT NULL,
+  status TEXT NOT NULL,
+  project_fingerprint TEXT DEFAULT '',
+  timestamp TEXT NOT NULL,
+  evidence_json TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_eave_agent_time
+  ON external_agent_verification_evidence(agent_id, timestamp DESC);
 `;
 
 /**

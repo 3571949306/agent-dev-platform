@@ -122,7 +122,7 @@ class HttpAgentAdapter extends BaseAgentAdapter {
     }
     const taskText = typeof task === 'string' ? task : task.goal;
 
-    const runId = crypto.randomUUID();
+    const runId = context.runId || crypto.randomUUID();
     const ac = new AbortController();
     if (context.signal) {
       if (context.signal.aborted) ac.abort();
@@ -150,7 +150,8 @@ class HttpAgentAdapter extends BaseAgentAdapter {
     };
     this._runs.set(runId, runState);
 
-    this._executeHttp(runId, body, context).catch(err => {
+    runState.context = context;
+    runState.executionPromise = this._executeHttp(runId, body, context).catch(err => {
       runState.status = LIFECYCLE.FAILED;
       runState.result = {
         status: 'failed',
@@ -158,6 +159,11 @@ class HttpAgentAdapter extends BaseAgentAdapter {
         errors: [err && err.message ? err.message : String(err)],
         findings: [], changedFiles: [], artifacts: []
       };
+      return runState.result;
+    }).finally(() => {
+      if (typeof context.finishRun === 'function' && runState.result) {
+        try { context.finishRun(runState.status, runState.result); } catch { /* noop */ }
+      }
     });
 
     return { runId };
@@ -442,11 +448,23 @@ class HttpAgentAdapter extends BaseAgentAdapter {
     }
     // 无论如何都 abort 本地 fetch 连接
     try { run.ac.abort(); } catch { /* already aborted */ }
-    if (run.status !== LIFECYCLE.COMPLETED && run.status !== LIFECYCLE.FAILED &&
-        run.status !== LIFECYCLE.CANCELLED && run.status !== LIFECYCLE.TIMEOUT) {
-      run.status = LIFECYCLE.CANCELLED;
-    }
-    return { ok: true, cancelled };
+    const q = await this.awaitQuiescence(runId, 5000);
+    return { ok: q.quiesced, cancelled, status: q.quiesced ? 'cancelled' : 'cancelling', quiesced: q.quiesced, residual: q.residual, detail: q.detail };
+  }
+
+  async awaitQuiescence(runId, timeoutMs = 5000) {
+    const run = this._runs.get(runId);
+    if (!run) return { quiesced: false, residual: 'unknown runId', detail: 'unknown runId' };
+    if (!run.executionPromise) return { quiesced: true, residual: 0, detail: 'HTTP run not active' };
+    let timer;
+    const settled = await Promise.race([
+      run.executionPromise.then(() => true, () => true),
+      new Promise(resolve => { timer = setTimeout(() => resolve(false), timeoutMs); })
+    ]);
+    if (timer) clearTimeout(timer);
+    return settled
+      ? { quiesced: true, residual: 0, detail: 'HTTP stream/poll stopped' }
+      : { quiesced: false, residual: { runId, remoteTaskId: run.remoteTaskId }, detail: 'HTTP stream/poll still active' };
   }
 
   async getStatus(runId) {

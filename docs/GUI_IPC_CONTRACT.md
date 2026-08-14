@@ -221,6 +221,8 @@
 | `onboarding:probe:start` | renderer → main（invoke/handle，请求-响应） |
 | `terminal:riskCheck` | renderer → main（invoke/handle，请求-响应） |
 | `workflow:run` | renderer → main（invoke/handle，请求-响应） |
+| `hub:verify-safe` | renderer → main（invoke/handle；零模型/零付费的探测、协议与清理证据） |
+| `hub:verify-real` | renderer → main（invoke/handle；必须携带 `explicitConsent: true`，隔离临时项目） |
 
 ## CANCEL
 
@@ -287,3 +289,9 @@
 - Renderer 使用的每个通道必须在 main 端真实注册（无孤儿通道）。
 
 违反任一条 → GUI_BOUNDARY=FAIL，发布门禁阻断。
+
+## P4 external verification channels
+
+`hub:verification` remains the read-only profile/evidence channel. `hub:verify-safe` and `hub:verify-real` are distinct commands: the renderer cannot upgrade Safe evidence into a real-task claim, and missing real-task consent is rejected again in the main process with zero provider calls. Returned evidence is sanitized and contains no authorization, cookie, token, key, or raw environment value.
+
+Installed != Available != Verified；Protocol Verified != Real Task Verified。GUI separately renders availability, health, installed/configured, transport/runtime, verification level, last verification time, and evidence source.

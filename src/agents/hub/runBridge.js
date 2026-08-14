@@ -88,6 +88,7 @@ function createRunBridge({ runManager, lifecycleManager, emit } = {}) {
 
     // 2. LifecycleManager 创建 Run（status=idle）
     const lifecycleRun = lifecycleManager.createRun({
+      runId,
       agentId, taskId, goal, parentRunId, adapterType
     });
     const lifecycleRunId = lifecycleRun.id;

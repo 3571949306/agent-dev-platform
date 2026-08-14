@@ -71,7 +71,9 @@ async function runSubAgent(deps, subDef, argsStr, parentRunCtx) {
       // and fall back to whatever the host injected.
       visionReader: (deps.visionReaderFor && deps.visionReaderFor(subDef)) || deps.visionReader || null
     });
-    return extAgents.runExternalAgent(subDef, taskText, ctx);
+    return typeof deps.runExternalAgentHub === 'function'
+      ? deps.runExternalAgentHub(subDef, taskText, ctx)
+      : extAgents.runExternalAgent(subDef, taskText, ctx);
   }
 
   const store = deps.store;

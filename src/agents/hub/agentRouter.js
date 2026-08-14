@@ -20,7 +20,8 @@
  *   用户偏好 Agent +50
  *   手动指定 +1000
  */
-const { HEALTH_STATE } = require('./types');
+const { HEALTH_STATE, VERIFICATION_LEVEL } = require('./types');
+const { VERIFICATION_LEVEL_ORDER } = require('../verification/verificationLevel');
 
 /** 评分权重常量（导出供测试 / 文档参考） */
 const SCORES = {
@@ -40,6 +41,10 @@ const SCORES = {
   PREFERRED_AGENT: 50,
   DELEGATION_LOOP: -1000,
   MANUAL_OVERRIDE: 1000
+  ,VERIFICATION_REAL_TASK: 80
+  ,VERIFICATION_REAL_PROTOCOL: 35
+  ,VERIFICATION_LOCAL: 5
+  ,VERIFICATION_UNTRUSTED: -90
 };
 
 /**
@@ -49,11 +54,36 @@ const SCORES = {
  * @param {object} [opts.preferences] — { preferredAgent?: string, disabledAgents?: string[] }
  * @returns {{ route: (task: object) => Array<{agentId: string, score: number, reasons: string[], penalties: string[]}> }}
  */
-function createAgentRouter({ registry, preferences = {} } = {}) {
+function createAgentRouter({ registry, preferences = {}, verificationRegistry = null } = {}) {
   if (!registry) throw new Error('createAgentRouter: registry 必填');
 
   const disabledSet = new Set(preferences.disabledAgents || []);
   const preferredAgent = preferences.preferredAgent || null;
+
+  function isExternal(adapter) {
+    return !!(adapter && adapter.manifest && adapter.manifest.source === 'external');
+  }
+
+  function effectiveCapabilities(adapter) {
+    if (typeof adapter.getEffectiveCapabilities === 'function') {
+      const value = adapter.getEffectiveCapabilities();
+      if (Array.isArray(value)) return value;
+      if (value && typeof value === 'object') return Object.keys(value).filter(k => value[k] === true);
+    }
+    if (typeof adapter.getManifest === 'function') {
+      try {
+        const manifest = adapter.getManifest();
+        const value = manifest && manifest.capabilities;
+        if (Array.isArray(value)) return value;
+        if (value && typeof value === 'object') return Object.keys(value).filter(k => value[k] === true);
+      } catch { /* BaseAgentAdapter intentionally throws NOT_IMPLEMENTED */ }
+    }
+    return Array.isArray(adapter.capabilities) ? adapter.capabilities : [];
+  }
+
+  function atLeast(actual, required) {
+    return VERIFICATION_LEVEL_ORDER.indexOf(actual) >= VERIFICATION_LEVEL_ORDER.indexOf(required);
+  }
 
   /**
    * 路由：为 task 计算所有候选 Agent 的得分并排序。
@@ -70,6 +100,8 @@ function createAgentRouter({ registry, preferences = {} } = {}) {
     const preferred = Array.isArray(task.preferred) ? task.preferred : [];
     const agentIdOverride = task.agentId || null;
     const delegationPath = Array.isArray(task.delegationPath) ? task.delegationPath : [];
+    const mutatesProject = task.readOnly !== true
+      || required.some(cap => cap === 'coding' || cap === 'filesystem' || cap === 'terminal');
 
     // 硬排除：禁用 + 委托路径中的 Agent
     const candidates = registry.list().filter(a => {
@@ -80,6 +112,17 @@ function createAgentRouter({ registry, preferences = {} } = {}) {
       // still incomplete. Only a fully healthy Cline can be auto-routed.
       // An explicit override may still surface the concrete config error.
       if (a.id === 'cline' && a.healthStatus !== HEALTH_STATE.HEALTHY && agentIdOverride !== 'cline') return false;
+      // Explicit selection remains possible (the Hub still enforces runtime,
+      // permission and availability truth). Automatic routing is fail-closed:
+      // an external reader needs a real protocol handshake and a writer needs
+      // independently verified real-task evidence.
+      if (!agentIdOverride && isExternal(a) && verificationRegistry) {
+        const level = verificationRegistry.getLevel(a.id);
+        const requiredLevel = mutatesProject
+          ? VERIFICATION_LEVEL.REAL_AGENT_TASK_VERIFIED
+          : VERIFICATION_LEVEL.REAL_PROTOCOL_VERIFIED;
+        if (!atLeast(level, requiredLevel)) return false;
+      }
       return true;
     });
 
@@ -89,7 +132,7 @@ function createAgentRouter({ registry, preferences = {} } = {}) {
       let score = 0;
 
       // 1. 能力匹配
-      const caps = new Set(adapter.capabilities || []);
+      const caps = new Set(effectiveCapabilities(adapter));
       for (const cap of required) {
         if (caps.has(cap)) {
           score += SCORES.REQUIRED_MATCH;
@@ -162,6 +205,24 @@ function createAgentRouter({ registry, preferences = {} } = {}) {
           // UNKNOWN：平台无法核实登录态（禁止读取凭据文件），按保守口径扣分。
           score += SCORES.AUTH_UNKNOWN_PENALTY;
           penalties.push(`认证状态未知 (${SCORES.AUTH_UNKNOWN_PENALTY})`);
+        }
+      }
+
+      // Verification is an explicit score component, separate from health.
+      if (isExternal(adapter) && verificationRegistry) {
+        const level = verificationRegistry.getLevel(adapter.id);
+        if (level === VERIFICATION_LEVEL.REAL_AGENT_TASK_VERIFIED) {
+          score += SCORES.VERIFICATION_REAL_TASK;
+          reasons.push(`真实任务验证 (+${SCORES.VERIFICATION_REAL_TASK})`);
+        } else if (level === VERIFICATION_LEVEL.REAL_PROTOCOL_VERIFIED) {
+          score += SCORES.VERIFICATION_REAL_PROTOCOL;
+          reasons.push(`真实协议验证 (+${SCORES.VERIFICATION_REAL_PROTOCOL})`);
+        } else if (level === VERIFICATION_LEVEL.LOCAL_DETECTION_VERIFIED) {
+          score += SCORES.VERIFICATION_LOCAL;
+          reasons.push(`本地检测验证 (+${SCORES.VERIFICATION_LOCAL})`);
+        } else {
+          score += SCORES.VERIFICATION_UNTRUSTED;
+          penalties.push(`尚无生产验证 (${SCORES.VERIFICATION_UNTRUSTED})`);
         }
       }
 

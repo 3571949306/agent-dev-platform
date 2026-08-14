@@ -185,16 +185,17 @@ test('31) Agent Center：Hub 区段可见 + 注册表 Agent + 能力标签', asy
   await expect(nativeCard.locator('.chip', { hasText: 'Coding' })).toBeVisible();
   await expect(nativeCard.locator('.chip', { hasText: 'Terminal' })).toBeVisible();
 
-  // 每个 Hub 卡片都应有"测试"按钮（健康检查）
-  const testBtns = page.locator('#hub-cards [data-hub-test]');
-  await expect(testBtns.first()).toBeVisible();
-  expect(await testBtns.count()).toBeGreaterThanOrEqual(1);
+  // P4：每个外部 Agent 提供零模型调用 Safe Test；Native 不伪装成外部验证。
+  const externalCards = page.locator('#hub-cards .acard').filter({ has: page.locator('[data-hub-safe]') });
+  await expect(externalCards.first()).toBeVisible();
+  expect(await externalCards.count()).toBeGreaterThanOrEqual(1);
+  await expect(nativeCard.locator('[data-hub-safe]')).toHaveCount(0);
 
   const fatals = pageErrors.filter(e => /Cannot read|TypeError|ReferenceError|is not defined/.test(e));
   expect(fatals).toEqual([]);
 });
 
-test('32) Capability Routing：编码任务 → Native / Codex 得分高于 WorkBuddy', async () => {
+test('32) Capability Routing：未验证外部 Agent 自动路由 fail-closed + 手动指定仍可见', async () => {
   pageErrors = [];
   await openAgentsPage();
   // 输入编码任务描述
@@ -217,25 +218,21 @@ test('32) Capability Routing：编码任务 → Native / Codex 得分高于 Work
   const byId = Object.fromEntries(ranked.map(r => [r.agentId, r]));
   const nativeScore = byId['native-main'] ? byId['native-main'].score : null;
   const codexScore = byId['codex'] ? byId['codex'].score : null;
-  const workbuddyScore = byId['workbuddy'] ? byId['workbuddy'].score : null;
-
   expect(nativeScore, 'Native 应在候选中').not.toBeNull();
-  expect(workbuddyScore, 'WorkBuddy 应在候选中').not.toBeNull();
-  // Native 具备 coding + filesystem，得分应高于 WorkBuddy（缺少 filesystem）——与本机是否安装外部 Agent 无关。
-  expect(nativeScore).toBeGreaterThan(workbuddyScore);
+  expect(codexScore, '未达到真实任务验证级别的 Codex 不得被自动路由').toBeNull();
+  expect(byId['workbuddy'] || null, '未达到真实任务验证级别的 WorkBuddy 不得被自动路由').toBeNull();
 
-  // Codex 的排序断言只在它真实安装/可用时成立（环境依赖，与 test 31 相同口径）。
-  // Codex 未安装时 healthCheck=UNAVAILABLE 得低分是正确行为，不得断言它压过 WorkBuddy，
-  // 否则会把“环境未安装”误判为路由回归。
-  const codexEntry = byId['codex'];
-  const codexUnavailable = !!codexEntry && Array.isArray(codexEntry.penalties) && codexEntry.penalties.some(p => /不可用/.test(p));
-  if (!codexUnavailable) {
-    expect(codexScore, 'Codex 应在候选中').not.toBeNull();
-    expect(codexScore).toBeGreaterThan(workbuddyScore);
-  } else {
-    // Codex 未安装：必须如实携带“不可用” penalty（不伪装就绪）。
-    expect(codexEntry.penalties.some(p => /不可用/.test(p)), 'Codex 未安装应标记不可用').toBe(true);
-  }
+  // 手动指定只暴露候选和实际配置错误；真正启动仍由 Hub 的健康、认证、
+  // 权限与静默门禁裁决。这与自动生产路由的验证证据要求是两个边界。
+  const explicit = await page.evaluate(async () => {
+    const r = await window.api.invoke('hub:route', {
+      agentId: 'workbuddy', required: ['coding', 'filesystem'], preferred: ['git']
+    });
+    return r && r.data !== undefined ? r.data : r;
+  });
+  const explicitWorkBuddy = explicit.find(r => r.agentId === 'workbuddy');
+  expect(explicitWorkBuddy, '手动指定应保留 WorkBuddy 候选').toBeTruthy();
+  expect(explicitWorkBuddy.reasons.some(reason => /手动指定/.test(reason))).toBe(true);
 
   // GUI 结果区应展示得分 + reasons
   const resultsText = await page.locator('#hub-route-results').textContent();

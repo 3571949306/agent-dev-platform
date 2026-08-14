@@ -24,6 +24,7 @@ const crypto = require('crypto');
 const { BaseAgentAdapter } = require('./baseAgentAdapter');
 const { HEALTH_STATE, LIFECYCLE } = require('../hub/types');
 const { DesktopAgentBridge, DEFAULTS } = require('../../services/desktopBridge');
+const { buildExternalResult, stripSecrets } = require('../runtime/resultSanitizer');
 
 const DEFAULT_WINDOW_MATCH = /workbuddy/i;
 const DEFAULT_TIMEOUT_MS = 180000;
@@ -73,7 +74,14 @@ class DesktopAgentAdapter extends BaseAgentAdapter {
       return match.test(t);
     });
     if (!list.length) return { ok: false, error: '未找到目标桌面窗口', window: null };
-    return { ok: true, window: list[0] };
+    if (list.length !== 1) {
+      return { ok: false, error: `AMBIGUOUS_EXTERNAL_AGENT_WINDOW: matched ${list.length} windows`, window: null, matches: list.length };
+    }
+    const window = list[0];
+    if (window.hwnd == null || window.pid == null) {
+      return { ok: false, error: 'External desktop window lacks stable HWND+PID identity', window: null };
+    }
+    return { ok: true, window };
   }
 
   /**
@@ -126,7 +134,7 @@ class DesktopAgentAdapter extends BaseAgentAdapter {
     if (!this.computerManager) throw new Error('DesktopAgentAdapter: computerManager 未注入');
     if (!task || !task.goal) throw new Error('DesktopAgentAdapter.startTask: task.goal 必填');
 
-    const runId = crypto.randomUUID();
+    const runId = context.runId || crypto.randomUUID();
     const ac = new AbortController();
     if (context.signal) {
       if (context.signal.aborted) ac.abort();
@@ -153,6 +161,7 @@ class DesktopAgentAdapter extends BaseAgentAdapter {
       sleep: context && context.sleep,
       now: context && context.now,
       visionReader: (context && context.visionReader) || this.visionReader || null,
+      requireExactWindow: context.productionHub === true,
       onState: (state, detail) => {
         if (context && context.onState) {
           try { context.onState(state, detail); } catch { /* listener must not break the run */ }
@@ -168,11 +177,12 @@ class DesktopAgentAdapter extends BaseAgentAdapter {
       bridge,
       startedAt: Date.now(),
       taskText: task.goal,
-      cfg
+      cfg,
+      context
     };
     this._runs.set(runId, runState);
 
-    this._executeDesktop(runId, task.goal).catch(err => {
+    runState.executionPromise = this._executeDesktop(runId, task.goal).catch(err => {
       runState.status = LIFECYCLE.FAILED;
       runState.result = {
         status: 'failed',
@@ -180,6 +190,8 @@ class DesktopAgentAdapter extends BaseAgentAdapter {
         errors: [err && err.message ? err.message : String(err)],
         findings: [], changedFiles: [], artifacts: []
       };
+      if (typeof context.finishRun === 'function') context.finishRun('failed', runState.result);
+      return runState.result;
     });
 
     return { runId };
@@ -207,25 +219,27 @@ class DesktopAgentAdapter extends BaseAgentAdapter {
     }
     runState.status = lifecycle;
     runState.result = {
-      status,
-      summary: res.summary || '',
-      findings: res.findings || [],
-      changedFiles: res.changedFiles || [],
-      artifacts: res.artifacts || [],
-      errors: res.errors || [],
+      ...buildExternalResult({
+        agentId: this.id, runId, status,
+        summary: res.summary || '', findings: res.findings,
+        changedFiles: res.changedFiles, artifacts: res.artifacts,
+        errors: res.errors, startedAt: runState.startedAt
+      }),
       window: res.window || null,
       inputVia: res.inputVia || null,
       readVia: res.readVia || null,
       detection: res.detection || null,
       polls: res.polls || 0,
       elapsedMs: res.elapsedMs || 0,
-      screenshot: res.screenshot || null,
-      trace: res.trace || [],
+      trace: stripSecrets(Array.isArray(res.trace) ? res.trace.slice(-100) : []),
       visionCalls: res.visionCalls || 0,
       visionModel: res.visionModel || null,
-      confidence: res.confidence != null ? res.confidence : null,
-      raw: res
+      confidence: res.confidence != null ? res.confidence : null
     };
+    if (runState.context && typeof runState.context.finishRun === 'function') {
+      try { runState.context.finishRun(lifecycle, runState.result); } catch { /* noop */ }
+    }
+    return runState.result;
   }
 
   /** sendMessage：桌面桥接一次性驱动，不支持运行中追加。 */
@@ -238,11 +252,23 @@ class DesktopAgentAdapter extends BaseAgentAdapter {
     const run = this._runs.get(runId);
     if (!run) return { ok: false, error: 'unknown runId' };
     try { run.ac.abort(); } catch { /* already aborted */ }
-    if (run.status !== LIFECYCLE.COMPLETED && run.status !== LIFECYCLE.FAILED &&
-        run.status !== LIFECYCLE.CANCELLED && run.status !== LIFECYCLE.TIMEOUT) {
-      run.status = LIFECYCLE.CANCELLED;
-    }
-    return { ok: true };
+    const q = await this.awaitQuiescence(runId, 5000);
+    return { ok: q.quiesced, status: q.quiesced ? 'cancelled' : 'cancelling', quiesced: q.quiesced, residual: q.residual, detail: q.detail };
+  }
+
+  async awaitQuiescence(runId, timeoutMs = 5000) {
+    const run = this._runs.get(runId);
+    if (!run) return { quiesced: false, residual: 'unknown runId', detail: 'unknown runId' };
+    if (!run.executionPromise) return { quiesced: true, residual: 0, detail: 'Desktop run not active' };
+    let timer;
+    const settled = await Promise.race([
+      run.executionPromise.then(() => true, () => true),
+      new Promise(resolve => { timer = setTimeout(() => resolve(false), timeoutMs); })
+    ]);
+    if (timer) clearTimeout(timer);
+    return settled
+      ? { quiesced: true, residual: 0, detail: 'Desktop automation stopped' }
+      : { quiesced: false, residual: { runId }, detail: 'Desktop automation still active' };
   }
 
   async getStatus(runId) {

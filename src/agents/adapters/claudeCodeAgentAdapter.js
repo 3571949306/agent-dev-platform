@@ -43,6 +43,7 @@ const { classifyRisk } = require('../../security/permissionRiskClassifier');
 const permissionAudit = require('../../security/permissionAudit');
 const { AUTH_STATE, AUTH_MODE } = require('../protocols/acp/authBroker');
 const { resolveCliInPath } = require('../../services/externalAgents');
+const pathSecurity = require('../../security/pathSecurity');
 
 const DEFAULT_TIMEOUT_MS = 600000;
 const DEFAULT_VERSION_TIMEOUT_MS = 5000;
@@ -345,6 +346,23 @@ class ClaudeCodeAgentAdapter extends BaseAgentAdapter {
     };
   }
 
+  /** SDK import / CLI version are safe; neither path has a side-effect-free
+   * session protocol, so this deliberately does not claim protocol proof. */
+  async safeVerify() {
+    const detection = await this.detect();
+    return {
+      agentId: this.id,
+      paidCalls: 0,
+      modelCalls: 0,
+      protocolAttempted: false,
+      protocolVerified: false,
+      runtime: detection.sdkAvailable ? RUNTIME_MODE.SDK : (detection.cliAvailable ? RUNTIME_MODE.CLI : null),
+      version: detection.version || null,
+      auth: this.getAuthState(),
+      reason: detection.available ? 'SAFE_PROTOCOL_UNAVAILABLE_WITHOUT_PROMPT' : 'NOT_INSTALLED'
+    };
+  }
+
   async startTask(task, context = {}) {
     if (!task || (!task.goal && typeof task !== 'string')) {
       throw new Error('ClaudeCodeAgentAdapter.startTask: task.goal 必填');
@@ -352,7 +370,17 @@ class ClaudeCodeAgentAdapter extends BaseAgentAdapter {
     const taskText = typeof task === 'string' ? task : task.goal;
     const normalizedTask = typeof task === 'string' ? { goal: task } : task;
 
-    const runId = crypto.randomUUID();
+    const projectRoot = normalizedTask.projectRoot || context.projectRoot;
+    if (context.productionHub && !projectRoot) {
+      throw Object.assign(new Error('Claude production run requires projectRoot'), { code: 'PROJECT_ROOT_REQUIRED' });
+    }
+    if (projectRoot) {
+      normalizedTask.projectRoot = context.productionHub
+        ? pathSecurity.canonicalizeRoot(projectRoot)
+        : projectRoot;
+    }
+
+    const runId = context.runId || crypto.randomUUID();
     const ac = new AbortController();
     if (context.signal) {
       if (context.signal.aborted) ac.abort();
@@ -372,19 +400,22 @@ class ClaudeCodeAgentAdapter extends BaseAgentAdapter {
       inputQueue: null,  // streaming input 队列
       handle: null,      // CLI ProcessHandle
       sessionId: null,
-      delegate: null     // ACP 模式下的 AcpAgentAdapter
+      delegate: null,    // ACP 模式下的 AcpAgentAdapter
+      productionHub: context.productionHub === true,
+      cancelRequested: false
     };
     this._runs.set(runId, runState);
 
     this._emit(context, AGENT_EVENT.RUN_STARTED, { runId, agentId: this.id, goal: taskText });
 
-    this._dispatch(runId, normalizedTask, taskText, context).catch(err => {
+    runState.executionPromise = this._dispatch(runId, normalizedTask, taskText, context).catch(err => {
       const result = {
-        status: 'failed', summary: '',
+        status: ac.signal.aborted ? 'cancelled' : 'failed', summary: '',
         errors: [err && err.message ? err.message : String(err)],
         findings: [], changedFiles: [], artifacts: []
       };
       this._settle(runId, result, context);
+      return result;
     });
 
     return { runId };
@@ -413,7 +444,7 @@ class ClaudeCodeAgentAdapter extends BaseAgentAdapter {
         if (mode === RUNTIME_MODE.ACP) throw err;
         this._emit(context, AGENT_EVENT.FALLBACK, {
           runId, agentId: this.id, from: RUNTIME_MODE.ACP, to: RUNTIME_MODE.SDK,
-          reason: 'ACP_UNAVAILABLE', detail: err && err.message
+          reason: 'ACP_UNAVAILABLE', detail: err && err.message, timestamp: new Date().toISOString()
         });
       }
     }
@@ -425,7 +456,7 @@ class ClaudeCodeAgentAdapter extends BaseAgentAdapter {
         if (mode === RUNTIME_MODE.SDK) throw err;
         this._emit(context, AGENT_EVENT.FALLBACK, {
           runId, agentId: this.id, from: RUNTIME_MODE.SDK, to: RUNTIME_MODE.CLI,
-          reason: 'SDK_RUN_FAILED', detail: err && err.message
+          reason: 'SDK_RUN_FAILED', detail: err && err.message, timestamp: new Date().toISOString()
         });
       }
     } else if (wantAuto) {
@@ -433,7 +464,7 @@ class ClaudeCodeAgentAdapter extends BaseAgentAdapter {
       // 否则用户会"以为在用 SDK，其实一直在跑能力更弱的 CLI"（无 canUseTool / 无 interrupt）。
       this._emit(context, AGENT_EVENT.FALLBACK, {
         runId, agentId: this.id, from: RUNTIME_MODE.SDK, to: RUNTIME_MODE.CLI,
-        reason: 'SDK_NOT_INSTALLED', detail: d.sdkError || null
+        reason: 'SDK_NOT_INSTALLED', detail: d.sdkError || null, timestamp: new Date().toISOString()
       });
     }
 
@@ -504,6 +535,7 @@ class ClaudeCodeAgentAdapter extends BaseAgentAdapter {
     const q = sdk.query({ prompt: queue.iterable, options });
     runState.query = q;
     runState.status = LIFECYCLE.RUNNING;
+    runState.executionStarted = true;
 
     // 超时 ≠ 取消（spec §67）：单独计时，超时后 abort 并打 timeout 标记
     let timedOut = false;
@@ -636,6 +668,7 @@ class ClaudeCodeAgentAdapter extends BaseAgentAdapter {
     runState.runtime = RUNTIME_MODE.CLI;
     this._activeRuntime = RUNTIME_MODE.CLI;
     runState.status = LIFECYCLE.RUNNING;
+    runState.executionStarted = true;
 
     const cwd = task.projectRoot || (context && context.projectRoot) || undefined;
     const readOnly = !!task.readOnly;
@@ -684,6 +717,7 @@ class ClaudeCodeAgentAdapter extends BaseAgentAdapter {
       env: buildEnvAllowlist(this.passthroughEnv, this.environment || (context && context.env) || {}),
       timeoutMs,
       signal: runState.ac.signal,
+      runId,
       captureOutput: false // stdout 是 JSONL 协议流，交给 decoder 增量消费
     });
     runState.handle = handle;
@@ -726,6 +760,7 @@ class ClaudeCodeAgentAdapter extends BaseAgentAdapter {
 
     const result = this._buildResult(status, acc, errors, RUNTIME_MODE.CLI, runState.sessionId);
     result.exitCode = exit.code != null ? exit.code : null;
+    runState.quiescence = { quiesced: exit.quiesced !== false, residual: exit.residual || 0 };
     if (runState.sessionId) this.sessions.setStatus(runId, status);
     this._settle(runId, result, context);
     return result;
@@ -771,24 +806,36 @@ class ClaudeCodeAgentAdapter extends BaseAgentAdapter {
     // 直接透传上层 context：事件 / 权限 / finishRun 都由委派适配器发出，
     // 避免二次归一化造成"终态发两次"（spec §64）。
     runState._settled = true;
-    const { runId: delegateRunId } = await delegate.startTask(task, context);
+    const delegateContext = context.productionHub ? { ...context, runId } : context;
+    const { runId: delegateRunId } = await delegate.startTask(task, delegateContext);
+    if (context.productionHub && delegateRunId !== runId) {
+      try { await delegate.cancel(delegateRunId); } catch { /* cleanup best effort */ }
+      throw Object.assign(new Error(`Claude ACP run identity mismatch: expected ${runId}, got ${delegateRunId}`), {
+        code: 'AGENT_RUN_IDENTITY_MISMATCH'
+      });
+    }
     runState.delegateRunId = delegateRunId;
     runState.status = LIFECYCLE.RUNNING;
+    runState.executionStarted = true;
 
     // 轮询委派 Run 的终态，回填到本适配器的 run 记录（供 getStatus/getResult 查询）
-    const poll = async () => {
+    while (true) {
+      // dispose() removes the owning run.  Without this ownership check an
+      // ACP delegate that is disposed while still reporting RUNNING leaves a
+      // permanent polling timer (and keeps Electron/test shutdown alive).
+      if (!this._runs.has(runId)) return null;
       const st = await delegate.getStatus(delegateRunId);
+      if (!this._runs.has(runId)) return null;
+      if (runState.cancelRequested) return runState.result;
       runState.status = st.status;
       runState.sessionId = st.sessionId || runState.sessionId;
       if ([LIFECYCLE.COMPLETED, LIFECYCLE.FAILED, LIFECYCLE.CANCELLED, LIFECYCLE.TIMEOUT].includes(st.status)) {
         runState.result = await delegate.getResult(delegateRunId);
         if (runState.result) runState.result.runtime = RUNTIME_MODE.ACP;
-        return;
+        return runState.result;
       }
-      setTimeout(poll, 500).unref?.();
-    };
-    poll().catch(() => { /* 委派适配器自己会发失败事件 */ });
-    return { status: 'running', runtime: RUNTIME_MODE.ACP };
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
   }
 
   // ────────────────────────────── 公共部分 ──────────────────────────────
@@ -903,24 +950,52 @@ class ClaudeCodeAgentAdapter extends BaseAgentAdapter {
     if (!run) return { ok: false, error: 'unknown runId' };
 
     if (run.runtime === RUNTIME_MODE.ACP && run.delegate) {
-      try { await run.delegate.cancel(run.delegateRunId); } catch { /* noop */ }
-      run.status = LIFECYCLE.CANCELLED;
-      return { ok: true };
+      try {
+        run.cancelRequested = true;
+        const ack = await run.delegate.cancel(run.delegateRunId);
+        if (ack && ack.ok === true && (!run.productionHub || ack.quiesced === true)) {
+          run.status = LIFECYCLE.CANCELLED;
+        }
+        return { ...ack, status: ack.status || 'cancelled' };
+      } catch (e) {
+        return { ok: false, status: 'cancelling', quiesced: false, residual: { runId }, detail: e.message };
+      }
     }
 
     if (run.runtime === RUNTIME_MODE.SDK && run.query) {
       try { await run.query.interrupt(); } catch { /* 继续强制回收 */ }
-      await new Promise(r => setTimeout(r, 300)); // grace period
     }
     try { run.ac.abort(); } catch { /* already aborted */ }
     if (run.inputQueue) { try { run.inputQueue.close(); } catch { /* noop */ } }
     if (run.query) { try { run.query.close(); } catch { /* noop */ } }
     if (run.handle && !run.handle._finished) { try { run.handle.kill('SIGKILL'); } catch { /* noop */ } }
 
-    if (![LIFECYCLE.COMPLETED, LIFECYCLE.FAILED, LIFECYCLE.CANCELLED, LIFECYCLE.TIMEOUT].includes(run.status)) {
-      run.status = LIFECYCLE.CANCELLED;
+    const q = await this.awaitQuiescence(runId, 5000);
+    return { ok: q.quiesced, status: q.quiesced ? 'cancelled' : 'cancelling', quiesced: q.quiesced, residual: q.residual, detail: q.detail };
+  }
+
+  async awaitQuiescence(runId, timeoutMs = 5000) {
+    const run = this._runs.get(runId);
+    if (!run) return { quiesced: false, residual: 'unknown runId', detail: 'unknown runId' };
+    if (run.delegate && typeof run.delegate.awaitQuiescence === 'function') {
+      return run.delegate.awaitQuiescence(run.delegateRunId, timeoutMs);
     }
-    return { ok: true };
+    if (run.handle && typeof run.handle.awaitExit === 'function') {
+      const q = await run.handle.awaitExit(timeoutMs);
+      return { ...q, detail: q.quiesced ? 'Claude CLI process exited' : 'Claude CLI process exit unconfirmed' };
+    }
+    if (run.executionPromise && !run._settled) {
+      let timer;
+      const settled = await Promise.race([
+        run.executionPromise.then(() => true, () => true),
+        new Promise(resolve => { timer = setTimeout(() => resolve(false), timeoutMs); })
+      ]);
+      if (timer) clearTimeout(timer);
+      return settled
+        ? { quiesced: true, residual: 0, detail: 'Claude SDK stream closed' }
+        : { quiesced: false, residual: { runId }, detail: 'Claude SDK stream still active' };
+    }
+    return { quiesced: true, residual: 0, detail: 'Claude runtime quiesced' };
   }
 
   async getStatus(runId) {

@@ -116,6 +116,7 @@ function createAcpClientRuntime({ transportFactory, sessionManager, authBrokerFa
   const authBroker = (authBrokerFactory || createExternalAgentAuthBroker)();
 
   let transport = null;
+  let lastTransport = null;
   let handshake = null;
   let agentId = null;
   let projectRootHint = null;
@@ -260,6 +261,7 @@ function createAcpClientRuntime({ transportFactory, sessionManager, authBrokerFa
    */
   async function connect(connectOpts = {}) {
     transport = await connectImpl(connectOpts);
+    lastTransport = transport;
     agentId = connectOpts.agentId || null;
     projectRootHint = connectOpts.cwd || null;
 
@@ -546,6 +548,13 @@ function createAcpClientRuntime({ transportFactory, sessionManager, authBrokerFa
     projectRootHint = null;
   }
 
+  async function awaitQuiescence(timeoutMs = 3000) {
+    const t = transport || lastTransport;
+    if (!t) return { quiesced: true, residual: 0 };
+    if (typeof t.awaitExit === 'function') return t.awaitExit(timeoutMs);
+    return { quiesced: typeof t.isQuiesced === 'function' ? t.isQuiesced() : false, residual: 'transport exit unavailable' };
+  }
+
   return {
     connect,
     getHandshake,
@@ -558,7 +567,8 @@ function createAcpClientRuntime({ transportFactory, sessionManager, authBrokerFa
     prompt,
     cancel,
     closeSession,
-    disconnect
+    disconnect,
+    awaitQuiescence
   };
 }
 

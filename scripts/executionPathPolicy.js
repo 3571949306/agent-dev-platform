@@ -109,7 +109,10 @@ const EXECUTION_PATH_POLICY = Object.freeze({
     canonical: [
       // Tool providers guarded by PathSecurity.
       'src/tools/filesystem.js',
-      'src/tools/patch.js'
+      'src/tools/patch.js',
+      // P4's only non-project write path: an owned, isolated verification
+      // repository under %TEMP%, deleted by the same service.
+      'src/agents/verification/externalAgentVerificationService.js'
     ],
     legacy: [
       // Legacy artifact persistence in the chat compatibility loop.
@@ -123,6 +126,9 @@ const EXECUTION_PATH_POLICY = Object.freeze({
     canonical: [
       // Delegation / Workflow Agent step entry wired by the application.
       'src/ipc/handlers.js',
+      // P4 real verification must traverse the canonical Hub; this thin
+      // service never calls adapters directly.
+      'src/agents/verification/externalAgentVerificationService.js',
       // Documentation occurrence describing the start integration contract.
       'src/security/projectMutationLock.js'
     ],

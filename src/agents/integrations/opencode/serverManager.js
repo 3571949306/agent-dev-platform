@@ -21,9 +21,8 @@
 
 const net = require('net');
 const crypto = require('crypto');
-const { spawn } = require('child_process');
 const { linkSignals } = require('../../../providers/http');
-const { killTree, resolveCliInPath } = require('../../../services/externalAgents');
+const { createCliProcessSupervisor, buildEnvAllowlist } = require('../../runtime/cliProcessSupervisor');
 
 const HOSTNAME = '127.0.0.1';
 const DEFAULT_PORT = 4096;
@@ -73,6 +72,7 @@ function basicAuthHeader(password) {
 function createOpenCodeServerManager(opts = {}) {
   const startTimeoutMs = Number(opts.startTimeoutMs) || SERVER_START_TIMEOUT_MS;
   const healthTimeoutMs = Number(opts.healthTimeoutMs) || HEALTH_TIMEOUT_MS;
+  const supervisor = opts.supervisor || createCliProcessSupervisor();
 
   /** @type {Map<string, { child, port, password, pid, refs:Set<string>, ready:Promise }>} */
   const servers = new Map();
@@ -85,7 +85,7 @@ function createOpenCodeServerManager(opts = {}) {
   async function detect() {
     if (detectedCache) return detectedCache;
     let path = null;
-    try { path = await resolveCliInPath('opencode'); } catch { path = null; }
+    try { path = (await supervisor.detect('opencode')).path; } catch { path = null; }
     detectedCache = { available: !!path, path };
     return detectedCache;
   }
@@ -102,26 +102,7 @@ function createOpenCodeServerManager(opts = {}) {
 
   /** 跑 `${cliPath} --version`，限时 VERSION_TIMEOUT_MS。 */
   function runVersion(cliPath) {
-    return new Promise((resolve) => {
-      let out = '';
-      let child;
-      try {
-        child = spawn(cliPath, ['--version'], { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
-      } catch {
-        return resolve(null);
-      }
-      const timer = setTimeout(() => {
-        killTree(child, 'SIGKILL');
-        resolve(null);
-      }, VERSION_TIMEOUT_MS);
-      child.stdout.on('data', d => { out += d.toString(); });
-      child.stderr.on('data', () => { /* ignore */ });
-      child.on('error', () => { clearTimeout(timer); resolve(null); });
-      child.on('close', code => {
-        clearTimeout(timer);
-        resolve(code === 0 ? out.trim() : null);
-      });
-    });
+    return supervisor.readVersion(cliPath, ['--version'], VERSION_TIMEOUT_MS).catch(() => null);
   }
 
   /**
@@ -203,23 +184,23 @@ function createOpenCodeServerManager(opts = {}) {
     const chosenPort = port || await allocatePort();
     const password = generatePassword();
 
-    const child = spawn(detected.path, [
-      'serve',
-      '--hostname', HOSTNAME,
-      '--port', String(chosenPort)
-    ], {
-      windowsHide: true,
+    const processHandle = await supervisor.spawnProcess({
+      command: detected.path,
+      args: ['serve', '--hostname', HOSTNAME, '--port', String(chosenPort)],
       cwd: projectRoot,
-      // POSIX: 成为进程组 leader，killTree() 可一并回收子进程。
-      detached: process.platform !== 'win32',
-      stdio: ['pipe', 'pipe', 'pipe']
+      env: buildEnvAllowlist(),
+      timeoutMs: 0,
+      captureOutput: false,
+      runId: `opencode-server:${key}`
     });
+    const child = processHandle.child;
 
     const entry = {
       child,
       port: chosenPort,
       password,
       pid: child.pid,
+      processHandle,
       refs: new Set([ref]),
       ready: null
     };
@@ -230,7 +211,7 @@ function createOpenCodeServerManager(opts = {}) {
     servers.set(key, entry);
 
     // 子进程意外退出：清理 entry，避免后续复用到死进程
-    child.on('error', () => { try { killTree(child, 'SIGKILL'); } catch { /* noop */ } });
+    child.on('error', () => { try { processHandle.kill('SIGKILL'); } catch { /* noop */ } });
     child.on('exit', () => {
       // 仅当 entry 仍指向同一个 child 时才清理（防止 stop 后误删新 entry）
       const cur = servers.get(key);
@@ -239,7 +220,7 @@ function createOpenCodeServerManager(opts = {}) {
 
     await entry.ready;
     if (entry.startError) {
-      try { killTree(child, 'SIGKILL'); } catch { /* noop */ }
+      try { processHandle.kill('SIGKILL'); } catch { /* noop */ }
       servers.delete(key);
       throw entry.startError;
     }
@@ -283,9 +264,22 @@ function createOpenCodeServerManager(opts = {}) {
     if (!entry) return false;
     entry.refs.delete(runId);
     if (entry.refs.size > 0) return false;
-    try { killTree(entry.child, 'SIGKILL'); } catch { /* gone */ }
+    try { entry.processHandle ? entry.processHandle.kill('SIGKILL') : entry.child.kill(); } catch { /* gone */ }
     servers.delete(projectRoot);
     return true;
+  }
+
+  async function releaseAndWait(projectRoot, runId, timeoutMs = 5000) {
+    const entry = servers.get(projectRoot);
+    if (!entry) return { quiesced: true, residual: 0, stopped: false };
+    entry.refs.delete(runId);
+    if (entry.refs.size > 0) return { quiesced: true, residual: 0, stopped: false };
+    try { entry.processHandle ? entry.processHandle.kill('SIGKILL') : entry.child.kill(); } catch { /* gone */ }
+    const q = entry.processHandle && typeof entry.processHandle.awaitExit === 'function'
+      ? await entry.processHandle.awaitExit(timeoutMs)
+      : { quiesced: !isProcessAlive(entry.child), residual: isProcessAlive(entry.child) ? { pid: entry.pid } : 0 };
+    if (q.quiesced) servers.delete(projectRoot);
+    return { ...q, stopped: q.quiesced };
   }
 
   /**
@@ -296,7 +290,7 @@ function createOpenCodeServerManager(opts = {}) {
   function stop(projectRoot) {
     const entry = servers.get(projectRoot);
     if (!entry) return false;
-    try { killTree(entry.child, 'SIGKILL'); } catch { /* gone */ }
+    try { entry.processHandle ? entry.processHandle.kill('SIGKILL') : entry.child.kill(); } catch { /* gone */ }
     servers.delete(projectRoot);
     return true;
   }
@@ -327,9 +321,13 @@ function createOpenCodeServerManager(opts = {}) {
    */
   async function dispose() {
     for (const [, entry] of servers) {
-      try { killTree(entry.child, 'SIGKILL'); } catch { /* gone */ }
+      try { entry.processHandle ? entry.processHandle.kill('SIGKILL') : entry.child.kill(); } catch { /* gone */ }
+      if (entry.processHandle && typeof entry.processHandle.awaitExit === 'function') {
+        try { await entry.processHandle.awaitExit(5000); } catch { /* gone */ }
+      }
     }
     servers.clear();
+    supervisor.dispose();
     detectedCache = null;
   }
 
@@ -338,6 +336,7 @@ function createOpenCodeServerManager(opts = {}) {
     getVersion,
     start,
     release,
+    releaseAndWait,
     stop,
     health,
     getServer,

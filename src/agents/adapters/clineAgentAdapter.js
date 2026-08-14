@@ -268,10 +268,18 @@ class ClineAgentAdapter extends BaseAgentAdapter {
         };
 
         const probe = await this._sidecar.probe(workspace.ready ? workspace.path : undefined);
+        // A health probe may start the bundled sidecar.  Health checks are
+        // observation-only, so confirm that process has stopped before the
+        // result is exposed to the Hub.
+        const shutdown = typeof this._sidecar.shutdown === 'function'
+          ? await this._sidecar.shutdown()
+          : { ok: true, unsupported: true };
         const sidecarReady = !!(probe.ok && probe.coreConstructible);
-        const healthy = sidecarReady && api.configured && workspace.ready;
+        const processQuiesced = !!shutdown.ok;
+        const healthy = sidecarReady && processQuiesced && api.configured && workspace.ready;
         const missing = [
           !sidecarReady && 'sidecar probe',
+          !processQuiesced && 'sidecar shutdown confirmation',
           !api.configured && 'API configuration',
           !workspace.ready && 'workspace'
         ].filter(Boolean);
@@ -286,7 +294,7 @@ class ClineAgentAdapter extends BaseAgentAdapter {
             : `ClineCore runtime is ready, but ${missing.join(', ') || 'configuration'} is not ready`,
           detection,
           integration: 'ClineCore Sidecar',
-          sidecar: { ready: sidecarReady, protocolVersion: detection.protocolVersion || null },
+          sidecar: { ready: sidecarReady, quiesced: processQuiesced, protocolVersion: detection.protocolVersion || null },
           api,
           workspace,
           runtime: { ...probe, probe: true }
@@ -346,6 +354,39 @@ class ClineAgentAdapter extends BaseAgentAdapter {
       latencyMs: Date.now() - start,
       detail: `@cline/sdk available (${runtime.detail})`,
       detection
+    };
+  }
+
+  /** ClineCore's runtime.probe is model-free. The sidecar is shut down before
+   * evidence is returned so a health check cannot leave a production process. */
+  async safeVerify({ projectRoot } = {}) {
+    const detection = await this.detect();
+    if (!detection.available || this._useLegacyBridge()) {
+      return {
+        agentId: this.id, paidCalls: 0, modelCalls: 0,
+        protocolAttempted: false, protocolVerified: false,
+        runtime: this._useLegacyBridge() ? 'sdk-test-bridge' : 'clinecore-sidecar',
+        version: detection.version || null,
+        auth: { state: 'UNKNOWN', authenticated: false }
+      };
+    }
+    let probe = null;
+    let shutdown = null;
+    try {
+      probe = await this._sidecar.probe(projectRoot ? canonicalDirectory(projectRoot) : undefined);
+    } finally {
+      shutdown = await this._sidecar.shutdown();
+    }
+    return {
+      agentId: this.id, paidCalls: 0, modelCalls: 0,
+      protocolAttempted: true,
+      protocolVerified: !!(probe && probe.ok && probe.coreConstructible && shutdown && shutdown.ok),
+      runtime: 'clinecore-sidecar',
+      version: probe && probe.clineSdkVersion || detection.version || null,
+      auth: { state: 'CONFIGURATION_REQUIRED', authenticated: false, detail: 'Cline model connection is evaluated separately' },
+      reason: shutdown && shutdown.ok ? '' : 'CLINE_SIDECAR_RESIDUE',
+      quiesced: !!(shutdown && shutdown.ok),
+      residual: shutdown && shutdown.ok ? 0 : 'sidecar shutdown unconfirmed'
     };
   }
 
@@ -419,7 +460,13 @@ class ClineAgentAdapter extends BaseAgentAdapter {
     }
 
     // projectRoot 取自 task / context，绝不回退到 home 目录
-    const projectRoot = task.projectRoot || (context && context.projectRoot) || null;
+    const requestedRoot = task.projectRoot || (context && context.projectRoot) || null;
+    if (context.productionHub && !requestedRoot) {
+      throw Object.assign(new Error('Cline production run requires projectRoot'), { code: 'PROJECT_ROOT_REQUIRED' });
+    }
+    const projectRoot = requestedRoot && context.productionHub
+      ? canonicalDirectory(requestedRoot)
+      : requestedRoot;
 
     const runId = (context && context.runId) || crypto.randomUUID();
     const ac = new AbortController();
@@ -470,7 +517,7 @@ class ClineAgentAdapter extends BaseAgentAdapter {
     const execution = runState.runtimeMode === 'sidecar'
       ? this._executeSidecar(runId, clineConfig, taskText, task, context)
       : this._executeCline(runId, clineConfig, taskText, task, context);
-    execution.catch(err => {
+    runState.executionPromise = execution.catch(err => {
       const run = this._runs.get(runId);
       const cls = this._classifyFailure(run, err);
       const tr = this._finish(runId, cls.status, cls.reason,
@@ -478,6 +525,7 @@ class ClineAgentAdapter extends BaseAgentAdapter {
       if (!tr.accepted && run) {
         run.errors = sanitizeErrors([...(run.errors || []), err && err.message ? err.message : String(err)]);
       }
+      return run && run.result;
     });
 
     return { runId };
@@ -878,16 +926,63 @@ class ClineAgentAdapter extends BaseAgentAdapter {
     if (!run.abortReason) run.abortReason = 'user_cancel';
     if (run.runtimeMode === 'sidecar') this._sidecar.cancel(runId, 'user_cancel');
     this._cancelAgent(run.agent);
-    const tr = this._finish(runId, LIFECYCLE.CANCELLED, 'AGENT_CANCELLED',
-      this._buildResult(run, LIFECYCLE.CANCELLED, { extraErrors: ['用户已停止'] }));
-    if (tr.accepted) {
+    try { run.ac.abort(); } catch { /* already aborted */ }
+    let q = await this.awaitQuiescence(runId, 3000);
+    if (!q.quiesced && run.runtimeMode === 'sidecar') {
+      await this._sidecar.shutdown();
+      q = await this.awaitQuiescence(runId, 2000);
+    }
+    if (q.quiesced && !this._gate.isTerminal(runId)) {
+      this._finish(runId, LIFECYCLE.CANCELLED, 'AGENT_CANCELLED',
+        this._buildResult(run, LIFECYCLE.CANCELLED, { extraErrors: ['用户已停止'] }));
+    }
+    // The execution promise can observe AbortSignal and enter CANCELLED while
+    // cancel() is awaiting quiescence.  Emit the user-cancel event here once,
+    // independent of which path won that race.
+    if (q.quiesced && this._gate.getStatus(runId) === LIFECYCLE.CANCELLED && !run.cancelEventEmitted) {
+      run.cancelEventEmitted = true;
       const ctx = run.context || {};
       if (typeof ctx.emit === 'function') {
         try { ctx.emit(AGENT_EVENT.RUN_CANCELLED, { runId, agentId: this.manifest.id }); } catch { /* noop */ }
       }
     }
-    try { run.ac.abort(); } catch { /* already aborted */ }
-    return { ok: true };
+    return {
+      ok: q.quiesced,
+      status: q.quiesced ? 'cancelled' : 'cancelling',
+      quiesced: q.quiesced,
+      residual: q.residual,
+      detail: q.detail
+    };
+  }
+
+  async awaitQuiescence(runId, timeoutMs = 3000) {
+    const run = this._runs.get(runId);
+    if (!run) return { quiesced: false, residual: 'unknown runId', detail: 'unknown runId' };
+    if (run.runtimeMode === 'sidecar' && typeof this._sidecar.awaitRunQuiescence === 'function') {
+      const q = await this._sidecar.awaitRunQuiescence(runId, timeoutMs);
+      if (!q.quiesced) return { ...q, detail: 'Cline sidecar run still active' };
+      if (typeof this._sidecar.activeRunCount === 'function' && this._sidecar.activeRunCount() === 0 &&
+          typeof this._sidecar.shutdown === 'function') {
+        const shutdown = await this._sidecar.shutdown();
+        const stopped = !!shutdown.ok && !this._sidecar.child;
+        return stopped
+          ? { quiesced: true, residual: 0, detail: 'Cline sidecar run inactive and process stopped' }
+          : { quiesced: false, residual: { pid: this._sidecar.child && this._sidecar.child.pid || null }, detail: 'Cline sidecar process shutdown unconfirmed' };
+      }
+      return { ...q, detail: 'Cline sidecar run inactive' };
+    }
+    if (run.executionPromise && !this._gate.isTerminal(runId)) {
+      let timer;
+      const settled = await Promise.race([
+        run.executionPromise.then(() => true, () => true),
+        new Promise(resolve => { timer = setTimeout(() => resolve(false), timeoutMs); })
+      ]);
+      if (timer) clearTimeout(timer);
+      return settled
+        ? { quiesced: true, residual: 0, detail: 'Cline SDK run settled' }
+        : { quiesced: false, residual: { runId }, detail: 'Cline SDK run still active' };
+    }
+    return { quiesced: true, residual: 0, detail: 'Cline run quiesced' };
   }
 
   async getStatus(runId) {

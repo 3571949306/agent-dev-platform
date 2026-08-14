@@ -84,17 +84,45 @@ function buildExternalResult(o = {}) {
     agentId: o.agentId || null,
     runId: o.runId || null,
     status,
-    summary: o.summary || '',
-    findings: Array.isArray(o.findings) ? o.findings : [],
-    changedFiles: Array.isArray(o.changedFiles) ? o.changedFiles : [],
-    artifacts: Array.isArray(o.artifacts) ? o.artifacts : [],
-    diff: Array.isArray(o.diff) ? o.diff : [],
-    tests: Array.isArray(o.tests) ? o.tests : [],
-    usage: o.usage || null,
+    summary: String(stripSecrets(o.summary || '')).slice(0, 4000),
+    findings: Array.isArray(o.findings) ? stripSecrets(o.findings.slice(0, 200)) : [],
+    changedFiles: Array.isArray(o.changedFiles) ? stripSecrets(o.changedFiles.slice(0, 2000)) : [],
+    artifacts: Array.isArray(o.artifacts) ? stripSecrets(o.artifacts.slice(0, 200)) : [],
+    diff: Array.isArray(o.diff) ? stripSecrets(o.diff.slice(0, 2000)) : [],
+    tests: Array.isArray(o.tests) ? stripSecrets(o.tests.slice(0, 500)) : [],
+    usage: stripSecrets(o.usage || null),
     errors: Array.isArray(o.errors) ? stripSecrets(o.errors) : [],
     durationMs,
-    provenance: o.provenance || null
+    provenance: stripSecrets(o.provenance || null)
   };
+}
+
+/** Reduce any adapter-specific result to the bounded production contract.
+ * Full raw payloads, screenshots, process environment and credentials are
+ * intentionally not retained in Hub lifecycle results. */
+function sanitizeExternalResult(result, identity = {}) {
+  const value = result && typeof result === 'object' ? result : { summary: result };
+  const out = buildExternalResult({
+    ...value,
+    agentId: identity.agentId || value.agentId,
+    runId: identity.runId || value.runId
+  });
+  const optional = [
+    'sessionId', 'runtime', 'stopReason', 'exitCode', 'httpStatus',
+    'quiesced', 'residual', 'effectObserved', 'verificationStatus',
+    'reportedChangedFiles', 'observedChangedFiles', 'beforeFingerprint',
+    'afterFingerprint', 'errorCode', 'protocolVersion', 'window',
+    'inputVia', 'readVia', 'polls', 'elapsedMs', 'visionCalls',
+    'visionModel', 'confidence'
+  ];
+  for (const key of optional) {
+    if (value[key] !== undefined) out[key] = stripSecrets(value[key]);
+  }
+  if (value.plan !== undefined) out.plan = stripSecrets(value.plan);
+  if (value.readFiles !== undefined) out.readFiles = stripSecrets(Array.isArray(value.readFiles) ? value.readFiles.slice(0, 2000) : []);
+  if (value.permissionDenials !== undefined) out.permissionDenials = stripSecrets(Array.isArray(value.permissionDenials) ? value.permissionDenials.slice(0, 200) : []);
+  if (value.sanitizedRaw !== undefined) out.sanitizedRaw = sanitizeRaw(value.sanitizedRaw);
+  return out;
 }
 
 /** 对一段错误数组脱敏（供适配器在不走 buildExternalResult 时复用）。 */
@@ -106,4 +134,4 @@ function sanitizeErrors(errors) {
   });
 }
 
-module.exports = { buildExternalResult, stripSecrets, sanitizeRaw, sanitizeErrors, REDACTED };
+module.exports = { buildExternalResult, sanitizeExternalResult, stripSecrets, sanitizeRaw, sanitizeErrors, REDACTED };

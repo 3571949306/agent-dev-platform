@@ -269,6 +269,8 @@ export const api = {
 
   // v2.8.1 — 验证级别（§44/§45：与 Health 分离，不可混用）
   hubVerification: () => call('hub:verification'),
+  hubVerifySafe: (agentId) => call('hub:verify-safe', agentId),
+  hubVerifyReal: (agentId, explicitConsent) => call('hub:verify-real', { agentId, explicitConsent: explicitConsent === true }),
 
   // v2.9.0 — Unified Main Agent Orchestrator（统一 Parent 入口为 mainAgent:run，不新增 orchestrator:start）
   orchCancel: (runId) => call('orchestrator:cancel', runId),

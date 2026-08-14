@@ -15,11 +15,12 @@
  */
 
 const crypto = require('crypto');
-const fs = require('fs');
-const { spawn } = require('child_process');
 const { BaseAgentAdapter } = require('./baseAgentAdapter');
 const { HEALTH_STATE, LIFECYCLE } = require('../hub/types');
-const { killTree, resolveCliInPath } = require('../../services/externalAgents');
+const { createCliProcessSupervisor, buildEnvAllowlist } = require('../runtime/cliProcessSupervisor');
+const { createExternalAgentTerminalGate } = require('../runtime/externalTerminalGate');
+const pathSecurity = require('../../security/pathSecurity');
+const { buildExternalResult, sanitizeRaw } = require('../runtime/resultSanitizer');
 
 const VERSION_TIMEOUT_MS = 5000;
 const DEFAULT_TIMEOUT_MS = 600000;
@@ -67,6 +68,10 @@ class CliAgentAdapter extends BaseAgentAdapter {
       ? (Array.isArray(config.versionCommand) ? config.versionCommand : [config.versionCommand])
       : ['--version'];
     this.outputFormat = config.outputFormat || 'text';
+    this.passthroughEnv = Array.isArray(config.passthroughEnv) ? config.passthroughEnv : [];
+    this.environment = config.environment || {};
+    this.supervisor = config.supervisor || createCliProcessSupervisor();
+    this._gate = createExternalAgentTerminalGate();
     // runId -> { ac, status, result, child, startedAt, timer }
     this._runs = new Map();
     this._detected = null;
@@ -81,14 +86,7 @@ class CliAgentAdapter extends BaseAgentAdapter {
    */
   async detect() {
     if (this._detected) return this._detected;
-    const exe = this.executable;
-    let path = null;
-    if (exe.includes('/') || exe.includes('\\') || exe.toLowerCase().endsWith('.exe')) {
-      path = fs.existsSync(exe) ? exe : null;
-    } else {
-      try { path = await resolveCliInPath(exe); } catch { path = null; }
-    }
-    this._detected = { available: !!path, path };
+    this._detected = await this.supervisor.detect(this.executable);
     return this._detected;
   }
 
@@ -123,27 +121,7 @@ class CliAgentAdapter extends BaseAgentAdapter {
   }
 
   _runVersion(path) {
-    return new Promise((resolve, reject) => {
-      let out = '';
-      let child;
-      try {
-        child = spawn(path, this.versionCommand, { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
-      } catch (e) {
-        return reject(new Error('spawn failed: ' + e.message));
-      }
-      const timer = setTimeout(() => {
-        killTree(child, 'SIGKILL');
-        reject(new Error('version command timed out'));
-      }, VERSION_TIMEOUT_MS);
-      child.stdout.on('data', d => { out += d.toString(); });
-      child.stderr.on('data', () => { /* ignore */ });
-      child.on('error', e => { clearTimeout(timer); reject(e); });
-      child.on('close', code => {
-        clearTimeout(timer);
-        if (code === 0) resolve(out.trim());
-        else reject(new Error(`${this.executable} ${this.versionCommand.join(' ')} exited with code ${code}`));
-      });
-    });
+    return this.supervisor.readVersion(path, this.versionCommand, VERSION_TIMEOUT_MS);
   }
 
   /**
@@ -162,7 +140,14 @@ class CliAgentAdapter extends BaseAgentAdapter {
       throw new Error(`CliAgentAdapter: executable "${this.executable}" not available`);
     }
 
-    const runId = crypto.randomUUID();
+    const requestedRoot = task.cwd || context.projectRoot || this.cwd || null;
+    if (context.productionHub && !context.projectRoot) {
+      throw Object.assign(new Error('CLI production run requires projectRoot'), { code: 'PROJECT_ROOT_REQUIRED' });
+    }
+    const cwd = context.productionHub
+      ? pathSecurity.canonicalizeRoot(context.projectRoot)
+      : requestedRoot || undefined;
+    const runId = context.runId || crypto.randomUUID();
     const ac = new AbortController();
     if (context.signal) {
       if (context.signal.aborted) ac.abort();
@@ -173,9 +158,8 @@ class CliAgentAdapter extends BaseAgentAdapter {
 
     const extraArgs = Array.isArray(task.args) ? task.args : [];
     const args = [...this.args, ...extraArgs, taskText];
-    const cwd = task.cwd || this.cwd || (context && context.projectRoot) || undefined;
     const timeoutMs = task.timeoutMs || this.timeoutMs;
-    const env = (context && context.env) || undefined;
+    const env = buildEnvAllowlist(this.passthroughEnv, { ...this.environment, ...((context && context.env) || {}) });
 
     const runState = {
       runId,
@@ -183,63 +167,36 @@ class CliAgentAdapter extends BaseAgentAdapter {
       status: LIFECYCLE.STARTING,
       result: null,
       child: null,
-      timer: null,
+      handle: null,
       startedAt: Date.now(),
       stdout: '',
-      stderr: ''
+      stderr: '',
+      context,
+      actualCwd: cwd || null
     };
     this._runs.set(runId, runState);
+    this._gate.init(runId, LIFECYCLE.STARTING);
 
-    let child;
     try {
-      child = spawn(detected.path, args, {
-        windowsHide: true,
-        cwd,
-        env,
-        // POSIX: 成为进程组 leader，killTree() 可一并回收子进程。
-        detached: process.platform !== 'win32'
+      const handle = await this.supervisor.spawnProcess({
+        command: detected.path, args, cwd, env, timeoutMs,
+        signal: ac.signal, runId
       });
+      runState.handle = handle;
+      runState.child = handle.child;
     } catch (e) {
-      runState.status = LIFECYCLE.FAILED;
-      runState.result = {
+      this._finish(runState, LIFECYCLE.FAILED, {
         status: 'failed',
         summary: '',
         errors: [`spawn 失败: ${e.message}`],
         exitCode: null
-      };
+      });
       return { runId };
     }
-    runState.child = child;
     runState.status = LIFECYCLE.RUNNING;
 
-    // 超时定时器
-    runState.timer = setTimeout(() => {
-      killTree(child, 'SIGKILL');
-      if (runState.status === LIFECYCLE.RUNNING || runState.status === LIFECYCLE.STARTING) {
-        runState.status = LIFECYCLE.TIMEOUT;
-        runState.result = this._buildResult('timeout', runState.stdout, runState.stderr, {
-          errors: [`${this.executable} 超过 ${Math.round(timeoutMs / 1000)}s 未结束`]
-        });
-      }
-    }, timeoutMs);
-    if (typeof runState.timer.unref === 'function') runState.timer.unref();
-
-    // abort 信号
-    const onAbort = () => {
-      killTree(child, 'SIGKILL');
-      if (runState.status === LIFECYCLE.RUNNING || runState.status === LIFECYCLE.STARTING) {
-        runState.status = LIFECYCLE.CANCELLED;
-        runState.result = this._buildResult('cancelled', runState.stdout, runState.stderr, {
-          errors: ['用户已停止']
-        });
-      }
-    };
-    if (ac.signal.aborted) onAbort();
-    else {
-      try { ac.signal.addEventListener('abort', onAbort, { once: true }); } catch { /* noop */ }
-    }
-
     // stdin 注入（可选）
+    const child = runState.child;
     if (task.stdin && child.stdin) {
       try {
         child.stdin.write(typeof task.stdin === 'string' ? task.stdin : JSON.stringify(task.stdin));
@@ -249,57 +206,67 @@ class CliAgentAdapter extends BaseAgentAdapter {
       try { child.stdin.end(); } catch { /* noop */ }
     }
 
-    child.stdout.on('data', d => {
+    if (child.stdout) child.stdout.on('data', d => {
       const chunk = d.toString();
       runState.stdout += chunk;
       if (context && context.onChunk) {
         try { context.onChunk(chunk); } catch { /* listener must not break the run */ }
       }
     });
-    child.stderr.on('data', d => { runState.stderr += d.toString(); });
+    if (child.stderr) child.stderr.on('data', d => { runState.stderr += d.toString(); });
 
-    child.on('error', e => {
-      if (runState.timer) clearTimeout(runState.timer);
-      if (runState.status === LIFECYCLE.RUNNING || runState.status === LIFECYCLE.STARTING) {
-        runState.status = LIFECYCLE.FAILED;
-        runState.result = this._buildResult('failed', runState.stdout, runState.stderr, {
-          errors: [`进程错误: ${e.message}`]
-        });
+    runState.executionPromise = runState.handle.done.then(exit => {
+      const stdout = runState.handle.stdout || runState.stdout;
+      const stderr = runState.handle.stderr || runState.stderr;
+      runState.stdout = stdout;
+      runState.stderr = stderr;
+      let lifecycle;
+      let status;
+      let errors = [];
+      if (exit.aborted || ac.signal.aborted) {
+        lifecycle = LIFECYCLE.CANCELLED; status = 'cancelled'; errors = ['用户已停止'];
+      } else if (exit.timedOut) {
+        lifecycle = LIFECYCLE.TIMEOUT; status = 'timeout'; errors = [`${this.executable} 超过 ${Math.round(timeoutMs / 1000)}s 未结束`];
+      } else if (exit.code === 0) {
+        lifecycle = LIFECYCLE.COMPLETED; status = 'completed';
+      } else {
+        lifecycle = LIFECYCLE.FAILED; status = 'failed';
+        errors = [exit.error ? `进程错误: ${exit.error}` : `${this.executable} 退出码 ${exit.code}${stderr ? '：' + stderr.slice(0, 300) : ''}`];
       }
-    });
-
-    child.on('close', code => {
-      if (runState.timer) { clearTimeout(runState.timer); runState.timer = null; }
-      // 已经被 timeout / cancel / error 抢先标记终态，保留第一个终态
-      if (runState.status === LIFECYCLE.RUNNING || runState.status === LIFECYCLE.STARTING) {
-        const ok = code === 0;
-        runState.status = ok ? LIFECYCLE.COMPLETED : LIFECYCLE.FAILED;
-        runState.result = this._buildResult(ok ? 'completed' : 'failed', runState.stdout, runState.stderr, {
-          exitCode: code,
-          errors: ok ? [] : [`${this.executable} 退出码 ${code}${runState.stderr ? '：' + runState.stderr.slice(0, 300) : ''}`]
-        });
-      }
+      const result = this._buildResult(status, stdout, stderr, { exitCode: exit.code, errors, quiesced: exit.quiesced !== false, residual: exit.residual || 0 });
+      this._finish(runState, lifecycle, result);
+      return result;
     });
 
     return { runId };
   }
 
+  _finish(run, lifecycle, result) {
+    const tr = this._gate.transition(run.runId, lifecycle);
+    run.status = tr.status;
+    if (!tr.accepted) return tr;
+    run.result = result;
+    if (run.context && typeof run.context.finishRun === 'function') {
+      try { run.context.finishRun(lifecycle, result); } catch { /* noop */ }
+    }
+    return tr;
+  }
+
   /** 按 outputFormat 构建统一结果对象。 */
   _buildResult(status, stdout, stderr, extra = {}) {
     const parsed = parseOutput(stdout, this.outputFormat);
-    return {
+    const result = buildExternalResult({
+      agentId: this.id,
       status,
       summary: (stdout || stderr || '').slice(0, 4000),
-      findings: [],
-      changedFiles: [],
-      artifacts: [],
-      errors: [],
-      exitCode: extra.exitCode != null ? extra.exitCode : null,
-      stdout: stdout || '',
-      stderr: stderr || '',
-      parsed: parsed.ok ? parsed.value : null,
-      ...extra
-    };
+      errors: extra.errors || [],
+      provenance: { transport: 'cli', executable: this.executable }
+    });
+    result.exitCode = extra.exitCode != null ? extra.exitCode : null;
+    result.quiesced = extra.quiesced !== false;
+    result.residual = extra.residual || 0;
+    result.sanitizedRaw = sanitizeRaw(parsed.ok ? parsed.value : { stdout, stderr, error: parsed.error });
+    return result;
   }
 
   /** sendMessage：CLI 单次 exec 不支持运行中追加消息（无 stdin 通道复用）。 */
@@ -311,16 +278,17 @@ class CliAgentAdapter extends BaseAgentAdapter {
   async cancel(runId) {
     const run = this._runs.get(runId);
     if (!run) return { ok: false, error: 'unknown runId' };
-    if (run.child) {
-      try { killTree(run.child, 'SIGKILL'); } catch { /* gone */ }
-    }
     try { run.ac.abort(); } catch { /* already aborted */ }
-    if (run.status !== LIFECYCLE.COMPLETED && run.status !== LIFECYCLE.FAILED &&
-        run.status !== LIFECYCLE.CANCELLED && run.status !== LIFECYCLE.TIMEOUT) {
-      run.status = LIFECYCLE.CANCELLED;
-      run.result = this._buildResult('cancelled', run.stdout, run.stderr, { errors: ['用户已停止'] });
-    }
-    return { ok: true };
+    const q = await this.awaitQuiescence(runId, 5000);
+    return { ok: q.quiesced, status: q.quiesced ? 'cancelled' : 'cancelling', quiesced: q.quiesced, residual: q.residual, detail: q.detail };
+  }
+
+  async awaitQuiescence(runId, timeoutMs = 5000) {
+    const run = this._runs.get(runId);
+    if (!run) return { quiesced: false, residual: 'unknown runId', detail: 'unknown runId' };
+    if (!run.handle) return { quiesced: true, residual: 0, detail: 'CLI process was not started' };
+    const q = await run.handle.awaitExit(timeoutMs);
+    return { ...q, detail: q.quiesced ? 'CLI process tree exited' : 'CLI process tree exit unconfirmed' };
   }
 
   async getStatus(runId) {
@@ -342,13 +310,11 @@ class CliAgentAdapter extends BaseAgentAdapter {
   /** 释放：kill 所有在跑的进程。 */
   async dispose() {
     for (const [, run] of this._runs) {
-      if (run.timer) { clearTimeout(run.timer); run.timer = null; }
-      if (run.child) {
-        try { killTree(run.child, 'SIGKILL'); } catch { /* gone */ }
-      }
       try { run.ac.abort(); } catch { /* noop */ }
     }
+    this.supervisor.dispose();
     this._runs.clear();
+    this._gate.clear();
     this._detected = null;
   }
 }

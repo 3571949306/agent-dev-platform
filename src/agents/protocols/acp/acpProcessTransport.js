@@ -56,7 +56,8 @@ function createAcpProcessTransport({ supervisor, frameLimitBytes } = {}) {
       outputCapBytes: connectOpts.outputCapBytes,
       // stdout 是协议流，交给 StructuredStreamDecoder 增量消费；
       // 若同时让监督器把它累积成字符串，长会话会把整条协议流留在内存里。
-      captureOutput: false
+      captureOutput: false,
+      runId: connectOpts.runId || null
     });
 
     const decoder = createStructuredStreamDecoder({ frameLimitBytes: connectOpts.frameLimitBytes || frameLimitBytes });
@@ -94,6 +95,8 @@ function createAcpProcessTransport({ supervisor, frameLimitBytes } = {}) {
       onNotification: (m, cb) => transport.onNotification(m, cb),
       onRequest: (m, cb) => transport.onRequest(m, cb),
       pid: () => (handle ? handle.pid : null),
+      awaitExit: (timeoutMs) => handle.awaitExit(timeoutMs),
+      isQuiesced: () => !!handle.exited,
       kill: (sig = 'SIGKILL') => { cleanShutdown = true; handle.kill(sig); },
       dispose: () => {
         cleanShutdown = true;

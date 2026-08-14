@@ -79,8 +79,11 @@ function createLifecycleManager({ emit } = {}) {
    * @param {string} [params.adapterType]
    * @returns {object} run
    */
-  function createRun({ agentId, taskId = null, goal = null, parentRunId = null, adapterType = null } = {}) {
-    const id = crypto.randomUUID();
+  function createRun({ runId = null, agentId, taskId = null, goal = null, parentRunId = null, adapterType = null } = {}) {
+    // P4: the Hub run is the lifecycle run.  A separate lifecycle UUID made
+    // cancellation/event correlation needlessly ambiguous and allowed an
+    // adapter to be addressed with a different identity than the UI showed.
+    const id = runId || crypto.randomUUID();
     const now = Date.now();
     const run = {
       id,

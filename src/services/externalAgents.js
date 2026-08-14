@@ -267,6 +267,8 @@ async function runWorkBuddyBridge(adapter, taskText, computerManager, ctx = {}) 
     // P0-4: without this the bridge can only read UI-automation text and gives
     // up on any window that exposes none.
     visionReader: ctx.visionReader || null,
+    sessionId: ctx.computerSessionId || null,
+    windowRef: ctx.windowRef || null,
     onState: (state, detail) => { if (ctx.onState) ctx.onState(state, detail); }
   });
   const res = await bridge.run(taskText);

@@ -928,6 +928,28 @@ const externalAgentAuthStates = {
   list() { return db().prepare('SELECT * FROM external_agent_auth_states ORDER BY agent_id').all(); }
 };
 
+// ---------- P4 external Agent verification evidence (sanitized only) ----------
+const externalAgentVerificationEvidence = {
+  append(rec) {
+    if (!rec || !rec.verificationId || !rec.agentId) return null;
+    db().prepare(`INSERT OR IGNORE INTO external_agent_verification_evidence
+      (verification_id,agent_id,type,status,project_fingerprint,timestamp,evidence_json)
+      VALUES (?,?,?,?,?,?,?)`)
+      .run(rec.verificationId, rec.agentId, rec.type || 'unknown', rec.status || 'skipped',
+        rec.projectFingerprint || '', rec.timestamp || now(), j(rec));
+    return rec;
+  },
+  list(agentId) {
+    const rows = agentId
+      ? db().prepare('SELECT evidence_json FROM external_agent_verification_evidence WHERE agent_id=? ORDER BY timestamp').all(agentId)
+      : db().prepare('SELECT evidence_json FROM external_agent_verification_evidence ORDER BY timestamp').all();
+    return rows.map(row => p(row.evidence_json, null)).filter(Boolean);
+  },
+  clear(agentId) {
+    if (agentId) db().prepare('DELETE FROM external_agent_verification_evidence WHERE agent_id=?').run(agentId);
+  }
+};
+
 // ---------- v2.9.1 dynamic agent definitions/templates ----------
 const agentDefinitions = {
   create(input) {
@@ -1405,7 +1427,7 @@ module.exports = {
   projects, connections, models, prompts, skills, agents, externalAgents,
   conversations, messages, events, tasks, runs, agentMessages, tools, mcpServers,
   memories, checkpoints, fileChanges, usage, modelCalls, permissionGrants, audit, permissionDecisions, settings, agentPrefs, extAgentConfigs,
-  externalAgentSessions, externalAgentAuthStates, agentDefinitions, agentTemplates, modelRouteDecisions, problems,
+  externalAgentSessions, externalAgentAuthStates, externalAgentVerificationEvidence, agentDefinitions, agentTemplates, modelRouteDecisions, problems,
   skillDefinitions, hookDefinitions, hookInvocations,
   workflowDefinitions, workflowExecutions, workflowStepExecutions, workflowAudit,
   generatorDrafts, generatorAudit,

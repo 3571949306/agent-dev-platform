@@ -62,7 +62,8 @@ function createCliProcessSupervisor(opts = {}) {
   const killTreeImpl = opts.killTreeImpl || ((child, sig) => killTree(child, sig));
   const resolveImpl = opts.resolveImpl || ((cmd) => resolveCliInPath(cmd));
 
-  let current = null; // 当前管理的 ProcessHandle
+  let current = null; // backward-compatible last handle
+  const handles = new Map(); // runId/pid -> ProcessHandle
 
   /** 探测可执行文件。 */
   async function detect(executable) {
@@ -83,7 +84,7 @@ function createCliProcessSupervisor(opts = {}) {
       let child;
       try {
         child = spawnImpl(executablePath, Array.isArray(versionCommand) ? versionCommand : [versionCommand], {
-          windowsHide: true, stdio: ['pipe', 'pipe', 'pipe']
+          windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'], env: buildEnvAllowlist()
         });
       } catch (e) {
         return reject(new Error('spawn failed: ' + e.message));
@@ -129,7 +130,9 @@ function createCliProcessSupervisor(opts = {}) {
       timeoutMs = DEFAULT_RUN_TIMEOUT_MS,
       outputCapBytes = DEFAULT_OUTPUT_CAP_BYTES,
       captureOutput = true,
-      signal
+      signal,
+      runId = null,
+      killConfirmTimeoutMs = 5000
     } = spawnOpts;
 
     return new Promise((resolve, reject) => {
@@ -138,7 +141,7 @@ function createCliProcessSupervisor(opts = {}) {
         child = spawnImpl(command, args, {
           windowsHide: true,
           cwd,
-          env,
+          env: env || buildEnvAllowlist(),
           detached: process.platform !== 'win32' // POSIX: 进程组 leader，便于 killTree
         });
       } catch (e) {
@@ -154,12 +157,30 @@ function createCliProcessSupervisor(opts = {}) {
         timedOut: false,
         killed: false,
         exited: false,
+        quiesced: false,
+        runId: runId || null,
+        error: null,
         _finished: false,
         _timer: null,
         _onAbort: null,
         kill(sig = 'SIGKILL') {
           handle.killed = true;
           try { killTreeImpl(child, sig); } catch { /* gone */ }
+        },
+        awaitExit(waitMs = killConfirmTimeoutMs) {
+          if (handle.exited) return Promise.resolve({ quiesced: true, residual: 0 });
+          return new Promise(resolveWait => {
+            let settled = false;
+            let t = null;
+            const done = (value) => {
+              if (settled) return;
+              settled = true;
+              if (t) clearTimeout(t);
+              resolveWait(value);
+            };
+            handle.done.then(() => done({ quiesced: handle.exited, residual: handle.exited ? 0 : { pid: handle.pid } }));
+            t = setTimeout(() => done({ quiesced: handle.exited, residual: handle.exited ? 0 : { pid: handle.pid } }), waitMs);
+          });
         }
       };
       // 进程退出结果（永不 reject —— 退出属正常事件，错误信息放在 result.error）
@@ -167,10 +188,11 @@ function createCliProcessSupervisor(opts = {}) {
 
       const capReached = () => (handle.stdout.length + handle.stderr.length) >= outputCapBytes;
 
-      const finish = (result) => {
+      const finish = (result, confirmedExit = false) => {
         if (handle._finished) return;
         handle._finished = true;
-        handle.exited = true;
+        handle.exited = confirmedExit;
+        handle.quiesced = confirmedExit;
         if (handle._timer) { clearTimeout(handle._timer); handle._timer = null; }
         if (signal && handle._onAbort) {
           try { signal.removeEventListener('abort', handle._onAbort); } catch { /* noop */ }
@@ -178,25 +200,39 @@ function createCliProcessSupervisor(opts = {}) {
         settleDone(result);
       };
 
+      let killConfirmTimer = null;
+      const requestStop = (kind) => {
+        handle.kill('SIGKILL');
+        if (killConfirmTimer) return;
+        killConfirmTimer = setTimeout(() => {
+          finish({
+            code: null, signal: 'SIGKILL',
+            timedOut: kind === 'timeout', aborted: kind === 'abort',
+            quiesced: false, residual: { pid: handle.pid },
+            stdout: handle.stdout, stderr: handle.stderr
+          }, false);
+        }, killConfirmTimeoutMs);
+      };
+
       if (timeoutMs && timeoutMs > 0) {
         handle._timer = setTimeout(() => {
           handle.timedOut = true;
-          handle.kill('SIGKILL');
-          finish({ code: null, signal: 'SIGKILL', timedOut: true, stdout: handle.stdout, stderr: handle.stderr });
+          requestStop('timeout');
         }, timeoutMs);
+        // The process itself keeps a real runtime alive. A forgotten fake or
+        // already-detached handle must not pin application/test shutdown.
         if (typeof handle._timer.unref === 'function') handle._timer.unref();
       }
 
       if (signal) {
         if (signal.aborted) {
-          handle.kill('SIGKILL');
-          finish({ code: null, signal: 'SIGKILL', aborted: true, stdout: handle.stdout, stderr: handle.stderr });
+          requestStop('abort');
           current = handle;
+          handles.set(runId || String(handle.pid), handle);
           return resolve(handle);
         }
         handle._onAbort = () => {
-          handle.kill('SIGKILL');
-          finish({ code: null, signal: 'SIGKILL', aborted: true, stdout: handle.stdout, stderr: handle.stderr });
+          requestStop('abort');
         };
         try { signal.addEventListener('abort', handle._onAbort, { once: true }); } catch { /* noop */ }
       }
@@ -210,22 +246,48 @@ function createCliProcessSupervisor(opts = {}) {
       }
 
       child.on('error', e => {
-        finish({ code: null, signal: null, error: e.message, stdout: handle.stdout, stderr: handle.stderr });
+        handle.error = e.message;
+        handles.delete(runId || String(handle.pid));
+        finish({
+          code: null, signal: null, error: handle.error,
+          timedOut: handle.timedOut, aborted: !!(signal && signal.aborted),
+          quiesced: true, residual: 0,
+          stdout: handle.stdout, stderr: handle.stderr
+        }, true);
       });
       child.on('close', (code, sig) => {
-        finish({ code, signal: sig, stdout: handle.stdout, stderr: handle.stderr });
+        if (killConfirmTimer) { clearTimeout(killConfirmTimer); killConfirmTimer = null; }
+        handle.exited = true;
+        handle.quiesced = true;
+        handles.delete(runId || String(handle.pid));
+        finish({
+          code, signal: sig, error: handle.error,
+          timedOut: handle.timedOut, aborted: !!(signal && signal.aborted),
+          quiesced: true, residual: 0,
+          stdout: handle.stdout, stderr: handle.stderr
+        }, true);
       });
 
       current = handle;
+      handles.set(runId || String(handle.pid), handle);
       resolve(handle);
     });
   }
 
   function dispose() {
-    if (current && !current._finished) {
-      try { current.kill('SIGKILL'); } catch { /* gone */ }
+    for (const handle of handles.values()) {
+      if (!handle.exited) { try { handle.kill('SIGKILL'); } catch { /* gone */ } }
     }
+    handles.clear();
     current = null;
+  }
+
+  async function cancelRun(runId, timeoutMs = 5000) {
+    const handle = handles.get(runId);
+    if (!handle) return { ok: false, status: 'unknown', quiesced: false, residual: 'unknown runId' };
+    if (!handle.exited) handle.kill('SIGKILL');
+    const q = await handle.awaitExit(timeoutMs);
+    return { ok: q.quiesced, status: 'cancelled', quiesced: q.quiesced, residual: q.residual, detail: q.quiesced ? 'process tree exited' : 'process tree exit unconfirmed' };
   }
 
   return {
@@ -233,8 +295,11 @@ function createCliProcessSupervisor(opts = {}) {
     readVersion,
     spawnProcess,
     buildEnvAllowlist,
+    cancelRun,
     dispose,
-    _getCurrent: () => current
+    activeCount: () => [...handles.values()].filter(h => !h.exited).length,
+    _getCurrent: () => current,
+    _getHandle: runId => handles.get(runId) || null
   };
 }
 

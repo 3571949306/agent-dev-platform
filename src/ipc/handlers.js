@@ -42,9 +42,16 @@ const { createCapabilityRegistry } = require('../agents/hub/capabilityRegistry')
 const { BUILTIN_AGENT_MANIFESTS } = require('../agents/manifests/builtinAgents');
 // v2.8.1 — Verification Level 单一真相源（spec §39/§44/§45/§82）
 const { describeAll } = require('../agents/verification/agentVerification');
+const { createVerificationRegistry } = require('../agents/verification/verificationRegistry');
+const { createExternalAgentVerificationService } = require('../agents/verification/externalAgentVerificationService');
 const { NativeAgentAdapter } = require('../agents/adapters/nativeAgentAdapter');
 const { CodexAgentAdapter } = require('../agents/adapters/codexAgentAdapter');
 const { WorkBuddyAgentAdapter } = require('../agents/adapters/workBuddyAgentAdapter');
+const { HttpAgentAdapter } = require('../agents/adapters/httpAgentAdapter');
+const { CliAgentAdapter } = require('../agents/adapters/cliAgentAdapter');
+const { AcpAgentAdapter } = require('../agents/adapters/acpAgentAdapter');
+const { DesktopAgentAdapter } = require('../agents/adapters/desktopAgentAdapter');
+const { externalAgentScopes, ensureScopes } = require('../security/agentScopes');
 // v2.7.1 — External Agent Pack
 const { ClineAgentAdapter } = require('../agents/adapters/clineAgentAdapter');
 const { OpenCodeAgentAdapter } = require('../agents/adapters/openCodeAgentAdapter');
@@ -127,11 +134,16 @@ let testFilePickPath = null;
 // v2.3.1 (P0-2/P0-3/P0-4) — 全应用唯一的 Run 状态机。只有它能宣布 Run 终态。
 const runManager = new RunManager({ store, emit });
 
+// P4 — one process-long VerificationRegistry. SQLite is only its sanitized
+// persistence backend, never a second source of verification truth.
+const verificationRegistry = createVerificationRegistry({ persistence: store.externalAgentVerificationEvidence });
+const problemCenter = (require('../services/problemCenter').createProblemCenter)({ store, emit });
+
 // v2.7.0 — Agent Integration Hub
 const capabilityRegistry = createCapabilityRegistry();
 const agentRegistry = createAgentRegistry();
 const agentPreferences = store.agentPrefs || { getRoutingMode: () => 'auto', getPreferredAgent: () => null, getDisabledAgents: () => [] };
-const agentRouter = createAgentRouter({ registry: agentRegistry, preferences: agentPreferences });
+const agentRouter = createAgentRouter({ registry: agentRegistry, preferences: agentPreferences, verificationRegistry });
 const healthManager = createHealthManager({ registry: agentRegistry });
 const lifecycleManager = createLifecycleManager({ emit });
 const eventNormalizer = createEventNormalizer({ emit });
@@ -154,6 +166,7 @@ const executionContextFactory = createExecutionContextFactory({
   requestPermission,
   pathSecurity: _pathSecurity,
   projectMutationLock: projectLock,
+  verificationRegistry,
   emit,
   defaultModel: null,   // 由 nativeModelContextResolver 在 create 时按优先级解析（§8-17）
   // v2.9.0 Real Runtime Closure（R1 Scenario B）：top-level / AgentHub fallback 启动
@@ -167,6 +180,8 @@ const executionContextFactory = createExecutionContextFactory({
 });
 const agentHub = createAgentHub({
   registry: agentRegistry, router: agentRouter, healthManager, lifecycleManager, eventNormalizer, runBridge, emit, projectLock, contextFactory: executionContextFactory,
+  verificationRegistry,
+  reportProblem: problem => problemCenter.report(problem),
   // v2.9.8 Final Closure（A5）— Unforgeable Lock Reentrancy：锁重入必须验证
   // 「委派确实源自 parentRunId 对应的真实活跃 orchestrator」且 token 严格匹配。
   // 伪造 parentRunId/rootRunId 的独立 Run 拿不到活跃 orchestrator 的 token → 无法绕锁。
@@ -333,9 +348,42 @@ const claudeCodeAdapter = new ClaudeCodeAgentAdapter({
 });
 agentHub.register(claudeCodeAdapter);
 
-// v2.9.9 Phase B Final（B21）— Problems Center 唯一真源：持久化、去重、
-// dismiss != resolved。所有子系统的问题都上报到这里，绝不停留在 toast。
-const problemCenter = (require('../services/problemCenter').createProblemCenter)({ store, emit });
+// User-configured generic transports join the same Hub/lock/run identity.
+// Built-in Codex/WorkBuddy rows map to their dedicated adapters and are not
+// duplicated here.
+try {
+  for (const row of store.externalAgents.list()) {
+    if (!row || agentRegistry.get(row.id) || ['codex', 'workbuddy'].includes(row.adapter_type)) continue;
+    const manifest = {
+      id: row.id,
+      displayName: row.name || row.id,
+      source: 'external',
+      transport: row.adapter_type === 'acp' ? 'acp' : row.adapter_type,
+      adapterType: row.adapter_type,
+      capabilities: { coding: true, filesystem: true, terminal: row.adapter_type === 'cli' },
+      maxConcurrency: 1,
+      allowedScopes: externalAgentScopes(row)
+    };
+    const cfg = { ...(row.config || {}) };
+    let configuredAdapter = null;
+    if (row.adapter_type === 'http') {
+      configuredAdapter = new HttpAgentAdapter({ manifest, config: { ...cfg, baseUrl: cfg.baseUrl || row.endpoint } });
+    } else if (row.adapter_type === 'cli' && cfg.executable) {
+      configuredAdapter = new CliAgentAdapter({ manifest, config: cfg });
+    } else if (row.adapter_type === 'acp' && cfg.command) {
+      configuredAdapter = new AcpAgentAdapter({ manifest, config: cfg, sessionPersistence });
+    } else if (row.adapter_type === 'desktop') {
+      configuredAdapter = new DesktopAgentAdapter({ manifest, config: cfg, computerManager: computer.manager });
+    }
+    if (configuredAdapter) agentHub.register(configuredAdapter);
+  }
+} catch { /* malformed optional config remains honestly unregistered */ }
+
+const externalAgentVerificationService = createExternalAgentVerificationService({
+  agentHub,
+  adapterRegistry: agentRegistry,
+  verificationRegistry
+});
 
 /* P3 Computer Use Hardening — Computer runtime wiring.
  * Sessions root their identity in the REAL RunManager lineage; every fence
@@ -822,7 +870,7 @@ async function runChatTurn(conversationId, agentId, userMessage, opts = {}) {
       // Same ExternalAgentContext the sub-agent path builds — an external agent
       // launched straight from a chat must be gated, cancellable and rooted in
       // the current project exactly like a delegated one.
-      res = await extAgents.runExternalAgent(agent, userMessage, {
+      const externalContext = {
         projectId: project?.id || currentProjectId || null,
         projectRoot,
         conversationId,
@@ -838,7 +886,14 @@ async function runChatTurn(conversationId, agentId, userMessage, opts = {}) {
           status: `${agent.name}：${STATE_LABEL[state] || state}${detail && detail.error ? ' — ' + detail.error : ''}`
         }),
         onChunk: (text) => emit('assistant_text', { conversationId, chunk: text })
-      });
+      };
+      // Unit compatibility fixtures still stub the legacy function. The
+      // production application has exactly one external execution entry: Hub.
+      const legacyFixtureRuntime = process.env.NODE_ENV === 'test'
+        || process.env.ELECTRON_RUN_AS_NODE === '1';
+      res = legacyFixtureRuntime
+        ? await extAgents.runExternalAgent(agent, userMessage, externalContext)
+        : await runExternalViaHub(agent, userMessage, externalContext);
     } finally {
       activeRuns.delete(conversationId);
       emit('assistant_status', { conversationId, status: '' }); // never leave the spinner stuck
@@ -868,6 +923,7 @@ async function runChatTurn(conversationId, agentId, userMessage, opts = {}) {
     // adapter may pin its own vision model.
     visionReaderFor,
     runSubAgent: (subDef, args, ctx) => runSubAgent(deps, subDef, args, ctx),
+    runExternalAgentHub: runExternalViaHub,
     sendChatTask, requestPermission, computerManager: computer.manager, emit,
     chatDepth: opts.chatDepth || 0,
     maxChatDelegationDepth: MAX_CHAT_DELEGATION_DEPTH,
@@ -888,6 +944,73 @@ async function runChatTurn(conversationId, agentId, userMessage, opts = {}) {
     return { status: c.status, result: null, error: c.error, taskId: null };
   } finally {
     activeRuns.delete(conversationId);
+  }
+}
+
+async function runExternalViaHub(agent, taskText, ctx = {}) {
+  const scopes = externalAgentScopes(agent);
+  if (ctx.permissionEngine) {
+    const gate = await ensureScopes(
+      ctx.permissionEngine,
+      scopes,
+      { taskId: ctx.taskId, projectId: ctx.projectId },
+      ctx.requestPermission
+        ? ({ scope }) => ctx.requestPermission({
+            scope, tool: `external:${agent.adapter_type}`, agent: agent.name,
+            external: true, conversationId: ctx.conversationId, taskId: ctx.taskId
+          })
+        : null
+    );
+    if (!gate.ok) {
+      return extAgents.structured('failed', '', {
+        code: 'PERMISSION_DENIED', deniedScope: gate.scope,
+        errors: [`外部智能体权限被拒绝：${gate.scope}`]
+      });
+    }
+  }
+
+  const mappedId = agentRegistry.get(agent.id)
+    ? agent.id
+    : agent.adapter_type === 'workbuddy' ? 'workbuddy'
+      : agent.adapter_type === 'codex' ? 'codex' : agent.id;
+  if (!agentRegistry.get(mappedId)) {
+    return extAgents.structured('failed', '', { errors: [`外部智能体 ${mappedId} 未在智能体中心注册`] });
+  }
+  const mutating = scopes.some(scope => /write|terminal|git/i.test(scope));
+  const started = await agentHub.start(mappedId, {
+    goal: String(taskText || ''),
+    projectId: ctx.projectId || null,
+    projectRoot: ctx.projectRoot || null,
+    conversationId: ctx.conversationId || null,
+    taskId: ctx.taskId || null,
+    required: mutating ? ['coding', 'filesystem'] : [],
+    readOnly: !mutating,
+    allowedScopes: scopes
+  });
+  if (!started || started.error || !started.runId) {
+    return extAgents.structured('failed', '', { errors: [started && started.error || 'AgentHub start failed'], errorCode: started && started.errorCode });
+  }
+  const runId = started.runId;
+  const abort = () => { void agentHub.cancel(runId); };
+  if (ctx.signal) {
+    if (ctx.signal.aborted) abort();
+    else ctx.signal.addEventListener('abort', abort, { once: true });
+  }
+  try {
+    while (true) {
+      const state = await agentHub.status(runId);
+      if (!state) return extAgents.structured('failed', '', { errors: ['AgentHub lost run identity'] });
+      if (typeof ctx.onState === 'function') ctx.onState(state.status, { runId, agentId: mappedId });
+      if (['completed', 'failed', 'cancelled', 'timeout', 'unavailable'].includes(state.status)) break;
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+    const outcome = await agentHub.result(runId);
+    const value = outcome && outcome.result && typeof outcome.result === 'object'
+      ? outcome.result
+      : { status: outcome && outcome.status || 'failed', summary: '', errors: [outcome && outcome.error || '外部智能体未返回结果'] };
+    return JSON.stringify(value);
+  } finally {
+    if (ctx.signal) ctx.signal.removeEventListener?.('abort', abort);
   }
 }
 
@@ -1839,8 +1962,17 @@ function register(window) {
       const project = currentProjectId ? store.projects.get(currentProjectId) : null;
       await agentHub.detect();
       await agentHub.health({ force: false, projectRoot: project?.root_path || null });
-      return describeAll(agentHub.getManifests(), agentHub.getAvailable());
+      return describeAll(agentHub.getManifests(), agentHub.getAvailable(), verificationRegistry);
     } catch { return {}; }
+  });
+  ipcMain.handle('hub:verify-safe', async (_e, agentId) => {
+    return externalAgentVerificationService.safeVerify(agentId);
+  });
+  ipcMain.handle('hub:verify-real', async (_e, request = {}) => {
+    return externalAgentVerificationService.realVerify(request.agentId, {
+      explicitConsent: request.explicitConsent === true,
+      timeoutMs: request.timeoutMs
+    });
   });
   // v2.8.0 spec §81 — Session UI：外部 Agent 会话列表 + 认证状态（均不含凭据）
   ipcMain.handle('hub:sessions', () => {
@@ -2283,17 +2415,41 @@ function register(window) {
       await fakeServer.start();
       const baseUrl = fakeServer.baseUrl;
       // 构造 fake serverManager：返回 fake server 的 baseUrl，不启动真实进程
+      // Mirror the production manager's ownership/quiescence contract.  The
+      // HTTP fixture itself stays alive until reset, but the injected manager
+      // must only report an owned "process" while at least one Run holds a
+      // reference.  Reporting true forever would (correctly) make the P4 Hub
+      // withhold the terminal state and project-lock release.
+      const fakeRefs = new Set();
+      let fakeManagerRunning = false;
+      const releaseFakeRef = (_projectRoot, runId) => {
+        fakeRefs.delete(runId);
+        if (fakeRefs.size === 0) fakeManagerRunning = false;
+        return true;
+      };
       const fakeServerManager = {
         detect: async () => ({ available: true, path: '/fake/opencode' }),
         getVersion: async () => 'fake-1.0.0',
-        start: async ({ projectRoot, runId }) => ({ baseUrl, password: null, refCount: 1 }),
-        release: () => true,
-        stop: () => true,
+        start: async ({ projectRoot, runId }) => {
+          fakeRefs.add(runId);
+          fakeManagerRunning = true;
+          return { baseUrl, password: null, refCount: fakeRefs.size };
+        },
+        release: releaseFakeRef,
+        releaseAndWait: async (projectRoot, runId) => {
+          releaseFakeRef(projectRoot, runId);
+          return { quiesced: !fakeManagerRunning, residual: fakeManagerRunning ? { refs: fakeRefs.size } : 0, stopped: !fakeManagerRunning };
+        },
+        stop: () => { fakeRefs.clear(); fakeManagerRunning = false; return true; },
         health: async () => ({ healthy: true, version: 'fake-1.0.0', latencyMs: 1 }),
         getServer: () => null,
-        isRunning: () => true,
-        isProcessAlive: () => true,
-        dispose: async () => { try { await fakeServer.stop(); } catch { /* noop */ } }
+        isRunning: () => fakeManagerRunning,
+        isProcessAlive: () => fakeManagerRunning,
+        dispose: async () => {
+          fakeRefs.clear();
+          fakeManagerRunning = false;
+          try { await fakeServer.stop(); } catch { /* noop */ }
+        }
       };
       openCodeAdapter.serverManager = fakeServerManager;
       openCodeAdapter._detected = null;

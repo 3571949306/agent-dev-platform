@@ -1,5 +1,30 @@
 # Test Report — Agent Dev Platform (v2.9.9)
 
+## v2.9.9 P4 External Agent Production Verification — BUILD
+
+Final release evidence (2026-08-15, Asia/Shanghai):
+
+```text
+External production verification: 216/216 PASS
+ACP fixture subprocess: 15/15 PASS
+CLI / HTTP / Desktop transport samples: 2/2, 1/1, 1/1 PASS
+Detection health: 50/50 PASS
+Hub identity: 100/100 PASS
+CLI / ACP / OpenCode / WorkBuddy / terminal / lock / false-completion races: 20/20 each PASS
+Late events: 1000/1000 PASS
+Final helper/process/server/session/lock/temp residues: 0
+New GUI P4 cases: 21/21 PASS; Playwright inventory: 180
+Full unit regression: 1802 tests / 1801 pass / 0 fail / 1 documented skip
+Full Electron E2E: 180/180 PASS
+Architecture: DEFAULT_DENY / unsafe duplicate paths 0 / synthetic unknown paths ALL BLOCKED
+Distribution: PASS (Windows x64 NSIS + portable)
+Automated model calls: 0
+Automated paid-provider calls: 0
+Real external verification: SKIPPED_USER_OPT_IN_REQUIRED
+```
+
+Installed != Available != Verified. Protocol Verified != Real Task Verified. P4 is implemented but deliberately not frozen; independent audit/final closure remains the next phase. Git push and clean-tree truth are reported only after the release commit is read back from `origin/main`.
+
 ## v2.9.9 — P3 Computer Use Final Closure (2026-08-14)
 
 Starting point: `2942e0a`（v2.9.9 P3 Computer Use Production Hardening — BUILD，starting worktree DIRTY with the requested closure changes）。本轮把 Hardening 的每条承诺升级为**可重跑的机器证明**（C1–C10 闭包矩阵），关闭 C3 Target Fence、C7 action-point HWND+PID、Architecture 与 clean release 四个最终 blocker。Paid provider calls = 0；真实桌面矩阵只驱动 TEST-ONLY WPF fixture（`test/fixtures/computerFixture.ps1`），绝不驱动生产软件。

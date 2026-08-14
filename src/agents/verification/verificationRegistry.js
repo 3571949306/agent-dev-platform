@@ -18,6 +18,7 @@
  * 调用 clear(agentId) 清空旧证据。
  */
 
+const crypto = require('crypto');
 const {
   isClaimAllowed,
   VERIFICATION_LEVEL,
@@ -61,13 +62,32 @@ function redactField(value, fieldName) {
  * @param {object} record
  * @returns {object}
  */
-function sanitizeEvidence(record) {
-  if (!record || typeof record !== 'object') return record;
+function sanitizeEvidence(record, parentKey = '') {
+  if (record == null) return record;
+  if (typeof record === 'string') return redactField(record, parentKey);
+  if (Array.isArray(record)) return record.slice(0, 100).map(v => sanitizeEvidence(v, parentKey));
+  if (typeof record !== 'object') return record;
   const out = {};
   for (const [k, v] of Object.entries(record)) {
-    out[k] = (typeof v === 'string') ? redactField(v, k) : v;
+    out[k] = SECRET_KEY_PATTERN.test(k)
+      ? '[REDACTED]'
+      : sanitizeEvidence(v, k);
   }
   return out;
+}
+
+const RUNTIME_EVIDENCE_TYPES = new Set(['local_detection', 'protocol', 'agent_task', 'task']);
+
+function createVerificationFingerprint(input = {}) {
+  const safe = sanitizeEvidence({
+    agentId: input.agentId || '',
+    transport: input.transport || '',
+    runtime: input.runtime || '',
+    version: input.version || '',
+    executableIdentity: input.executableIdentity || '',
+    configurationIdentity: input.configurationIdentity || ''
+  });
+  return crypto.createHash('sha256').update(JSON.stringify(safe)).digest('hex');
 }
 
 /**
@@ -142,6 +162,28 @@ function summarizeEvidence(records) {
 function createVerificationRegistry(opts = {}) {
   /** @type {Map<string, object[]>} agentId → evidence 记录数组 */
   const store = new Map();
+  const persistence = opts.persistence || null;
+  const loaded = new Set();
+  const fingerprints = new Map();
+
+  function ensureLoaded(agentId) {
+    if (loaded.has(agentId)) return;
+    loaded.add(agentId);
+    if (!persistence || typeof persistence.list !== 'function') return;
+    let records = [];
+    try { records = persistence.list(agentId) || []; } catch { records = []; }
+    store.set(agentId, records.map(sanitizeEvidence));
+  }
+
+  function validRecords(agentId) {
+    ensureLoaded(agentId);
+    const current = fingerprints.get(agentId) || null;
+    return (store.get(agentId) || []).filter(r => {
+      if (!RUNTIME_EVIDENCE_TYPES.has(r.type)) return true;
+      if (!current) return true;
+      return !!r.projectFingerprint && r.projectFingerprint === current;
+    });
+  }
 
   /**
    * 追加一条验证证据记录（spec §65）。
@@ -162,17 +204,34 @@ function createVerificationRegistry(opts = {}) {
       throw new Error('record: evidence 必须为对象');
     }
 
+    ensureLoaded(agentId);
     const sanitized = sanitizeEvidence({
+      verificationId: evidence.verificationId || crypto.randomUUID(),
+      agentId,
+      adapterRuntime: evidence.adapterRuntime || evidence.runtime || '',
       type: String(evidence.type || 'unknown'),
       status: String(evidence.status || 'skipped'),
       timestamp: evidence.timestamp || new Date().toISOString(),
       version: evidence.version || '',
       source: evidence.source || '',
+      runId: evidence.runId || null,
+      projectFingerprint: evidence.projectFingerprint || fingerprints.get(agentId) || '',
+      effectObserved: evidence.effectObserved === true,
+      reason: evidence.reason || '',
       details: evidence.details || ''
     });
 
     if (!store.has(agentId)) store.set(agentId, []);
+    const duplicate = store.get(agentId).find(r =>
+      r.type === sanitized.type && r.status === sanitized.status &&
+      r.version === sanitized.version && r.source === sanitized.source &&
+      r.projectFingerprint === sanitized.projectFingerprint &&
+      r.runId === sanitized.runId && r.reason === sanitized.reason);
+    if (duplicate) return { ...duplicate };
     store.get(agentId).push(sanitized);
+    if (persistence && typeof persistence.append === 'function') {
+      try { persistence.append(sanitized); } catch { /* persistence failure cannot forge evidence */ }
+    }
     return sanitized;
   }
 
@@ -184,7 +243,7 @@ function createVerificationRegistry(opts = {}) {
    * @returns {string} VERIFICATION_LEVEL.*
    */
   function getLevel(agentId) {
-    const records = store.get(agentId);
+    const records = validRecords(agentId);
     if (!records || records.length === 0) {
       return VERIFICATION_LEVEL.NOT_VERIFIED;
     }
@@ -204,7 +263,7 @@ function createVerificationRegistry(opts = {}) {
    * @returns {object[]}
    */
   function getEvidence(agentId) {
-    const records = store.get(agentId);
+    const records = validRecords(agentId);
     return records ? records.map(r => ({ ...r })) : [];
   }
 
@@ -226,19 +285,35 @@ function createVerificationRegistry(opts = {}) {
    */
   function clear(agentId) {
     store.delete(agentId);
+    loaded.delete(agentId);
+    if (persistence && typeof persistence.clear === 'function') {
+      try { persistence.clear(agentId); } catch { /* noop */ }
+    }
   }
+
+  function setFingerprint(agentId, fingerprint) {
+    if (!agentId) throw new Error('setFingerprint: agentId 必填');
+    fingerprints.set(agentId, String(fingerprint || ''));
+    ensureLoaded(agentId);
+    return fingerprints.get(agentId);
+  }
+
+  function getFingerprint(agentId) { return fingerprints.get(agentId) || null; }
 
   return {
     record,
     getLevel,
     getEvidence,
     serialize,
-    clear
+    clear,
+    setFingerprint,
+    getFingerprint
   };
 }
 
 module.exports = {
   createVerificationRegistry,
+  createVerificationFingerprint,
   sanitizeEvidence,
   summarizeEvidence
 };

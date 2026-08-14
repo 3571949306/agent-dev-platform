@@ -21,13 +21,11 @@
  */
 
 const crypto = require('crypto');
-const { spawn } = require('child_process');
 const { BaseAgentAdapter } = require('./baseAgentAdapter');
 const { HEALTH_STATE, LIFECYCLE, AGENT_EVENT } = require('../hub/types');
 const { CODEX } = require('../manifests/builtinAgents');
 const {
   runCodex,
-  killTree,
   resolveCliInPath,
   resolveCodexCli,
   TERMINAL_STATES
@@ -36,7 +34,8 @@ const { createCodexAppServerClient } = require('../protocols/codex/codexAppServe
 const { createCodexExecRunner } = require('../protocols/codex/codexExecRunner');
 const { createCodexAppServerEventMapper } = require('../protocols/codex/codexEventMapper');
 const { createExternalAgentSessionManager } = require('../session/externalAgentSessionManager');
-const { buildEnvAllowlist } = require('../runtime/cliProcessSupervisor');
+const { buildEnvAllowlist, createCliProcessSupervisor } = require('../runtime/cliProcessSupervisor');
+const pathSecurity = require('../../security/pathSecurity');
 const permissionBroker = require('../protocols/acp/permissionBroker');
 const { classifyRisk } = require('../../security/permissionRiskClassifier');
 const permissionAudit = require('../../security/permissionAudit');
@@ -136,6 +135,7 @@ class CodexAgentAdapter extends BaseAgentAdapter {
     this.sessions = createExternalAgentSessionManager({ persistence: sessionPersistence });
     this._appServerClientFactory = appServerClientFactory || createCodexAppServerClient;
     this._execRunnerFactory = execRunnerFactory || createCodexExecRunner;
+    this._supervisor = createCliProcessSupervisor();
     // runId -> run state
     this._runs = new Map();
     this._detected = null;
@@ -224,7 +224,7 @@ class CodexAgentAdapter extends BaseAgentAdapter {
    */
   getAuthState() {
     const env = (this.config && this.config.environment) || {};
-    if (env.OPENAI_API_KEY || process.env.OPENAI_API_KEY) {
+    if (env.OPENAI_API_KEY) {
       return { state: AUTH_STATE.API_KEY, mode: AUTH_MODE.API_KEY, authenticated: true, detail: '使用 API Key' };
     }
     if (this._lastAuthStatus) {
@@ -244,6 +244,57 @@ class CodexAgentAdapter extends BaseAgentAdapter {
     };
   }
 
+  /** Safe verification: executable/version + app-server initialize/auth query.
+   * No thread is created and no turn/model generation is started. */
+  async safeVerify({ projectRoot, verificationId } = {}) {
+    const detection = await this.detect();
+    const base = {
+      agentId: this.id,
+      paidCalls: 0,
+      modelCalls: 0,
+      protocolAttempted: false,
+      protocolVerified: false,
+      runtime: detection.supportsAppServer ? RUNTIME_MODE.APP_SERVER : (detection.available ? RUNTIME_MODE.EXEC : null),
+      version: detection.version || null,
+      auth: this.getAuthState()
+    };
+    if (!detection.available || !detection.supportsAppServer || !projectRoot) return base;
+    const client = this._appServerClientFactory({ supervisor: this._supervisor });
+    let probe = null;
+    let auth = null;
+    let q = { quiesced: false, residual: 'not disconnected' };
+    try {
+      await client.connect({
+        command: detection.path,
+        cwd: pathSecurity.canonicalizeRoot(projectRoot),
+        env: buildEnvAllowlist(this.passthroughEnv, (this.config && this.config.environment) || {}),
+        timeoutMs: 30000,
+        handshakeTimeoutMs: 10000,
+        runId: `safe:${verificationId || crypto.randomUUID()}`
+      });
+      probe = client.probeMethods();
+      auth = await client.getAuthStatus();
+      if (auth && auth.ok) this._lastAuthStatus = auth.authenticated ? 'authenticated' : 'required';
+    } finally {
+      try { client.dispose(); } catch { /* noop */ }
+      q = typeof client.awaitQuiescence === 'function'
+        ? await client.awaitQuiescence(5000)
+        : { quiesced: true, residual: 0 };
+    }
+    return {
+      ...base,
+      protocolAttempted: true,
+      protocolVerified: !!(probe && probe.ok && q.quiesced),
+      reason: q.quiesced ? '' : 'CODEX_APP_SERVER_RESIDUE',
+      runtime: RUNTIME_MODE.APP_SERVER,
+      auth: auth && auth.ok
+        ? { state: auth.authenticated ? AUTH_STATE.AUTHENTICATED : AUTH_STATE.AUTH_REQUIRED, authenticated: auth.authenticated, mode: auth.method || AUTH_MODE.EXTERNAL_LOGIN }
+        : this.getAuthState(),
+      quiesced: q.quiesced,
+      residual: q.residual
+    };
+  }
+
   /** 跑 `${cliPath} --version`，限时 5s，返回 trimmed stdout。 */
   _readVersion(cliPath) {
     return this._runShortLived(cliPath, ['--version'], code => code === 0);
@@ -256,26 +307,18 @@ class CodexAgentAdapter extends BaseAgentAdapter {
 
   /** 短命令执行封装（--version / --help）。 */
   _runShortLived(cliPath, args, acceptExit) {
-    return new Promise((resolve, reject) => {
-      let out = '';
-      let child;
-      try {
-        child = spawn(cliPath, args, { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
-      } catch (e) {
-        return reject(new Error('spawn failed: ' + e.message));
-      }
-      const timer = setTimeout(() => {
-        killTree(child, 'SIGKILL');
-        reject(new Error(`${args[0]} command timed out`));
-      }, HEALTH_TIMEOUT_MS);
-      child.stdout.on('data', d => { out += d.toString(); });
-      child.stderr.on('data', d => { out += d.toString(); });
-      child.on('error', e => { clearTimeout(timer); reject(e); });
-      child.on('close', code => {
-        clearTimeout(timer);
-        if (acceptExit(code)) resolve(out.trim());
-        else reject(new Error(`${args[0]} exited with code ${code}`));
-      });
+    return this._supervisor.spawnProcess({
+      command: cliPath,
+      args,
+      timeoutMs: HEALTH_TIMEOUT_MS,
+      env: buildEnvAllowlist()
+    }).then(async handle => {
+      const exit = await handle.done;
+      if (exit.timedOut) throw new Error(`${args[0]} command timed out`);
+      if (exit.error) throw new Error(exit.error);
+      const out = `${handle.stdout || ''}${handle.stderr || ''}`.trim();
+      if (acceptExit(exit.code)) return out;
+      throw new Error(`${args[0]} exited with code ${exit.code}`);
     });
   }
 
@@ -294,7 +337,17 @@ class CodexAgentAdapter extends BaseAgentAdapter {
     const taskText = typeof task === 'string' ? task : task.goal;
     const normalizedTask = typeof task === 'string' ? { goal: task } : task;
 
-    const runId = crypto.randomUUID();
+    const projectRoot = normalizedTask.projectRoot || context.projectRoot;
+    if (context.productionHub && !projectRoot) {
+      throw Object.assign(new Error('Codex production run requires projectRoot'), { code: 'PROJECT_ROOT_REQUIRED' });
+    }
+    if (projectRoot) {
+      normalizedTask.projectRoot = context.productionHub
+        ? pathSecurity.canonicalizeRoot(projectRoot)
+        : projectRoot;
+    }
+
+    const runId = context.runId || crypto.randomUUID();
     const ac = new AbortController();
     if (context.signal) {
       if (context.signal.aborted) ac.abort();
@@ -318,16 +371,19 @@ class CodexAgentAdapter extends BaseAgentAdapter {
 
     this._emit(context, AGENT_EVENT.RUN_STARTED, { runId, agentId: this.id, goal: taskText });
 
-    this._dispatch(runId, normalizedTask, taskText, context).catch(err => {
-      runState.status = LIFECYCLE.FAILED;
+    runState.executionPromise = this._dispatch(runId, normalizedTask, taskText, context).catch(err => {
+      const cancelled = ac.signal.aborted;
+      runState.status = cancelled ? LIFECYCLE.CANCELLED : LIFECYCLE.FAILED;
       runState.result = {
-        status: 'failed',
+        status: cancelled ? 'cancelled' : 'failed',
         summary: '',
         errors: [err && err.message ? err.message : String(err)],
         findings: [], changedFiles: [], artifacts: []
       };
-      this._emit(context, AGENT_EVENT.RUN_FAILED, { runId, agentId: this.id, error: err && err.message });
-      if (typeof context.finishRun === 'function') context.finishRun('failed', runState.result);
+      this._emit(context, cancelled ? AGENT_EVENT.RUN_CANCELLED : AGENT_EVENT.RUN_FAILED,
+        { runId, agentId: this.id, error: err && err.message });
+      if (typeof context.finishRun === 'function') context.finishRun(runState.status, runState.result);
+      return runState.result;
     });
 
     return { runId };
@@ -364,7 +420,7 @@ class CodexAgentAdapter extends BaseAgentAdapter {
         this._emit(context, AGENT_EVENT.FALLBACK, {
           runId, agentId: this.id, from: RUNTIME_MODE.APP_SERVER, to: RUNTIME_MODE.EXEC,
           reason: isMethodNotFound(err) ? 'METHOD_NOT_FOUND' : 'APP_SERVER_UNAVAILABLE',
-          detail: err && err.message
+          detail: err && err.message, timestamp: new Date().toISOString()
         });
       }
     }
@@ -375,14 +431,23 @@ class CodexAgentAdapter extends BaseAgentAdapter {
         return await this._runExec(runId, task, taskText, context, detected);
       } catch (err) {
         if (mode === RUNTIME_MODE.EXEC) throw err;
+        if (context.productionHub) throw Object.assign(
+          new Error(`Codex external runtimes unavailable: ${err && err.message ? err.message : err}`),
+          { code: 'AGENT_RUNTIME_FALLBACK', executionStarted: !!runState.executionStarted }
+        );
         this._emit(context, AGENT_EVENT.FALLBACK, {
           runId, agentId: this.id, from: RUNTIME_MODE.EXEC, to: RUNTIME_MODE.LEGACY,
-          reason: 'EXEC_UNAVAILABLE', detail: err && err.message
+          reason: 'EXEC_UNAVAILABLE', detail: err && err.message, timestamp: new Date().toISOString()
         });
       }
     }
 
     // 3) legacy runCodex（v2.6.0 行为，最后兜底）
+    if (context.productionHub) {
+      throw Object.assign(new Error('Legacy Codex provider fallback is forbidden for external Agent Hub runs'), {
+        code: 'AGENT_RUNTIME_FALLBACK', executionStarted: !!runState.executionStarted
+      });
+    }
     return this._runLegacy(runId, task, taskText, context);
   }
 
@@ -412,7 +477,8 @@ class CodexAgentAdapter extends BaseAgentAdapter {
       if (!info.clean) unexpectedExit = info;
     });
 
-    await client.connect({ command: detected.path, cwd, env, timeoutMs });
+    await client.connect({ command: detected.path, cwd, env, timeoutMs, runId });
+    runState.executionStarted = true;
 
     const probe = client.probeMethods();
     if (!probe.ok) throw new Error('codex app-server 握手成功但状态异常');
@@ -489,6 +555,9 @@ class CodexAgentAdapter extends BaseAgentAdapter {
     };
 
     try { client.dispose(); } catch { /* noop */ }
+    runState.quiescence = typeof client.awaitQuiescence === 'function'
+      ? await client.awaitQuiescence(5000)
+      : { quiesced: true, residual: 0 };
     this.sessions.setStatus(runId, status);
     this._settle(runId, result, context);
     return result;
@@ -554,6 +623,7 @@ class CodexAgentAdapter extends BaseAgentAdapter {
     runState.runtime = RUNTIME_MODE.EXEC;
     this._activeRuntime = RUNTIME_MODE.EXEC;
     runState.status = LIFECYCLE.RUNNING;
+    runState.executionStarted = true;
 
     const cwd = task.projectRoot || (context && context.projectRoot) || undefined;
     const env = buildEnvAllowlist(this.passthroughEnv, (context && context.env) || {});
@@ -607,6 +677,7 @@ class CodexAgentAdapter extends BaseAgentAdapter {
       sessionId: raw.threadId || null,
       runtime: RUNTIME_MODE.EXEC
     };
+    runState.quiescence = { quiesced: raw.quiesced !== false, residual: raw.residual || 0 };
     this._settle(runId, result, context);
     return result;
   }
@@ -619,6 +690,7 @@ class CodexAgentAdapter extends BaseAgentAdapter {
     runState.runtime = RUNTIME_MODE.LEGACY;
     this._activeRuntime = RUNTIME_MODE.LEGACY;
     runState.status = LIFECYCLE.RUNNING;
+    runState.executionStarted = true;
 
     const cfg = {
       ...(this.manifest.config || {}),
@@ -713,18 +785,44 @@ class CodexAgentAdapter extends BaseAgentAdapter {
     const run = this._runs.get(runId);
     if (!run) return { ok: false, error: 'unknown runId' };
 
+    if (run._settled) {
+      const q = await this.awaitQuiescence(runId, 5000);
+      return { ok: q.quiesced, status: run.status, quiesced: q.quiesced, residual: q.residual, detail: q.detail };
+    }
+
     if (run.runtime === RUNTIME_MODE.APP_SERVER && run.client && run.threadId) {
       try { await run.client.interruptTurn(run.threadId); } catch { /* 继续走强制回收 */ }
-      await new Promise(r => setTimeout(r, 300)); // grace period
     }
     try { run.ac.abort(); } catch { /* already aborted */ }
     if (run.client) { try { run.client.dispose(); } catch { /* noop */ } }
+    const q = await this.awaitQuiescence(runId, 5000);
+    return {
+      ok: q.quiesced,
+      status: q.quiesced ? 'cancelled' : 'cancelling',
+      quiesced: q.quiesced,
+      residual: q.residual,
+      detail: q.detail
+    };
+  }
 
-    if (run.status !== LIFECYCLE.COMPLETED && run.status !== LIFECYCLE.FAILED &&
-        run.status !== LIFECYCLE.CANCELLED && run.status !== LIFECYCLE.TIMEOUT) {
-      run.status = LIFECYCLE.CANCELLED;
+  async awaitQuiescence(runId, timeoutMs = 5000) {
+    const run = this._runs.get(runId);
+    if (!run) return { quiesced: false, residual: 'unknown runId', detail: 'unknown runId' };
+    if (run.client && typeof run.client.awaitQuiescence === 'function') {
+      const q = await run.client.awaitQuiescence(timeoutMs);
+      if (!q.quiesced) return { ...q, detail: 'Codex app-server process exit unconfirmed' };
     }
-    return { ok: true };
+    if (run.executionPromise && !run._settled) {
+      let timer;
+      const settled = await Promise.race([
+        run.executionPromise.then(() => true, () => true),
+        new Promise(resolve => { timer = setTimeout(() => resolve(false), timeoutMs); })
+      ]);
+      if (timer) clearTimeout(timer);
+      if (!settled) return { quiesced: false, residual: { runId }, detail: 'Codex execution still active' };
+    }
+    const q = run.quiescence || { quiesced: true, residual: 0 };
+    return { quiesced: q.quiesced !== false, residual: q.residual || 0, detail: q.quiesced === false ? 'process exit unconfirmed' : 'Codex runtime quiesced' };
   }
 
   async getStatus(runId) {
@@ -751,6 +849,7 @@ class CodexAgentAdapter extends BaseAgentAdapter {
     this._detected = null;
     this._activeRuntime = null;
     this.sessions.clear();
+    this._supervisor.dispose();
   }
 }
 

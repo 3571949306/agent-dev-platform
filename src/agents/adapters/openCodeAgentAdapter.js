@@ -28,6 +28,7 @@ const { createOpenCodeClient } = require('../integrations/opencode/client');
 const { mapOpenCodeEvent } = require('../integrations/opencode/eventStream');
 const { createExternalAgentTerminalGate } = require('../runtime/externalTerminalGate');
 const { buildExternalResult, sanitizeErrors } = require('../runtime/resultSanitizer');
+const pathSecurity = require('../../security/pathSecurity');
 
 const HEALTH_TIMEOUT_MS = 5000;
 const DEFAULT_RUN_TIMEOUT_MS = 600000;
@@ -94,6 +95,39 @@ class OpenCodeAgentAdapter extends BaseAgentAdapter {
     }
   }
 
+  /** Start the loopback server, probe /global/health, then prove process exit.
+   * No OpenCode session or prompt is created. */
+  async safeVerify({ projectRoot, verificationId } = {}) {
+    const detection = await this.detect();
+    const base = {
+      agentId: this.id, paidCalls: 0, modelCalls: 0,
+      protocolAttempted: false, protocolVerified: false,
+      runtime: 'opencode-server', version: detection.version || null,
+      auth: { state: 'LOCAL_EPHEMERAL', authenticated: true }
+    };
+    if (!detection.available || !projectRoot) return base;
+    const runId = `safe:${verificationId || crypto.randomUUID()}`;
+    const root = pathSecurity.canonicalizeRoot(projectRoot);
+    let server = null;
+    let health = null;
+    let q = { quiesced: false, residual: 'server not released' };
+    try {
+      server = await this.serverManager.start({ projectRoot: root, runId });
+      health = await this.serverManager.health(server.baseUrl, server.password);
+    } finally {
+      q = await this.serverManager.releaseAndWait(root, runId, 5000);
+    }
+    return {
+      ...base,
+      protocolAttempted: true,
+      protocolVerified: !!(health && health.healthy && q.quiesced),
+      version: health && health.version || detection.version || null,
+      reason: q.quiesced ? (health && health.healthy ? '' : 'OPENCODE_HEALTH_FAILED') : 'OPENCODE_PROCESS_RESIDUE',
+      quiesced: q.quiesced,
+      residual: q.residual
+    };
+  }
+
   /**
    * 启动一次 OpenCode Run。
    * @param {object} task    { goal, projectRoot, projectId, model, agent, timeoutMs }
@@ -105,7 +139,10 @@ class OpenCodeAgentAdapter extends BaseAgentAdapter {
       throw new Error('OpenCodeAgentAdapter.startTask: task.goal 必填');
     }
     const taskText = typeof task === 'string' ? task : task.goal;
-    const projectRoot = task.projectRoot || (context && context.projectRoot) || null;
+    const requestedRoot = task.projectRoot || (context && context.projectRoot) || null;
+    const projectRoot = requestedRoot && context.productionHub
+      ? pathSecurity.canonicalizeRoot(requestedRoot)
+      : requestedRoot;
     if (!projectRoot) {
       throw new Error('OpenCodeAgentAdapter.startTask: task.projectRoot 必填（OpenCode 必须在项目根运行）');
     }
@@ -140,19 +177,21 @@ class OpenCodeAgentAdapter extends BaseAgentAdapter {
       errors: [],
       changedFiles: [],
       pendingTerminal: null,
-      protocolError: false
+      protocolError: false,
+      strictProcessQuiescence: context.productionHub === true
     };
     this._runs.set(runId, runState);
     this._gate.init(runId, LIFECYCLE.STARTING);
 
     // 后台执行：仅当尚未进入终态时才以 FAILED 兜底（终态一次）
-    this._executeRun(runId, task, context, ac.signal).catch(err => {
+    runState.executionPromise = this._executeRun(runId, task, context, ac.signal).catch(err => {
       const tr = this._finish(runId, LIFECYCLE.FAILED, 'AGENT_REMOTE_ERROR', this._buildResult(this._runs.get(runId), LIFECYCLE.FAILED, { extraErrors: [err && err.message ? err.message : String(err)] }));
       if (!tr.accepted) {
         // 已终态，仅补充错误记录
         const run = this._runs.get(runId);
         if (run) run.errors = sanitizeErrors([...(run.errors || []), err && err.message ? err.message : String(err)]);
       }
+      return runState.result;
     });
 
     return { runId };
@@ -170,6 +209,7 @@ class OpenCodeAgentAdapter extends BaseAgentAdapter {
     const client = createOpenCodeClient({ baseUrl, password: serverInfo.password });
     run.client = client;
     run.status = LIFECYCLE.RUNNING;
+    run.executionStarted = true;
 
     // 超时定时器：超时 -> TIMEOUT（与取消分离）
     const timer = setTimeout(() => {
@@ -249,7 +289,13 @@ class OpenCodeAgentAdapter extends BaseAgentAdapter {
       this._finish(runId, status, reason, this._buildResult(run, status, { extraErrors: [err && err.message ? err.message : String(err)] }));
     } finally {
       if (timer) clearTimeout(timer);
-      try { this.serverManager.release(projectRoot, runId); } catch { /* noop */ }
+      try {
+        run.serverQuiescence = typeof this.serverManager.releaseAndWait === 'function'
+          ? await this.serverManager.releaseAndWait(projectRoot, runId, 5000)
+          : { quiesced: (this.serverManager.release(projectRoot, runId), true), residual: 0 };
+      } catch (e) {
+        run.serverQuiescence = { quiesced: false, residual: e.message };
+      }
     }
   }
 
@@ -392,13 +438,42 @@ class OpenCodeAgentAdapter extends BaseAgentAdapter {
     if (run.sessionId && run.client) {
       try { remoteCancelled = await run.client.abort(run.sessionId, { signal: run.ac.signal }); } catch { /* fall through */ }
     }
-    const tr = this._finish(runId, LIFECYCLE.CANCELLED, 'AGENT_CANCELLED', this._buildResult(run, LIFECYCLE.CANCELLED));
-    const ctx = run.context || {};
-    if (tr.accepted) {
-      if (ctx.emit) { try { ctx.emit(AGENT_EVENT.RUN_CANCELLED, { runId, agentId: this.manifest.id }); } catch { /* noop */ } }
-      try { run.ac.abort(); } catch { /* already aborted */ }
+    try { run.ac.abort(); } catch { /* already aborted */ }
+    const q = await this.awaitQuiescence(runId, 10000);
+    if (q.quiesced && !this._gate.isTerminal(runId)) {
+      this._finish(runId, LIFECYCLE.CANCELLED, 'AGENT_CANCELLED', this._buildResult(run, LIFECYCLE.CANCELLED));
     }
-    return { ok: true, cancelled: remoteCancelled };
+    if (q.quiesced && this._gate.getStatus(runId) === LIFECYCLE.CANCELLED && !run.cancelEventEmitted) {
+      run.cancelEventEmitted = true;
+      const ctx = run.context || {};
+      if (ctx.emit) {
+        try { ctx.emit(AGENT_EVENT.RUN_CANCELLED, { runId, agentId: this.manifest.id }); } catch { /* noop */ }
+      }
+    }
+    return { ok: q.quiesced, cancelled: remoteCancelled, status: q.quiesced ? 'cancelled' : 'cancelling', quiesced: q.quiesced, residual: q.residual, detail: q.detail };
+  }
+
+  async awaitQuiescence(runId, timeoutMs = 10000) {
+    const run = this._runs.get(runId);
+    if (!run) return { quiesced: false, residual: 'unknown runId', detail: 'unknown runId' };
+    if (run.executionPromise) {
+      let timer;
+      const settled = await Promise.race([
+        run.executionPromise.then(() => true, () => true),
+        new Promise(resolve => { timer = setTimeout(() => resolve(false), timeoutMs); })
+      ]);
+      if (timer) clearTimeout(timer);
+      if (!settled) return { quiesced: false, residual: { runId, sessionId: run.sessionId }, detail: 'OpenCode stream/server still active' };
+    }
+    if (run.serverQuiescence && run.serverQuiescence.quiesced === false) {
+      return { ...run.serverQuiescence, detail: 'OpenCode server exit unconfirmed' };
+    }
+    const managerCanConfirmExit = typeof this.serverManager.releaseAndWait === 'function';
+    if ((run.strictProcessQuiescence || managerCanConfirmExit) &&
+        typeof this.serverManager.isRunning === 'function' && this.serverManager.isRunning(run.projectRoot)) {
+      return { quiesced: false, residual: { projectRoot: run.projectRoot }, detail: 'OpenCode server still running' };
+    }
+    return { quiesced: true, residual: 0, detail: 'OpenCode stream and server quiesced' };
   }
 
   async getStatus(runId) {

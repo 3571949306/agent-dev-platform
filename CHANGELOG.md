@@ -1,5 +1,13 @@
 # Changelog
 
+## v2.9.9 — P4 External Agent Production Verification (BUILD)
+
+- External coding work now enters through `AgentHub` with one canonical Run ID and canonical project root, independent pre/post effect verification, per-project writer locking, adapter quiescence, and a unique terminal gate. Cancellation, timeout, crash, ID mismatch, false completion, and late events fail closed.
+- ACP, shared CLI supervision, Codex, Claude Code, Cline sidecar, OpenCode managed server, OpenHands, and WorkBuddy/P3 desktop paths implement bounded cleanup contracts. Production fallback is forbidden after external execution begins.
+- Added a persistent, recursively sanitized verification registry and separate Safe Test / explicit-consent Real Verification services. Safe and automated release verification perform zero model calls and zero paid-provider calls; real verification uses one isolated temporary git project and requires independently observed effects.
+- Agent Center now renders availability, health, installed/configured, transport/runtime, verification level, evidence source, and last verification separately. Installed != Available != Verified; Protocol Verified != Real Task Verified.
+- Added 216-assertion production smoke, cancellation/lifecycle/lock/late-event soak, opt-in-only real harness, and GUI cases 160–180 (full suite target 180). P4 is IMPLEMENTED, not FROZEN; P5 is not included.
+
 ## v2.9.9 — Unified GUI / UX & Product Workbench (Phase B Final)
 
 Phase B is delivered incrementally on top of the frozen v2.9.8 reliability closure. Items below are VERIFIED only where a machine/E2E proof exists; the remainder stays NOT_STARTED rather than claimed.

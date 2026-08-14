@@ -27,7 +27,6 @@
  */
 
 const crypto = require('crypto');
-const { spawn } = require('child_process');
 const { BaseAgentAdapter } = require('./baseAgentAdapter');
 const { HEALTH_STATE, LIFECYCLE, AGENT_EVENT } = require('../hub/types');
 const { OPENHANDS } = require('../manifests/builtinAgents');
@@ -35,7 +34,8 @@ const { createOpenHandsClient } = require('../integrations/openhands/serverClien
 const { mapOpenHandsEvent } = require('../integrations/openhands/eventStream');
 const { createExternalAgentTerminalGate } = require('../runtime/externalTerminalGate');
 const { buildExternalResult, sanitizeErrors } = require('../runtime/resultSanitizer');
-const { resolveCliInPath, killTree } = require('../../services/externalAgents');
+const { createCliProcessSupervisor, buildEnvAllowlist } = require('../runtime/cliProcessSupervisor');
+const pathSecurity = require('../../security/pathSecurity');
 
 const VERSION_TIMEOUT_MS = 5000;
 const DEFAULT_RUN_TIMEOUT_MS = 600000;
@@ -56,13 +56,14 @@ class OpenHandsAgentAdapter extends BaseAgentAdapter {
    * @param {object} [opts.config]        { serverUrl?, apiKey?, timeoutMs? }
    * @param {Function} [opts.clientFactory] 可注入的 client 工厂（对抗性测试用）
    */
-  constructor({ manifest, store, config, clientFactory } = {}) {
+  constructor({ manifest, store, config, clientFactory, supervisor } = {}) {
     super({ manifest: manifest || OPENHANDS, config });
     this.store = store || null;
     this._runs = new Map();
     this._gate = createExternalAgentTerminalGate();
     this._detected = null;
     this._clientFactory = clientFactory || createOpenHandsClient;
+    this.supervisor = supervisor || createCliProcessSupervisor();
   }
 
   getManifest() { return { ...this.manifest }; }
@@ -98,12 +99,12 @@ class OpenHandsAgentAdapter extends BaseAgentAdapter {
     // 未配置 serverUrl：探测本地安装情况，但一律不可用（方案 B）
     let path = null;
     let version = null;
-    try { path = await resolveCliInPath('openhands-agent-server'); } catch { path = null; }
+    try { path = (await this.supervisor.detect('openhands-agent-server')).path; } catch { path = null; }
     if (!path) {
-      const py = await tryPythonModule();
+      const py = await tryPythonModule(this.supervisor);
       if (py) { path = py.path; version = py.version; }
     }
-    if (path && !version) version = await readVersion(path);
+    if (path && !version) version = await readVersion(path, this.supervisor);
 
     this._detected = {
       available: false,
@@ -182,7 +183,10 @@ class OpenHandsAgentAdapter extends BaseAgentAdapter {
     }
     const taskText = typeof task === 'string' ? task : task.goal;
     // working_dir 必须是 projectRoot，绝不 home
-    const projectRoot = task.projectRoot || (context && context.projectRoot) || null;
+    const requestedRoot = task.projectRoot || (context && context.projectRoot) || null;
+    const projectRoot = requestedRoot && context.productionHub
+      ? pathSecurity.canonicalizeRoot(requestedRoot)
+      : requestedRoot;
     if (!projectRoot) {
       throw new Error('OpenHandsAgentAdapter.startTask: task.projectRoot 必填（OpenHands 必须有 working_dir）');
     }
@@ -232,7 +236,7 @@ class OpenHandsAgentAdapter extends BaseAgentAdapter {
     this._runs.set(runId, runState);
     this._gate.init(runId, LIFECYCLE.STARTING);
 
-    this._executeRun(runId, taskText, projectRoot, context, ac.signal).catch(err => {
+    runState.executionPromise = this._executeRun(runId, taskText, projectRoot, context, ac.signal).catch(err => {
       const run = this._runs.get(runId);
       const msg = err && err.message ? err.message : String(err);
       const tr = this._finish(runId, LIFECYCLE.FAILED, 'AGENT_REMOTE_ERROR',
@@ -240,6 +244,7 @@ class OpenHandsAgentAdapter extends BaseAgentAdapter {
       if (!tr.accepted && run) {
         run.errors = sanitizeErrors([...(run.errors || []), msg]);
       }
+      return runState.result;
     });
 
     return { runId };
@@ -263,6 +268,7 @@ class OpenHandsAgentAdapter extends BaseAgentAdapter {
     const client = this._clientFactory({ baseUrl: serverUrl, apiKey: cfg.apiKey });
     run.client = client;
     run.status = LIFECYCLE.RUNNING;
+    run.executionStarted = true;
 
     // 超时定时器：超时 -> TIMEOUT（与取消分离，§17/§18）
     const timer = setTimeout(() => {
@@ -467,14 +473,35 @@ class OpenHandsAgentAdapter extends BaseAgentAdapter {
       catch { /* fall through to local abort */ }
     }
 
-    const tr = this._finish(runId, LIFECYCLE.CANCELLED, 'AGENT_CANCELLED',
-      this._buildResult(run, LIFECYCLE.CANCELLED, { extraErrors: ['用户已停止'] }));
-    const ctx = run.context || {};
-    if (tr.accepted && ctx.emit) {
-      try { ctx.emit(AGENT_EVENT.RUN_CANCELLED, { runId, agentId: this.manifest.id }); } catch { /* noop */ }
-    }
     try { run.ac.abort(); } catch { /* already aborted */ }
-    return { ok: true, cancelled: deleted };
+    const q = await this.awaitQuiescence(runId, 10000);
+    if (q.quiesced && !this._gate.isTerminal(runId)) {
+      this._finish(runId, LIFECYCLE.CANCELLED, 'AGENT_CANCELLED',
+        this._buildResult(run, LIFECYCLE.CANCELLED, { extraErrors: ['用户已停止'] }));
+    }
+    if (q.quiesced && this._gate.getStatus(runId) === LIFECYCLE.CANCELLED && !run.cancelEventEmitted) {
+      run.cancelEventEmitted = true;
+      const ctx = run.context || {};
+      if (ctx.emit) {
+        try { ctx.emit(AGENT_EVENT.RUN_CANCELLED, { runId, agentId: this.manifest.id }); } catch { /* noop */ }
+      }
+    }
+    return { ok: q.quiesced, cancelled: deleted, status: q.quiesced ? 'cancelled' : 'cancelling', quiesced: q.quiesced, residual: q.residual, detail: q.detail };
+  }
+
+  async awaitQuiescence(runId, timeoutMs = 10000) {
+    const run = this._runs.get(runId);
+    if (!run) return { quiesced: false, residual: 'unknown runId', detail: 'unknown runId' };
+    if (!run.executionPromise) return { quiesced: true, residual: 0, detail: 'OpenHands run not executing' };
+    let timer;
+    const settled = await Promise.race([
+      run.executionPromise.then(() => true, () => true),
+      new Promise(resolve => { timer = setTimeout(() => resolve(false), timeoutMs); })
+    ]);
+    if (timer) clearTimeout(timer);
+    return settled
+      ? { quiesced: true, residual: 0, detail: 'OpenHands stream closed' }
+      : { quiesced: false, residual: { runId, conversationId: run.conversationId }, detail: 'OpenHands stream still active' };
   }
 
   async getStatus(runId) {
@@ -508,53 +535,28 @@ class OpenHandsAgentAdapter extends BaseAgentAdapter {
     this._runs.clear();
     this._gate.clear();
     this._detected = null;
+    this.supervisor.dispose();
   }
 }
 
 /** 探测 `python -m openhands.agent_server --help` 是否可用。 */
-function tryPythonModule() {
-  return new Promise((resolve) => {
+async function tryPythonModule(supervisor = createCliProcessSupervisor()) {
+  try {
     const py = process.platform === 'win32' ? 'python' : 'python3';
-    let child;
-    try {
-      child = spawn(py, ['-m', 'openhands.agent_server', '--help'], {
-        windowsHide: true,
-        stdio: ['pipe', 'pipe', 'pipe']
-      });
-    } catch { return resolve(null); }
-    let out = '';
-    const timer = setTimeout(() => { killTree(child, 'SIGKILL'); resolve(null); }, VERSION_TIMEOUT_MS);
-    child.stdout.on('data', d => { out += d.toString(); });
-    child.stderr.on('data', () => { /* ignore */ });
-    child.on('error', () => { clearTimeout(timer); resolve(null); });
-    child.on('close', code => {
-      clearTimeout(timer);
-      if (code === 0) {
-        resolve({ path: `${py} -m openhands.agent_server`, version: extractVersion(out) });
-      } else {
-        resolve(null);
-      }
+    const handle = await supervisor.spawnProcess({
+      command: py, args: ['-m', 'openhands.agent_server', '--help'],
+      env: buildEnvAllowlist(), timeoutMs: VERSION_TIMEOUT_MS
     });
-  });
+    const exit = await handle.done;
+    return exit.code === 0
+      ? { path: `${py} -m openhands.agent_server`, version: extractVersion(handle.stdout) }
+      : null;
+  } catch { return null; }
 }
 
 /** 读取 openhands-agent-server --version。 */
-function readVersion(cliPath) {
-  return new Promise((resolve) => {
-    let child;
-    try {
-      child = spawn(cliPath, ['--version'], { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
-    } catch { return resolve(null); }
-    let out = '';
-    const timer = setTimeout(() => { killTree(child, 'SIGKILL'); resolve(null); }, VERSION_TIMEOUT_MS);
-    child.stdout.on('data', d => { out += d.toString(); });
-    child.stderr.on('data', () => { /* ignore */ });
-    child.on('error', () => { clearTimeout(timer); resolve(null); });
-    child.on('close', code => {
-      clearTimeout(timer);
-      resolve(code === 0 ? out.trim() : null);
-    });
-  });
+function readVersion(cliPath, supervisor = createCliProcessSupervisor()) {
+  return supervisor.readVersion(cliPath, ['--version'], VERSION_TIMEOUT_MS).catch(() => null);
 }
 
 function extractVersion(text) {

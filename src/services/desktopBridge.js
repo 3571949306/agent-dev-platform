@@ -132,6 +132,9 @@ class DesktopAgentBridge {
     this.sleep = opts.sleep || ((ms) => new Promise(r => setTimeout(r, ms)));
     this.now = opts.now || (() => Date.now());
     this.vision = opts.visionReader || null;
+    this.sessionId = opts.sessionId || null;
+    this.boundWindow = opts.windowRef || null;
+    this.requireExactWindow = opts.requireExactWindow === true || !!this.sessionId || !!this.boundWindow;
     this.state = 'idle';
     this.trace = [];
     this.targetHwnd = null; // P3 — verified foreground identity for input fencing
@@ -149,7 +152,13 @@ class DesktopAgentBridge {
   // ------------------------------------------------------------- locating
   async locateWindow() {
     this.setState('locating');
-    const r = await this.computer.listWindows();
+    if (this.boundWindow) {
+      const resolved = typeof this.computer.resolveWindow === 'function'
+        ? await this.computer.resolveWindow({ hwnd: this.boundWindow.hwnd, pid: this.boundWindow.pid }, { sessionId: this.sessionId, signal: this.signal })
+        : { ok: true, window: this.boundWindow };
+      return resolved.ok ? { ok: true, window: resolved.window } : resolved;
+    }
+    const r = await this.computer.listWindows(30000, { sessionId: this.sessionId, signal: this.signal });
     if (!r || r.ok === false) return { ok: false, error: '无法枚举窗口：' + ((r && r.error) || '未知错误') };
     const wanted = this.cfg.windowTitle;
     const list = (r.windows || []).filter(w => {
@@ -158,6 +167,12 @@ class DesktopAgentBridge {
     });
     if (!list.length) {
       return { ok: false, error: `未找到${wanted ? `标题包含「${wanted}」的` : ' WorkBuddy '}窗口，请先打开桌面应用并保持在前台可见。` };
+    }
+    if (list.length !== 1) {
+      return { ok: false, code: 'AMBIGUOUS_EXTERNAL_AGENT_WINDOW', error: `匹配到 ${list.length} 个 WorkBuddy 窗口，拒绝任意选择。` };
+    }
+    if (this.requireExactWindow && (!list[0].hwnd || !list[0].pid)) {
+      return { ok: false, code: 'TARGET_IDENTITY_REQUIRED', error: 'WorkBuddy 窗口缺少 HWND + PID 身份。' };
     }
     return { ok: true, window: list[0] };
   }
@@ -170,19 +185,23 @@ class DesktopAgentBridge {
   async inputTask(title, text) {
     this.setState('inputting');
     const attempts = [];
+    if (this.aborted()) return { ok: false, cancelled: true, error: '用户已停止', attempts };
 
     if (this.cfg.inputMode !== 'keys' && this.cfg.inputMode !== 'clipboard') {
       try {
         const r = await this.computer.setControlValue(title, text, {
           automationId: this.cfg.inputAutomationId || '',
           hwnd: this.targetHwnd,
-          pid: this.targetPid
+          pid: this.targetPid,
+          sessionId: this.sessionId,
+          signal: this.signal
         });
         if (r && r.ok) return { ok: true, via: 'uia-value', attempts };
         attempts.push({ via: 'uia-value', error: (r && r.error) || 'ValuePattern 不可用' });
       } catch (e) { attempts.push({ via: 'uia-value', error: e.message }); }
     }
 
+    if (this.aborted()) return { ok: false, cancelled: true, error: '用户已停止', attempts };
     if (this.cfg.inputMode !== 'keys' &&
       (typeof this.computer.pasteToTarget === 'function' || typeof this.computer.setClipboard === 'function')) {
       try {
@@ -191,14 +210,15 @@ class DesktopAgentBridge {
           // HWND+PID action fence plus restore-in-finally clipboard semantics.
           const paste = await this.computer.pasteToTarget({
             target: { hwnd: this.targetHwnd, pid: this.targetPid, title },
-            text
-          }, { signal: this.signal });
+            text,
+            sessionId: this.sessionId
+          }, { signal: this.signal, sessionId: this.sessionId });
           if (paste && paste.ok !== false) return { ok: true, via: 'clipboard', attempts };
           attempts.push({ via: 'clipboard', error: (paste && paste.error) || '粘贴失败' });
         } else {
-          const c = await this.computer.setClipboard(text);
+          const c = await this.computer.setClipboard(text, { sessionId: this.sessionId, signal: this.signal });
           if (c && c.ok !== false) {
-            const paste = await this.computer.pressKeys('^v', { foregroundHwnd: this.targetHwnd, foregroundPid: this.targetPid });
+            const paste = await this.computer.pressKeys('^v', { foregroundHwnd: this.targetHwnd, foregroundPid: this.targetPid, sessionId: this.sessionId, signal: this.signal });
             if (paste && paste.ok !== false) return { ok: true, via: 'clipboard', attempts };
             attempts.push({ via: 'clipboard', error: (paste && paste.error) || '粘贴失败' });
           } else {
@@ -208,10 +228,11 @@ class DesktopAgentBridge {
       } catch (e) { attempts.push({ via: 'clipboard', error: e.message }); }
     }
 
+    if (this.aborted()) return { ok: false, cancelled: true, error: '用户已停止', attempts };
     try {
       const t = typeof this.computer.typeText === 'function'
-        ? await this.computer.typeText(text, { foregroundHwnd: this.targetHwnd, foregroundPid: this.targetPid })
-        : await this.computer.pressKeys(String(text).replace(/[+^%~(){}\[\]]/g, m => '{' + m + '}'), { foregroundHwnd: this.targetHwnd, foregroundPid: this.targetPid });
+        ? await this.computer.typeText(text, { foregroundHwnd: this.targetHwnd, foregroundPid: this.targetPid, sessionId: this.sessionId, signal: this.signal })
+        : await this.computer.pressKeys(String(text).replace(/[+^%~(){}\[\]]/g, m => '{' + m + '}'), { foregroundHwnd: this.targetHwnd, foregroundPid: this.targetPid, sessionId: this.sessionId, signal: this.signal });
       if (t && t.ok !== false) return { ok: true, via: 'sendkeys', attempts };
       attempts.push({ via: 'sendkeys', error: (t && t.error) || '按键发送失败' });
     } catch (e) { attempts.push({ via: 'sendkeys', error: e.message }); }
@@ -220,7 +241,8 @@ class DesktopAgentBridge {
   }
 
   async submit() {
-    const r = await this.computer.pressKeys(this.cfg.submitKeys || '~', { foregroundHwnd: this.targetHwnd, foregroundPid: this.targetPid });
+    if (this.aborted()) return false;
+    const r = await this.computer.pressKeys(this.cfg.submitKeys || '~', { foregroundHwnd: this.targetHwnd, foregroundPid: this.targetPid, sessionId: this.sessionId, signal: this.signal });
     this.setState('submitted', { ok: r && r.ok !== false });
     return r && r.ok !== false;
   }
@@ -228,7 +250,10 @@ class DesktopAgentBridge {
   // -------------------------------------------------- completion detection
   async readWindowText(title) {
     if (typeof this.computer.getWindowText !== 'function') return null;
-    const r = await this.computer.getWindowText(title);
+    const target = this.targetHwnd && this.targetPid
+      ? { hwnd: this.targetHwnd, pid: this.targetPid, title }
+      : title;
+    const r = await this.computer.getWindowText(target, 400, { sessionId: this.sessionId, signal: this.signal });
     if (!r || r.ok === false) return null;
     return typeof r.text === 'string' ? r.text : null;
   }
@@ -313,13 +338,14 @@ class DesktopAgentBridge {
     const c = this.computer || {};
     if (typeof c.screenshotWindow === 'function') {
       try {
-        const r = await c.screenshotWindow(title);
+        const target = this.targetHwnd && this.targetPid ? { hwnd: this.targetHwnd, pid: this.targetPid, title } : title;
+        const r = await c.screenshotWindow(target, { sessionId: this.sessionId, signal: this.signal });
         if (r && r.ok !== false && r.data_url) return r;
       } catch { /* fall through to full screen */ }
     }
     if (typeof c.screenshot === 'function') {
       try {
-        const r = await c.screenshot();
+        const r = await c.screenshot({ sessionId: this.sessionId, signal: this.signal });
         if (r && r.ok !== false && r.data_url) return { ...r, fullScreen: true };
       } catch { /* no frame at all */ }
     }
@@ -439,14 +465,22 @@ class DesktopAgentBridge {
    */
   async run(taskText) {
     const started = this.now();
+    if (this.aborted()) {
+      this.setState('cancelled');
+      return this.result('cancelled', '', { errors: ['用户已停止'], durationMs: this.now() - started });
+    }
     const loc = await this.locateWindow();
     if (!loc.ok) { this.setState('failed', { error: loc.error }); return this.result('failed', '', { errors: [loc.error] }); }
 
     const title = loc.window.title;
+    if (this.aborted()) {
+      this.setState('cancelled');
+      return this.result('cancelled', '', { errors: ['用户已停止'], window: title, durationMs: this.now() - started });
+    }
     this.setState('focusing', { title });
     const focused = typeof this.computer.focusWindowRef === 'function'
-      ? await this.computer.focusWindowRef(loc.window)
-      : await this.computer.focusWindow(title);
+      ? await this.computer.focusWindowRef(loc.window, { sessionId: this.sessionId, signal: this.signal })
+      : await this.computer.focusWindow(title, { sessionId: this.sessionId, signal: this.signal });
     if (focused && focused.ok === false) {
       const err = `无法聚焦窗口「${title}」：${focused.error || '未知原因'}`;
       this.setState('failed', { error: err });
@@ -457,6 +491,11 @@ class DesktopAgentBridge {
     this.targetHwnd = (loc.window && loc.window.hwnd) || (focused && focused.hwnd) || null;
     this.targetPid = (loc.window && loc.window.pid) || (focused && focused.pid) || null;
 
+    if (this.aborted()) {
+      this.setState('cancelled');
+      return this.result('cancelled', '', { errors: ['用户已停止'], window: title, durationMs: this.now() - started });
+    }
+
     const baseline = (await this.readWindowText(title)) || '';
 
     const sentinel = this.cfg.useSentinel ? makeSentinel() : null;
@@ -466,10 +505,22 @@ class DesktopAgentBridge {
 
     const input = await this.inputTask(title, prompt);
     if (!input.ok) {
+      if (input.cancelled || this.aborted()) {
+        this.setState('cancelled');
+        return this.result('cancelled', '', { errors: ['用户已停止'], attempts: input.attempts, window: title, durationMs: this.now() - started });
+      }
       this.setState('failed', { error: input.error });
       return this.result('failed', '', { errors: [input.error], attempts: input.attempts, window: title });
     }
+    if (this.aborted()) {
+      this.setState('cancelled');
+      return this.result('cancelled', '', { errors: ['用户已停止'], inputVia: input.via, window: title, durationMs: this.now() - started });
+    }
     if (!(await this.submit())) {
+      if (this.aborted()) {
+        this.setState('cancelled');
+        return this.result('cancelled', '', { errors: ['用户已停止'], inputVia: input.via, window: title, durationMs: this.now() - started });
+      }
       const err = '任务已输入但提交（回车）失败';
       this.setState('failed', { error: err });
       return this.result('failed', '', { errors: [err], window: title, inputVia: input.via });
@@ -501,7 +552,9 @@ class DesktopAgentBridge {
     const answer = viaVision
       ? String(wait.text || '').trim()
       : (wait.text ? diffAnswer(baseline, wait.text, { taskText: prompt, sentinel }) : '');
-    const shot = this.cfg.captureScreenshot ? await this.computer.screenshot().catch(() => null) : null;
+    const shot = this.cfg.captureScreenshot
+      ? await this.computer.screenshot({ sessionId: this.sessionId, signal: this.signal }).catch(() => null)
+      : null;
     const common = {
       window: title,
       inputVia: input.via,

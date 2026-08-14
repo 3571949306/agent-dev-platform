@@ -369,9 +369,12 @@ test('61) Codex Deep Adapter：注册 + transportLabel + auth 面 + 路由候选
   expect(typeof codex.auth.authenticated).toBe('boolean');
   expect(JSON.stringify(codex.auth), 'auth 输出绝不含凭据本体').not.toMatch(/token|cookie|secret/i);
 
-  // 路由：编码任务候选中应有 codex
-  const ranked = await invoke('hub:route', { required: ['coding', 'filesystem'], preferred: ['git'] });
-  expect(ranked.map(r => r.agentId), 'codex 应在编码任务候选中').toContain('codex');
+  // P4 自动路由 fail-closed：检测到安装不等于真实任务验证，不能自动入选。
+  const automatic = await invoke('hub:route', { required: ['coding', 'filesystem'], preferred: ['git'] });
+  expect(automatic.map(r => r.agentId), '仅有本机探测证据的 codex 不得自动路由').not.toContain('codex');
+  // 手动指定仍可查看候选；实际启动还会经过健康、认证和权限门禁。
+  const explicit = await invoke('hub:route', { agentId: 'codex', required: ['coding', 'filesystem'], preferred: ['git'] });
+  expect(explicit.map(r => r.agentId), '手动指定时 codex 应保留在候选中').toContain('codex');
 
   // GUI：智能体页面渲染 Codex 卡片
   await openAgentsPage();

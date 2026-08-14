@@ -306,6 +306,17 @@ class ClineSidecarManager {
     return true;
   }
 
+  async awaitRunQuiescence(runId, timeoutMs = 3000) {
+    const deadline = Date.now() + Math.max(0, Number(timeoutMs) || 0);
+    while (this.activeRuns.has(runId) && Date.now() < deadline) {
+      await new Promise(resolve => setTimeout(resolve, 25));
+    }
+    const active = this.activeRuns.has(runId);
+    return { quiesced: !active, residual: active ? { runId, pid: this.child && this.child.pid || null } : 0 };
+  }
+
+  activeRunCount() { return this.activeRuns.size; }
+
   _write(message) {
     if (!this.child || this.child.killed || !this.child.stdin || this.child.stdin.destroyed) {
       throw codedError('CLINE_SIDECAR_NOT_RUNNING', 'Cline sidecar is not running');

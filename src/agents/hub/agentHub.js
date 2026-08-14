@@ -26,6 +26,10 @@
  */
 
 const { HEALTH_STATE, LIFECYCLE, ERROR_CODE, AGENT_EVENT } = require('./types');
+const { createExternalAgentTerminalGate } = require('../runtime/externalTerminalGate');
+const { captureProjectState, verifyExternalResult } = require('../verification/externalResultVerifier');
+const { sanitizeExternalResult } = require('../runtime/resultSanitizer');
+const pathSecurity = require('../../security/pathSecurity');
 
 /** 最大 fallback 次数（不含首次尝试）。 */
 const MAX_FALLBACKS = 3;
@@ -86,6 +90,8 @@ function createAgentHub(opts = {}) {
     registry, router, healthManager,
     lifecycleManager, eventNormalizer, runBridge,
     emit, projectLock,
+    verificationRegistry,
+    reportProblem,
     contextFactory,   // v2.9.0 §39-40：统一 Adapter context 构建（修复 §7B 缺口）
     delegationAuthorityVerifier   // v2.9.8 Final Closure（A5）：(parentRunId, token) => boolean
   } = opts;
@@ -95,6 +101,111 @@ function createAgentHub(opts = {}) {
   if (!healthManager) throw new Error('createAgentHub: healthManager 必填');
   if (!lifecycleManager) throw new Error('createAgentHub: lifecycleManager 必填');
   if (!runBridge) throw new Error('createAgentHub: runBridge 必填');
+
+  // P4 run controls are orchestration metadata only. RunManager remains the
+  // single lifecycle truth; this map guards resources around that truth.
+  const runControls = new Map();
+  const terminalGate = createExternalAgentTerminalGate();
+
+  function isExternal(adapter) {
+    return !!(adapter && adapter.manifest && adapter.manifest.source === 'external');
+  }
+
+  function report(code, message, detail = {}) {
+    if (typeof reportProblem !== 'function') return;
+    try {
+      reportProblem({
+        severity: 'ERROR', source: 'External Agent', code, message,
+        runId: detail.runId || null,
+        relatedKey: detail.runId ? `${code}:${detail.runId}` : code,
+        detail
+      });
+    } catch { /* Problems Center must never break execution */ }
+  }
+
+  function normalizeCancelResult(value) {
+    const v = value && typeof value === 'object' ? value : {};
+    return {
+      ok: v.ok === true,
+      status: v.status || null,
+      quiesced: v.quiesced === true,
+      residual: v.residual == null ? null : v.residual,
+      detail: v.detail || v.error || null
+    };
+  }
+
+  function releaseControl(control) {
+    if (!control || control.released) return;
+    if (control.lockAcquired && projectLock) {
+      try { projectLock.release(control.runId); } catch { /* noop */ }
+      control.lockAcquired = false;
+    }
+    control.released = true;
+    if (control.counted) {
+      control.adapter.activeRunCount = Math.max(0, Number(control.adapter.activeRunCount) - 1);
+      control.counted = false;
+    }
+  }
+
+  function finishControl(control, status, result, { release = true } = {}) {
+    if (!control) return null;
+    const tr = terminalGate.transition(control.runId, status, result && result.errorCode);
+    if (!tr.accepted) return tr;
+    control.terminal = true;
+    control.pendingTerminal = null;
+    runBridge.finishAgentRun(control.runId, status, result);
+    if (release) releaseControl(control);
+    return tr;
+  }
+
+  async function finishFromAdapter(control, status, result) {
+    if (!control || control.terminal) return;
+    if (control.cancelInProgress) {
+      control.pendingTerminal = { status, result };
+      return;
+    }
+    if (isExternal(control.adapter) && typeof control.adapter.awaitQuiescence === 'function') {
+      let q;
+      try { q = await control.adapter.awaitQuiescence(control.runId, 10000); }
+      catch (e) { q = { quiesced: false, residual: e.message }; }
+      if (!q || q.quiesced !== true) {
+        control.pendingTerminal = { status, result };
+        report(ERROR_CODE.AGENT_CANCEL_NOT_QUIESCED, 'External Agent reached a terminal result before runtime quiescence was confirmed', {
+          runId: control.runId, agentId: control.adapter.id, residual: q && q.residual
+        });
+        return;
+      }
+    }
+    let finalResult = result;
+    if (status === LIFECYCLE.COMPLETED && control.beforeState) {
+      try {
+        const effect = await verifyExternalResult({
+          projectRoot: control.projectRoot,
+          before: control.beforeState,
+          result,
+          expectedFile: control.expectedFile,
+          expectedContent: control.expectedContent,
+          readOnly: control.readOnly
+        });
+        finalResult = (result && typeof result === 'object') ? { ...result, ...effect } : { summary: result, ...effect };
+        if (!effect.effectObserved && effect.verificationStatus !== 'NOT_APPLICABLE') {
+          report(ERROR_CODE.AGENT_EFFECT_NOT_OBSERVED, 'External Agent reported completion without an independently observed project effect', {
+            runId: control.runId, agentId: control.adapter.id,
+            reportedChangedFiles: effect.reportedChangedFiles,
+            observedChangedFiles: effect.observedChangedFiles
+          });
+        }
+      } catch (e) {
+        finalResult = (result && typeof result === 'object')
+          ? { ...result, effectObserved: false, verificationStatus: 'EXTERNAL_EFFECT_VERIFICATION_FAILED', verificationError: e.message }
+          : { summary: result, effectObserved: false, verificationStatus: 'EXTERNAL_EFFECT_VERIFICATION_FAILED', verificationError: e.message };
+      }
+    }
+    if (isExternal(control.adapter)) {
+      finalResult = sanitizeExternalResult(finalResult, { agentId: control.adapter.id, runId: control.runId });
+    }
+    finishControl(control, status, finalResult);
+  }
 
   /**
    * v2.7.1 — 判断任务是否需要写锁。
@@ -168,6 +279,30 @@ function createAgentHub(opts = {}) {
       return { error: `Agent ${agentId} 已禁用`, errorCode: ec('AGENT_DISABLED', 'AGENT_DISABLED') };
     }
 
+    // P4 project-root truth: an external coding runtime never inherits the
+    // app cwd/home/default workspace. Canonicalization happens before a Run or
+    // project lock exists, so an invalid root cannot start execution.
+    const codingExternal = isExternal(adapter) && (adapter.capabilities || []).some(c =>
+      c === 'coding' || c === 'filesystem' || c === 'terminal');
+    if (codingExternal && !task.projectRoot) {
+      return { error: 'PROJECT_ROOT_REQUIRED', errorCode: ERROR_CODE.PROJECT_ROOT_REQUIRED, executionStarted: false };
+    }
+    if (task.projectRoot) {
+      try {
+        task = { ...task, projectRoot: pathSecurity.canonicalizeRoot(task.projectRoot) };
+      } catch (e) {
+        return { error: e.message, errorCode: e.code || 'PROJECT_ROOT_INVALID', executionStarted: false };
+      }
+    }
+
+    const maxConcurrency = Number(adapter.maxConcurrency || (adapter.manifest && adapter.manifest.maxConcurrency) || 1);
+    if (Number(adapter.activeRunCount || 0) >= maxConcurrency) {
+      return {
+        error: 'AGENT_CONCURRENCY_LIMIT', errorCode: ERROR_CODE.AGENT_CONCURRENCY_LIMIT,
+        agentId, maxConcurrency, executionStarted: false
+      };
+    }
+
     // 2. 检查健康（标记为 checking，不阻塞启动）
     try {
       const healthResult = await healthManager.check(agentId, { force: false, projectRoot: task.projectRoot });
@@ -188,6 +323,18 @@ function createAgentHub(opts = {}) {
       adapterType: adapter.adapterType || adapter.transport || null
     });
 
+    const control = {
+      runId, lifecycleRunId, adapter, projectRoot: task.projectRoot || null,
+      lockAcquired: false, released: false, terminal: false,
+      cancelInProgress: false, pendingTerminal: null, executionStarted: false,
+      counted: true, beforeState: null, readOnly: task.readOnly === true,
+      expectedFile: task.verificationExpectedFile || null,
+      expectedContent: task.verificationExpectedContent == null ? null : String(task.verificationExpectedContent)
+    };
+    adapter.activeRunCount = Number(adapter.activeRunCount || 0) + 1;
+    runControls.set(runId, control);
+    terminalGate.init(runId, LIFECYCLE.STARTING);
+
     // v2.7.1 — Project Mutation Lock：在 adapter.startTask 之前获取锁
     // v2.9.8 Final Closure（A5）— Unforgeable Lock Reentrancy：
     // 禁止用 task.rootRunId（调用方/模型可控文本）声称同树。
@@ -197,7 +344,6 @@ function createAgentHub(opts = {}) {
     // 任一侧推导失败（未知 runId）= fail-closed：不重入，正常争锁。
     // 独立 Run 即使伪造 task.rootRunId = holder 的 root，也不会影响推导链，
     // 其推导出的 root 仍是自己，依旧 PROJECT_LOCKED。
-    let lockAcquired = false;
     if (projectLock && task.projectRoot) {
       const holder = typeof projectLock.getLockHolder === 'function'
         ? projectLock.getLockHolder(task.projectRoot)
@@ -223,7 +369,7 @@ function createAgentHub(opts = {}) {
           : projectLock.acquireRead(task.projectRoot, runId, agentId);
         if (!lockResult.ok) {
           // 锁被其他 Run 持有——不启动任务（execution 从未开始）
-          runBridge.finishAgentRun(runId, 'failed', 'PROJECT_LOCKED');
+          finishControl(control, 'failed', { status: 'failed', errorCode: 'PROJECT_LOCKED', errors: ['PROJECT_LOCKED'] });
           return {
             error: 'PROJECT_LOCKED',
             errorCode: 'PROJECT_LOCKED',
@@ -232,7 +378,17 @@ function createAgentHub(opts = {}) {
             executionStarted: false
           };
         }
-        lockAcquired = true;
+        control.lockAcquired = true;
+      }
+    }
+
+    const verifyEffect = codingExternal && needsWriteLock(task) && task.responseOnly !== true && task.verifyEffect !== false;
+    if (verifyEffect) {
+      try {
+        control.beforeState = await captureProjectState(task.projectRoot);
+      } catch (e) {
+        finishControl(control, 'failed', { status: 'failed', errorCode: 'EXTERNAL_EFFECT_BASELINE_FAILED', errors: [e.message] });
+        return { error: e.message, errorCode: 'EXTERNAL_EFFECT_BASELINE_FAILED', runId, executionStarted: false };
       }
     }
 
@@ -250,6 +406,7 @@ function createAgentHub(opts = {}) {
         agentId,
         projectRoot: task.projectRoot,
         projectId: task.projectId,
+        productionHub: true,
         allowedScopes: Array.isArray(task.allowedScopes) ? task.allowedScopes : undefined,
         // 包装 emit：经过 eventNormalizer 归一化后发射
         // v2.7.1 — adapter 若已自行归一化（type 以 agent. 开头），直接发射，避免二次映射丢失事件类型。
@@ -257,7 +414,7 @@ function createAgentHub(opts = {}) {
           if (typeof type === 'string' && type.startsWith('agent.')) {
             // 已归一化事件：补全 runId/agentId 后直接发射
             const evt = (payload && typeof payload === 'object')
-              ? { ...payload, type, runId: payload.runId || runId, agentId: payload.agentId || agentId }
+              ? { ...payload, type, runId, agentId }
               : { type, runId, agentId, data: payload };
             safeEmit(emit, evt.type, evt);
             return;
@@ -279,25 +436,48 @@ function createAgentHub(opts = {}) {
         // 后调用此回调，使 hub:status / hub:result 返回正确的终态。
         finishRun: (status, result) => {
           if (['completed', 'failed', 'cancelled', 'timeout'].includes(status)) {
-            runBridge.finishAgentRun(runId, status, result);
-          }
-          // v2.7.1 — 终态后释放项目锁
-          if (lockAcquired && projectLock) {
-            try { projectLock.release(runId); } catch { /* noop */ }
-            lockAcquired = false;
+            void finishFromAdapter(control, status, result);
           }
         }
       });
+
+      // P4 identity fail-closed: external session/thread IDs are separate
+      // fields; the adapter's returned Run ID must be the canonical Hub ID.
+      if (isExternal(adapter) && (!startResult || startResult.runId !== runId)) {
+        const returnedRunId = startResult && startResult.runId;
+        control.executionStarted = !!returnedRunId;
+        let cancelled = { ok: false, quiesced: false, residual: 'identity-mismatched run' };
+        if (returnedRunId && typeof adapter.cancel === 'function') {
+          try { cancelled = normalizeCancelResult(await adapter.cancel(returnedRunId)); } catch (e) { cancelled.detail = e.message; }
+        }
+        const detail = {
+          status: 'failed', errorCode: ERROR_CODE.AGENT_RUN_IDENTITY_MISMATCH,
+          errors: [`adapter returned ${returnedRunId || '<missing>'}; expected ${runId}`],
+          adapterRunId: returnedRunId || null, hubRunId: runId,
+          quiesced: cancelled.quiesced, residual: cancelled.residual
+        };
+        report(ERROR_CODE.AGENT_RUN_IDENTITY_MISMATCH, 'External adapter returned a non-canonical Run ID', {
+          runId, agentId, adapterRunId: returnedRunId || null, quiesced: cancelled.quiesced, residual: cancelled.residual
+        });
+        // A terminal Hub run is truthful even if cleanup failed, but the
+        // project lock remains held until an operator/cleanup path confirms
+        // quiescence.
+        finishControl(control, 'failed', detail, { release: cancelled.quiesced });
+        return {
+          error: ERROR_CODE.AGENT_RUN_IDENTITY_MISMATCH,
+          errorCode: ERROR_CODE.AGENT_RUN_IDENTITY_MISMATCH,
+          runId, adapterRunId: returnedRunId || null,
+          executionStarted: !!returnedRunId,
+          quiesced: cancelled.quiesced
+        };
+      }
 
       // 5. 处理启动失败
       // v2.9.8 Final Closure（A2）— Execution-Started Truth：runId 存在 != execution started。
       // 只有 adapter.startTask 真实执行且未拒绝时 executionStarted=true；
       // 此前任何失败（锁/定义/路由/启动异常）一律 executionStarted=false。
       if (startResult && startResult.ok === false) {
-        runBridge.finishAgentRun(runId, 'failed', startResult.error || '启动失败');
-        if (lockAcquired && projectLock) {
-          try { projectLock.release(runId); } catch { /* noop */ }
-        }
+        finishControl(control, 'failed', { status: 'failed', errors: [startResult.error || '启动失败'] });
         return {
           error: startResult.error || '启动失败',
           errorCode: ec('AGENT_START_FAILED', 'AGENT_START_FAILED'),
@@ -307,16 +487,14 @@ function createAgentHub(opts = {}) {
       }
 
       // 启动成功：Lifecycle → running
+      control.executionStarted = true;
       lifecycleManager.transition(lifecycleRunId, LIFECYCLE.RUNNING);
 
       // 6. 返回 runId（executionStarted=true：adapter 真实启动）
       return { runId, agentId, executionStarted: true };
     } catch (e) {
       // adapter.startTask 抛异常：完成 Run 为 failed，返回 error
-      runBridge.finishAgentRun(runId, 'failed', e.message);
-      if (lockAcquired && projectLock) {
-        try { projectLock.release(runId); } catch { /* noop */ }
-      }
+      finishControl(control, 'failed', { status: 'failed', errors: [e.message] });
       return {
         error: e.message,
         errorCode: ec('AGENT_START_FAILED', 'AGENT_START_FAILED'),
@@ -363,6 +541,13 @@ function createAgentHub(opts = {}) {
         return result;
       }
 
+      // Once an external runtime started, another writer must not continue the
+      // same task against a partially mutated project. Automatic fallback is
+      // only safe before execution.
+      if (result.executionStarted === true) {
+        return { ...result, fallbackSuppressed: true, fallbackPolicy: 'fallbackBeforeExecutionOnly' };
+      }
+
       // 启动失败：如果有下一个候选，发射 fallback 事件
       if (i < maxAttempts - 1) {
         const nextAgentId = candidates[i + 1].agentId;
@@ -388,23 +573,59 @@ function createAgentHub(opts = {}) {
    * @returns {object|null}
    */
   async function cancel(runId) {
-    // v2.7.1 — 先调用 adapter.cancel() 让外部 Agent 真正停止（如 OpenCode session abort）
+    const control = runControls.get(runId);
+    if (control && control.terminal) return runBridge.getRunMapping(runId);
+    if (control) control.cancelInProgress = true;
+
+    // Native adapters retain the P1-P3 cancellation contract. P4's strict
+    // process/session quiescence barrier applies only to external runtimes.
+    if (control && !isExternal(control.adapter)) {
+      try {
+        if (typeof control.adapter.cancel === 'function') await control.adapter.cancel(runId);
+      } catch { /* RunBridge remains the lifecycle truth for native cancel */ }
+      control.cancelInProgress = false;
+      const nativeResult = runBridge.cancelAgentRun(runId);
+      releaseControl(control);
+      return nativeResult;
+    }
+
+    // P4: external adapter cancellation is a quiescence barrier, not a best-effort
+    // notification. The Hub remains non-terminal and keeps the project lock
+    // when cleanup cannot be proven.
     const mapping = runBridge.getRunMapping(runId);
+    let cancelled = { ok: false, quiesced: false, residual: 'adapter not found', detail: null };
     if (mapping) {
       const lifecycleRun = lifecycleManager.getRun(mapping.lifecycleRunId);
       if (lifecycleRun && lifecycleRun.agentId) {
         const adapter = registry.get(lifecycleRun.agentId);
         if (adapter && typeof adapter.cancel === 'function') {
-          try { await adapter.cancel(runId); } catch { /* adapter cancel failure must not block hub cancel */ }
+          try { cancelled = normalizeCancelResult(await adapter.cancel(runId)); }
+          catch (e) { cancelled = { ok: false, quiesced: false, residual: 'cancel threw', detail: e.message }; }
         }
       }
     }
-    const result = runBridge.cancelAgentRun(runId);
-    // v2.7.1 — 取消时释放项目锁
-    if (projectLock) {
-      try { projectLock.release(runId); } catch { /* noop */ }
+    if (!cancelled.quiesced) {
+      if (control) control.cancelInProgress = false;
+      report(ERROR_CODE.AGENT_CANCEL_NOT_QUIESCED, 'External Agent cancellation did not reach quiescence', {
+        runId, residual: cancelled.residual, detail: cancelled.detail
+      });
+      return {
+        ok: false,
+        error: ERROR_CODE.AGENT_CANCEL_NOT_QUIESCED,
+        errorCode: ERROR_CODE.AGENT_CANCEL_NOT_QUIESCED,
+        quiesced: false,
+        residual: cancelled.residual,
+        detail: cancelled.detail
+      };
     }
-    return result;
+    const result = control
+      ? (finishControl(control, 'cancelled', {
+          status: 'cancelled', errorCode: ERROR_CODE.AGENT_CANCELLED,
+          errors: ['用户已取消'], quiesced: true, residual: cancelled.residual
+        }), runBridge.getRunMapping(runId))
+      : runBridge.cancelAgentRun(runId);
+    if (control) control.cancelInProgress = false;
+    return { ...(result || {}), ok: true, status: 'cancelled', quiesced: true, residual: cancelled.residual };
   }
 
   /**
@@ -460,7 +681,7 @@ function createAgentHub(opts = {}) {
    * @returns {Array<{ id, adapterType, transport, healthStatus, health, capabilities }>}
    */
   function getAvailable() {
-    return registry.listAvailable().map(adapter => {
+    return registry.list().filter(adapter => !adapter.disabled).map(adapter => {
       // v2.8.0 spec §77/§78/§79：Agent Center 需要 transport 展示 / 安装态 / 版本 / 认证状态。
       // 认证只暴露状态机展示值（state/mode/authenticated/detail），绝不暴露凭据本体。
       let auth = null;
@@ -471,17 +692,42 @@ function createAgentHub(opts = {}) {
         } catch { auth = null; }
       }
       const detected = adapter._detected || null;
+      const installed = detected && detected.installed != null
+        ? !!detected.installed
+        : !!(detected && detected.available);
+      const configured = detected && detected.configured != null
+        ? !!detected.configured
+        : installed;
+      const available = !!(detected && detected.available);
+      const health = healthManager.getStatus(adapter.id);
+      const healthStatus = adapter.healthStatus || HEALTH_STATE.UNKNOWN;
+      let availability = 'UNAVAILABLE';
+      if (!installed) availability = 'NOT_INSTALLED';
+      else if (!configured) availability = 'INSTALLED_UNCONFIGURED';
+      else if (!available) availability = 'UNAVAILABLE';
+      else if (auth && auth.state === 'AUTH_REQUIRED') availability = 'AUTH_REQUIRED';
+      else if (healthStatus === HEALTH_STATE.DEGRADED) availability = 'DEGRADED';
+      else if (healthStatus === 'error') availability = 'ERROR';
+      else if (auth && auth.state === 'UNKNOWN') availability = 'AUTH_UNKNOWN';
+      else availability = 'AVAILABLE';
       return {
         id: adapter.id,
         adapterType: adapter.adapterType || null,
         transport: adapter.transport || null,
         transportLabel: transportLabelFor(adapter),
         healthStatus: adapter.healthStatus || HEALTH_STATE.UNKNOWN,
-        health: healthManager.getStatus(adapter.id),
+        health,
         capabilities: adapter.capabilities || [],
-        installed: !!adapter.available,
-        version: (detected && detected.version) || null,
-        activeRuntime: typeof adapter.getActiveRuntime === 'function' ? adapter.getActiveRuntime() : null,
+        installed,
+        configured,
+        available,
+        availability,
+        version: adapter._verifiedVersion || (detected && detected.version) || null,
+        path: (detected && detected.path) || null,
+        executablePath: (detected && detected.path) || null,
+        mode: adapter.runtimeMode || '',
+        activeRuntime: adapter._verifiedRuntime || (typeof adapter.getActiveRuntime === 'function' ? adapter.getActiveRuntime() : null),
+        runtime: adapter._verifiedRuntime || (typeof adapter.getActiveRuntime === 'function' ? adapter.getActiveRuntime() : null) || adapter.transport || adapter.adapterType || null,
         auth
       };
     });
@@ -499,7 +745,15 @@ function createAgentHub(opts = {}) {
     status,
     result,
     getManifests,
-    getAvailable
+    getAvailable,
+    getDiagnostics: () => ({
+      activeRuns: [...runControls.values()].filter(c => !c.terminal).length,
+      controls: [...runControls.values()].map(c => ({
+        runId: c.runId, agentId: c.adapter.id, terminal: c.terminal,
+        cancelInProgress: c.cancelInProgress, lockHeld: c.lockAcquired,
+        executionStarted: c.executionStarted
+      }))
+    })
   };
 }
 

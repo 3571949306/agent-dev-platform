@@ -39,6 +39,7 @@ const { createCliProcessSupervisor, buildEnvAllowlist } = require('../runtime/cl
 const { createExternalAgentSessionManager } = require('../session/externalAgentSessionManager');
 const { AUTH_STATE, AUTH_MODE } = require('../protocols/acp/authBroker');
 const { resolveCliInPath } = require('../../services/externalAgents');
+const pathSecurity = require('../../security/pathSecurity');
 
 const DEFAULT_TIMEOUT_MS = 600000;
 const DEFAULT_VERSION_TIMEOUT_MS = 5000;
@@ -148,7 +149,62 @@ class AcpAgentAdapter extends BaseAgentAdapter {
     };
   }
 
+  /** Safe verification performs initialize only. It never authenticates,
+   * creates a session or sends a prompt. */
+  async safeVerify({ projectRoot, verificationId } = {}) {
+    const detection = await this.detect();
+    const base = {
+      agentId: this.id, paidCalls: 0, modelCalls: 0,
+      protocolAttempted: false, protocolVerified: false,
+      runtime: 'acp', version: null, auth: this.getAuthState()
+    };
+    if (!detection.available || !projectRoot) return base;
+    const runState = { runId: `safe:${verificationId || crypto.randomUUID()}`, pid: null, exitInfo: null };
+    const runtime = createAcpClientRuntime({
+      transportFactory: connectOpts => this._createTransport(runState, connectOpts),
+      sessionManager: this.sessions
+    });
+    let handshake = null;
+    let q = { quiesced: false, residual: 'not disconnected' };
+    try {
+      handshake = await runtime.connect({
+        command: detection.path,
+        args: this.args,
+        cwd: pathSecurity.canonicalizeRoot(projectRoot),
+        env: buildEnvAllowlist(this.passthroughEnv, this.environment || {}),
+        timeoutMs: 30000,
+        frameLimitBytes: this.frameLimitBytes,
+        agentId: this.id,
+        expectedCapabilities: this.expectedAcpCapabilities,
+        clientCapabilities: this.clientCapabilities || undefined,
+        runId: runState.runId
+      });
+      const authMethods = Array.isArray(handshake.authMethods) ? handshake.authMethods : [];
+      this._lastAuthState = authMethods.length
+        ? { state: AUTH_STATE.AUTH_REQUIRED, mode: AUTH_MODE.EXTERNAL_LOGIN, authenticated: false, detail: 'ACP initialize reports authentication methods' }
+        : { state: AUTH_STATE.AUTHENTICATED, mode: AUTH_MODE.NONE, authenticated: true, detail: 'ACP initialize reports no authentication requirement' };
+    } finally {
+      try { runtime.disconnect(); } catch { /* noop */ }
+      q = await runtime.awaitQuiescence(5000);
+    }
+    return {
+      ...base,
+      protocolAttempted: true,
+      protocolVerified: !!(handshake && q.quiesced),
+      reason: q.quiesced ? '' : 'ACP_PROCESS_RESIDUE',
+      version: handshake && handshake.agentInfo && handshake.agentInfo.version || null,
+      auth: this.getAuthState(),
+      quiesced: q.quiesced,
+      residual: q.residual
+    };
+  }
+
   _resolveCwd(task, context) {
+    if (context && context.productionHub) {
+      const root = task.projectRoot || context.projectRoot;
+      if (!root) throw Object.assign(new Error('ACP production run requires projectRoot'), { code: 'PROJECT_ROOT_REQUIRED' });
+      return pathSecurity.canonicalizeRoot(root);
+    }
     if (this.cwdMode === 'config' && this.configCwd) return this.configCwd;
     if (this.cwdMode === 'inherit') return undefined;
     return task.projectRoot || (context && context.projectRoot) || this.configCwd || undefined;
@@ -183,7 +239,7 @@ class AcpAgentAdapter extends BaseAgentAdapter {
       throw new Error(`AcpAgentAdapter: command "${this.command}" not available`);
     }
 
-    const runId = crypto.randomUUID();
+    const runId = (context && context.runId) || crypto.randomUUID();
     const runState = {
       runId,
       runtime: null,
@@ -212,12 +268,16 @@ class AcpAgentAdapter extends BaseAgentAdapter {
       context.emit(AGENT_EVENT.RUN_STARTED, { type: AGENT_EVENT.RUN_STARTED, runId, agentId: this.id, goal: taskText });
     }
 
-    this._executeAcp(runId, runtime, detected.path, this._resolveCwd(task, context),
+    const actualCwd = this._resolveCwd(task, context);
+    runState.projectRoot = actualCwd || null;
+    runState.actualCwd = actualCwd || null;
+    runState.executionPromise = this._executeAcp(runId, runtime, detected.path, actualCwd,
       buildEnvAllowlist(this.passthroughEnv, this.environment || (context && context.env) || {}),
       taskText, task, context)
       .catch(err => {
         // _executeAcp 自身已兜底；这里只处理结算阶段（emit/finishRun）抛出的意外。
         this._settleRun(runState, this._buildFailureResult(err, runState), context);
+        return runState.result;
       });
 
     return { runId };
@@ -242,6 +302,7 @@ class AcpAgentAdapter extends BaseAgentAdapter {
         agentId: this.id,
         expectedCapabilities: this.expectedAcpCapabilities,
         clientCapabilities: this.clientCapabilities || undefined
+        ,runId
       });
       runState.status = LIFECYCLE.RUNNING;
 
@@ -452,7 +513,11 @@ class AcpAgentAdapter extends BaseAgentAdapter {
   async cancel(runId) {
     const run = this._runs.get(runId);
     if (!run) return { ok: false, error: 'unknown runId' };
-    if (run.settled) return { ok: true, alreadySettled: true, status: run.status };
+    if (run.settled) {
+      const q = run.runtime && typeof run.runtime.awaitQuiescence === 'function'
+        ? await run.runtime.awaitQuiescence(3000) : { quiesced: true, residual: 0 };
+      return { ok: true, alreadySettled: true, status: run.status, quiesced: q.quiesced === true, residual: q.residual };
+    }
 
     run.cancelRequested = true;
     try {
@@ -487,7 +552,28 @@ class AcpAgentAdapter extends BaseAgentAdapter {
       run.settled = true;
     }
 
-    return { ok: true, forced, status: run.status };
+    let quiesced = true;
+    let residual = 0;
+    if (run.runtime && typeof run.runtime.awaitQuiescence === 'function') {
+      const q = await run.runtime.awaitQuiescence(3000);
+      quiesced = q.quiesced === true;
+      residual = q.residual;
+    } else if (run.pid && !run.reclaimed) {
+      quiesced = false;
+      residual = { pid: run.pid };
+    }
+    return {
+      ok: quiesced, forced, status: run.status,
+      quiesced, residual,
+      detail: quiesced ? 'ACP process/session quiesced' : 'ACP process exit unconfirmed'
+    };
+  }
+
+  async awaitQuiescence(runId, timeoutMs = 3000) {
+    const run = this._runs.get(runId);
+    if (!run) return { quiesced: true, residual: 0 };
+    if (run.runtime && typeof run.runtime.awaitQuiescence === 'function') return run.runtime.awaitQuiescence(timeoutMs);
+    return { quiesced: !!run.reclaimed, residual: run.reclaimed ? 0 : { pid: run.pid } };
   }
 
   async getStatus(runId) {

@@ -47,6 +47,10 @@
     "test:computer-closure": "node scripts/run-tests.js computerClosure.test",
     "test:computer-closure:production": "node scripts/run-tests.js computerClosureProduction",
     "test:computer-closure:soak": "node scripts/run-tests.js computerClosureSoak",
+    "test:external-verification": "node scripts/run-tests.js externalProductionVerification",
+    "test:external-verification:production": "node scripts/external-verification-production-smoke.js",
+    "test:external-verification:soak": "node scripts/run-tests.js externalVerificationSoak",
+    "test:external-verification:real": "node scripts/external-verification-real.js",
     "icon": "node scripts/make-icon.js"
   },
   "dependencies": {

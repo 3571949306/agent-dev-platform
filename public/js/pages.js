@@ -1740,10 +1740,19 @@ async function loadHubCards(body) {
           `<div class="ver-row"><span class="ver-k">${esc(d.label)}</span><span class="ver-v ${d.value === '已验证' || d.value === '是' ? 'ok' : (d.value === '未验证' || d.value === '未检测到' ? 'no' : '')}">${esc(d.value)}</span></div>`
         ).join('')}</div>`
       : '';
+    const external = m.source === 'external';
+    const verificationFacts = ver ? `<div class="small" style="margin-top:8px;line-height:1.55">
+      <div><b>Installed:</b> ${ver.installed ? 'Yes' : 'No'} · <b>Configured:</b> ${ver.configured ? 'Yes' : 'No'}</div>
+      <div><b>Availability:</b> ${esc(ver.availability || 'UNKNOWN')} · <b>Health:</b> ${esc(ver.health || 'unknown')}</div>
+      <div><b>Transport:</b> ${esc(ver.transport || a.transportLabel || 'unknown')} · <b>Runtime:</b> ${esc(ver.runtime || a.runtime || 'unknown')}</div>
+      <div><b>Last Verified:</b> ${esc(ver.lastVerified || 'Never')} · <b>Real Task Verified:</b> ${ver.realTaskVerified ? 'Yes' : 'No'}</div>
+      ${ver.lastFailure ? `<div class="err"><b>Last Failure:</b> ${esc(ver.lastFailure.reason || ver.lastFailure.status || 'unknown')}</div>` : ''}
+    </div>` : '';
     return `<div class="acard" data-hub-id="${esc(m.id)}">
       <div class="acard-h"><b>${name}</b><span class="chip">${transport}</span><span class="chip ${hubAvailabilityClass(availability)}">状态：${esc(availability)}</span><span class="chip ${hubHealthClass(healthStatus)}">运行：${esc(hubHealthText(healthStatus))}</span>${hubAuthChip(a.auth)}${verChip}</div>
       <div class="acard-meta">${caps.map(c => `<span class="chip">${esc(hubCapLabel(c))}</span>`).join('') || '<span class="muted small">无能力声明</span>'}</div>
       ${verRows}
+      ${verificationFacts}
       ${a.version || a.auth || (sessionsByAgent.get(m.id) || []).length ? `
       <div class="small" style="margin-top:8px;line-height:1.55">
         ${a.version ? `<div><b>Version:</b> ${esc(a.version)}</div>` : ''}
@@ -1751,21 +1760,38 @@ async function loadHubCards(body) {
         ${(sessionsByAgent.get(m.id) || []).slice(0, 3).map(s => `<div><b>Session:</b> ${esc(hubSessionShort(s.external_session_id))} · ${esc(s.transport || '')}${s.resumable ? ' · 可继续' : ''} · ${esc(s.last_status || '')}</div>`).join('')}
       </div>` : ''}
       ${clineRuntime}
-      <div class="acard-f">${m.id === 'cline' ? '<button class="btn tiny" data-cline-config>Configure Cline</button>' : ''}<button class="btn tiny" data-hub-test="${esc(m.id)}" title="安全检测/协议测试，默认不产生付费 LLM 调用">Test Integration</button></div>
+      <div class="acard-f">${m.id === 'cline' ? '<button class="btn tiny" data-cline-config>Configure Cline</button>' : ''}${external ? `<button class="btn tiny" data-hub-safe="${esc(m.id)}" title="0 quota / 0 model calls">Safe Test</button><button class="btn tiny danger" data-hub-real="${esc(m.id)}">Real Verification</button>` : ''}</div>
     </div>`;
   }).join('');
   const clineConfigButton = cardsEl.querySelector('[data-cline-config]');
   if (clineConfigButton) clineConfigButton.onclick = () => openClineConfigModal(body, connections, clineConfig);
-  cardsEl.querySelectorAll('[data-hub-test]').forEach(b => b.onclick = async () => {
+  cardsEl.querySelectorAll('[data-hub-safe]').forEach(b => b.onclick = async () => {
     b.disabled = true;
     const orig = b.textContent;
     b.textContent = '检测中…';
     try {
-      await api.hubHealth({ force: true });
+      const result = await api.hubVerifySafe(b.dataset.hubSafe);
       await loadHubCards(body);
-      toast('健康检查已更新', 'ok');
+      toast(`Safe Test 完成：${result.verificationLevel || 'NOT_VERIFIED'}（0 model calls）`, 'ok');
     } catch (e) {
       toast('健康检查失败：' + e.message, 'error');
+    } finally {
+      b.disabled = false;
+      b.textContent = orig;
+    }
+  });
+  cardsEl.querySelectorAll('[data-hub-real]').forEach(b => b.onclick = async () => {
+    const confirmed = window.confirm('将向真实外部智能体发送一个最小验证任务。\n这可能消耗该智能体的订阅/API 使用额度。\n验证使用临时项目，不会修改你的开发项目。');
+    if (!confirmed) return;
+    b.disabled = true;
+    const orig = b.textContent;
+    b.textContent = '验证中…';
+    try {
+      const result = await api.hubVerifyReal(b.dataset.hubReal, true);
+      await loadHubCards(body);
+      toast(result.ok ? 'Real Verification 通过' : `Real Verification 失败：${result.errorCode || result.error || 'unknown'}`, result.ok ? 'ok' : 'error');
+    } catch (e) {
+      toast('Real Verification 失败：' + e.message, 'error');
     } finally {
       b.disabled = false;
       b.textContent = orig;

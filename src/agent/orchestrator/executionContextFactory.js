@@ -118,6 +118,7 @@ function createExecutionContextFactory(runtimeDeps) {
     // External Agent（Codex/Claude/Cline/...）：提供安全/权限/路径基础设施
     return Object.assign(base, {
       permissionEngine: deps.permissionEngine || null,
+      requestPermission: deps.requestPermission || null,
       pathSecurity: deps.pathSecurity || null,
       projectMutationLock: deps.projectMutationLock || null,
       // 外部 adapter 自己管理 model/provider（从 manifest/config 取）

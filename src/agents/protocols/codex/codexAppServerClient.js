@@ -55,6 +55,7 @@ function createCodexAppServerClient({ supervisor, transportFactory } = {}) {
 
   let session = null;
   let handle = null;
+  let lastHandle = null;
   let decoder = null;
   let connected = false;
   let cleanShutdown = false;
@@ -101,8 +102,10 @@ function createCodexAppServerClient({ supervisor, transportFactory } = {}) {
         cwd: o.cwd,
         env: o.env,
         timeoutMs: o.timeoutMs,
-        captureOutput: false // stdout 是协议流，由 decoder 增量消费
+        captureOutput: false, // stdout 是协议流，由 decoder 增量消费
+        runId: o.runId || null
       });
+      lastHandle = handle;
 
       decoder = createStructuredStreamDecoder({ frameLimitBytes: o.frameLimitBytes });
       decoder.on('message', obj => { if (session) session.receive(obj); });
@@ -301,6 +304,13 @@ function createCodexAppServerClient({ supervisor, transportFactory } = {}) {
     decoder = null;
   }
 
+  async function awaitQuiescence(timeoutMs = 5000) {
+    const h = handle || lastHandle;
+    if (!h) return { quiesced: !connected, residual: connected ? 'transport connected' : 0 };
+    if (typeof h.awaitExit === 'function') return h.awaitExit(timeoutMs);
+    return { quiesced: !connected, residual: connected ? { pid: h.pid || null } : 0 };
+  }
+
   return {
     connect,
     probeMethods,
@@ -313,6 +323,7 @@ function createCodexAppServerClient({ supervisor, transportFactory } = {}) {
     interruptTurn,
     getAuthStatus,
     dispose,
+    awaitQuiescence,
     _isConnected: () => connected,
     _serverInfo: () => serverInfo,
     _session: () => session

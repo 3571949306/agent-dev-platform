@@ -243,7 +243,10 @@ test.describe.serial('Phase B Final Product Scenarios', () => {
       return items.map(a => ({ id: a.id || a.agentId, availability: a.availability || a.status || 'UNKNOWN' }));
     });
     for (const item of list) {
-      expect(['AVAILABLE', 'UNAVAILABLE', 'UNKNOWN', 'ERROR', 'DEGRADED']).toContain(item.availability);
+      expect([
+        'AVAILABLE', 'UNAVAILABLE', 'NOT_INSTALLED', 'INSTALLED_UNCONFIGURED',
+        'AUTH_REQUIRED', 'AUTH_UNKNOWN', 'UNKNOWN', 'ERROR', 'DEGRADED'
+      ]).toContain(item.availability);
     }
     console.log('SCENARIO_F_EXTERNAL_STATUS=PASS');
   });

@@ -177,7 +177,7 @@ test('36) External Pack Cards：Agent Center 渲染 Cline/OpenCode/OpenHands', a
   const clineCard = page.locator('#hub-cards .acard[data-hub-id="cline"]');
   await expect(clineCard).toContainText('SDK');
   const openCodeCard = page.locator('#hub-cards .acard[data-hub-id="opencode"]');
-  await expect(openCodeCard).toContainText('HTTP');
+  await expect(openCodeCard).toContainText('Transport: http');
   const fatals = pageErrors.filter(e => /Cannot read|TypeError|ReferenceError|is not defined/.test(e));
   expect(fatals).toEqual([]);
 });

@@ -45,6 +45,20 @@ class RunManager {
     this.emit = emit || (() => {});
     this.runs = new Map();          // runId -> run
     this.byConversation = new Map(); // conversationId -> runId（当前活跃 Run）
+    // P3 Closure (C10) — terminal lifecycle listeners（如 Computer Session 对齐）。
+    // 只是 finishRun 单一终态入口上的观察者，不是第二套 Run 状态机。
+    this._terminalListeners = new Set();
+  }
+
+  /**
+   * 订阅 Run 终态（completed/failed/cancelled/timeout/interrupted）。
+   * 监听器异常绝不影响状态机；返回退订函数。
+   * @param {(info: {runId:string, status:string, conversationId:string|null}) => void} fn
+   */
+  onTerminal(fn) {
+    if (typeof fn !== 'function') return () => {};
+    this._terminalListeners.add(fn);
+    return () => this._terminalListeners.delete(fn);
   }
 
   /** 创建 Run（status=preparing），立即发 preparing 事件。 */
@@ -161,6 +175,11 @@ class RunManager {
     else if (status === 'cancelled') this._emit('run_cancelled', base);
     else if (status === 'timeout') this._emit('run_timeout', { ...base, message: run.error || run.message });
     else if (status === 'interrupted') this._emit('run_interrupted', { ...base, message: run.message || '运行已中断' });
+    // P3 Closure (C10) — notify terminal listeners AFTER the canonical event,
+    // so subsystems (Computer sessions) can align their own lifecycle truth.
+    for (const fn of this._terminalListeners) {
+      try { fn({ runId, status, conversationId: run.conversationId || null }); } catch { /* listeners must never break the state machine */ }
+    }
     return run;
   }
 

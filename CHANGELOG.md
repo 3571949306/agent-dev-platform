@@ -4,6 +4,24 @@
 
 Phase B is delivered incrementally on top of the frozen v2.9.8 reliability closure. Items below are VERIFIED only where a machine/E2E proof exists; the remainder stays NOT_STARTED rather than claimed.
 
+### P3 Computer Use — Final Closure（本轮，C1–C10 机器证明）
+
+在 `2942e0a`（P3 Production Hardening BUILD）之上完成最终收口：每条 Hardening 承诺都有可重跑的闭包套件证明（`test:computer-closure` / `:production` / `:soak`）。真实桌面矩阵只驱动 TEST-ONLY WPF fixture，paid provider calls = 0。
+
+- C1 cancel 对 queued action 必胜：已取消会话的 pending lock 动作执行 0（`LOCK_CANCEL_PENDING_PRODUCT_REAL=20/20`），即使锁先释放、cancel 后到。
+- C2 runId 真话：fake runId → 9 个 mutation 工具全部 `SESSION_UNKNOWN_RUN`（exec=0）；rootRunId 只来自 RunManager lineage，绝不采信自报。
+- C3/C3.1 目标围栏：授权 A ⇒ 对 B 的一切 mutation（含 observation 走私与裸坐标）`TARGET_NOT_ALLOWED`（`CROSS_WINDOW_MUTATION_EXEC=0`）；无 targetAuthorizer ⇒ 真实桌面 focus fail closed（`MISSING_AUTHORIZER_REAL_EXEC=0`），绝不 default-allow。
+- C4/C4.1 Grounding 只走 Model Router 选出的 `modelAdapter.decide`：`computerGrounding.js` 从 execution-path 直连白名单移除，任何未来直连判 UNSAFE_DUPLICATE；grounding 提案自身 `executed:false`（C5），PermissionEngine deny/ask/allow 经唯一工具门（C5.1）。
+- C6 helper 真话：未确认退出的辅助进程绝不从注册表消失（0 假零），psHost `taskkill /T /F` + 有界等待真实 `exit`。
+- C7 动作时刻 HWND+PID 原子复检：recycled PID ⇒ `STALE_WINDOW`（exec 0）；同名窗口关闭重开 20/20 绝不旧引用重定向（`SAME_TITLE_RETARGET_VIOLATIONS=0`）。
+- C8 psHost 是 Computer 唯一子进程通道；`.small.png` 中间产物全路径残留 0（`DOWNSAMPLE_TEMP_RESIDUE=0 (20/20)`）。
+- C9 剪贴板事务跨 cancel 四检查点真实恢复原内容（`CLIPBOARD_REAL_CANCEL_RESTORE=20/20`，tx 归 0）。**收口中发现并修复真实 bug**：finally 恢复原复用调用方已 abort 的 signal 导致恢复被取消——恢复写入现与取消信号隔离，"剪贴板==原内容"不受取消影响。
+- C10 Run 终态结清工具创建的会话；生产终局残留（helpers/sessions/lock/observations/tx/temp）全 0（`CLOSURE_FINAL_RESIDUE=0`）。
+- GUI 真话：会话取消 toast 只在 backend 真实完成清理后出现；`residual>0`/`quiesced=false` 呈现 ERROR + Problems（`COMPUTER_CANCEL_DEGRADED`），绝不提前报成功。
+- 收口另修复测试测量问题（C3.1 fixture 竞态、C3 fixture 几何重叠）及两个真实生产可靠性缺口：物理点击在高 DPI WPF 上偶发使用前一命中位置，以及重复 focus handoff 最终失去 Windows 前台激活资格。点击 helper 现在在实际 mouse-down 前再次校验 HWND+PID+foreground；focus helper 在同一已验证 helper 内使用有界 `AttachThreadInput`/`BringWindowToTop`，最终仍以 `GetForegroundWindow()==authorized HWND` 为唯一成功条件。
+
+P3 **FROZEN** gate：从头连续执行全部 30 条发布命令，`CLEAN_RELEASE_FAILURES=0`。`npm test` 1788 tests / 1787 pass / 0 fail / 1 合法 skip（已被另一测试文件替代的 Cline SDK bridge）；Computer Closure 22/22、Production 11/11、Soak 100/100；Hardening 17/17、Production 15/15、Soak 6/6；PID mismatch / same-title retarget / focus theft / stale observation / clipboard cancel / desktop lock 均 20/20 且 violations=0；Architecture + Architecture-Policy PASS（DEFAULT_DENY，UNSAFE_DUPLICATE=0）；E2E 159/159；NSIS + portable build PASS；最终 Computer/fixture/temp 残留全 0。Paid provider calls 0。package version 保持 2.9.9，architecture `frozenAtVersion` 保持 2.9.7。
+
 - B31 CSS Token System + Theming: introduced semantic token aliases (`--surface`, `--surface-2`, `--surface-3`, `--muted`, `--success`, `--warning`, `--danger`, `--bg-code`, `--text-strong`, `--focus-ring`) mapped onto the existing palette, and a Light theme that recolors purely via token overrides (layout/structure unchanged). Hardcoded dark code-surfaces (`#0a0d12`) now use `var(--bg-code)` so they adapt to the theme. Renderer never invents a theme — it applies the persisted user preference.
 - B32 Density: Comfortable / Compact density via `data-density` attribute; Compact tightens row height / padding without structural changes.
 - B33 Accessibility (partial): `prefers-reduced-motion` respected (animations/transitions disabled), and visible `:focus-visible` focus rings on all interactive controls.

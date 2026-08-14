@@ -61,29 +61,86 @@ public static class ADPC {
   [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr h);
   [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
   [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
+  [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr h);
   [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int c);
   [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr h);
+  [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool attach);
+  [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
   [DllImport("user32.dll")] public static extern void keybd_event(byte k, byte s, uint f, IntPtr e);
   [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
   [DllImport("user32.dll")] public static extern void mouse_event(uint f, int x, int y, uint d, IntPtr e);
   [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
+  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
   [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
+  public static bool ValidateTarget(IntPtr h, uint expectedPid, out uint actualPid) {
+    actualPid = 0;
+    if (h == IntPtr.Zero || expectedPid == 0 || !IsWindow(h)) return false;
+    GetWindowThreadProcessId(h, out actualPid);
+    return actualPid == expectedPid;
+  }
+  public static bool ActivateTarget(IntPtr h) {
+    uint ignoredPid = 0;
+    uint currentThread = GetCurrentThreadId();
+    uint targetThread = GetWindowThreadProcessId(h, out ignoredPid);
+    IntPtr foreground = GetForegroundWindow();
+    uint foregroundThread = foreground == IntPtr.Zero ? 0 : GetWindowThreadProcessId(foreground, out ignoredPid);
+    bool attachedForeground = false;
+    bool attachedTarget = false;
+    try {
+      if (foregroundThread != 0 && foregroundThread != currentThread) {
+        attachedForeground = AttachThreadInput(currentThread, foregroundThread, true);
+      }
+      if (targetThread != 0 && targetThread != currentThread) {
+        attachedTarget = AttachThreadInput(currentThread, targetThread, true);
+      }
+      ShowWindow(h, 9);
+      BringWindowToTop(h);
+      return SetForegroundWindow(h);
+    } finally {
+      if (attachedTarget) AttachThreadInput(currentThread, targetThread, false);
+      if (attachedForeground) AttachThreadInput(currentThread, foregroundThread, false);
+    }
+  }
 }
 "@`;
+
+/** P3 Closure (C7) — action-time identity guard. Emitted INSIDE the same
+ * helper that performs the mutation, as close to the OS call as possible:
+ * the JS pre-check and the Win32 mutation must not be separated by a window
+ * where the HWND can be closed and recycled (TOCTOU). Missing PID fails
+ * closed; compatibility callers never gain an identity exception.
+ * Any missing/mismatched identity ⇒ executed = false. */
+function pidGuardPs(hwndVar, expectedPid) {
+  const pid = Math.trunc(Number(expectedPid)) || 0;
+  if (!pid) return `
+@{ok=$false; code="TARGET_IDENTITY_REQUIRED"; executed=$false; reason="expected-pid-missing"} | ConvertTo-Json -Compress; exit`;
+  return `
+$adpExpectedPid = [uint32]${pid}; $adpLivePid = [uint32]0;
+if (-not [ADPC]::ValidateTarget(${hwndVar}, $adpExpectedPid, [ref]$adpLivePid)) { @{ok=$false; code="STALE_WINDOW"; executed=$false; actualPid=$adpLivePid; reason="pid-changed"} | ConvertTo-Json -Compress; exit }`;
+}
+
+function shotPidGuardPs(expectedPid) {
+  const pid = Math.trunc(Number(expectedPid)) || 0;
+  if (!pid) return `@{ok=$false; code="TARGET_IDENTITY_REQUIRED"; executed=$false; reason="expected-pid-missing"} | ConvertTo-Json -Compress; exit`;
+  return `$adpExpectedPid = [uint32]${pid}; $adpLivePid = [uint32]0;
+if (-not [ADPShot]::ValidateTarget($h, $adpExpectedPid, [ref]$adpLivePid)) { @{ok=$false; code="STALE_WINDOW"; executed=$false; actualPid=$adpLivePid; reason="pid-changed"} | ConvertTo-Json -Compress; exit }`;
+}
 
 /** focus: restore-if-minimized is an explicit caller decision; Alt-trick + bounded
  * poll + GetForegroundWindow verification. Never "process exists ⇒ ok".
  * The Alt trick is ONLY used when actually needed: pressing Alt in a window
  * that is already foreground switches WPF/WinForms into access-key mode and
  * silently moves the keyboard focus away from the user's control. */
-const FOCUS_PS = (hwnd, verifyMs) => `${PS_PRELUDE}
+const FOCUS_PS = (hwnd, expectedPid, verifyMs) => `${PS_PRELUDE}
 ${NATIVE_CORE}
 $h = New-Object IntPtr ${Math.trunc(Number(hwnd))};
 if (-not [ADPC]::IsWindow($h)) { @{ok=$false; code="STALE_WINDOW"} | ConvertTo-Json -Compress; exit }
+${pidGuardPs('$h', expectedPid)}
 if ([ADPC]::IsIconic($h)) { [ADPC]::ShowWindow($h, 9) | Out-Null; Start-Sleep -Milliseconds 250 }
 if ([ADPC]::GetForegroundWindow() -ne $h) {
+  ${pidGuardPs('$h', expectedPid)}
   [ADPC]::keybd_event(18,0,0,[IntPtr]::Zero);
-  [ADPC]::SetForegroundWindow($h) | Out-Null;
+  [ADPC]::ActivateTarget($h) | Out-Null;
   [ADPC]::keybd_event(18,0,2,[IntPtr]::Zero);
 }
 $ok = ([ADPC]::GetForegroundWindow() -eq $h);
@@ -91,47 +148,63 @@ for ($i = 0; ($i -lt 16) -and (-not $ok); $i++) {
   Start-Sleep -Milliseconds ${Math.max(10, Math.ceil(verifyMs / 16))};
   $ok = ([ADPC]::GetForegroundWindow() -eq $h);
   if (-not $ok) {
+    ${pidGuardPs('$h', expectedPid)}
     [ADPC]::keybd_event(18,0,0,[IntPtr]::Zero);
-    [ADPC]::SetForegroundWindow($h) | Out-Null;
+    [ADPC]::ActivateTarget($h) | Out-Null;
     [ADPC]::keybd_event(18,0,2,[IntPtr]::Zero);
   }
 }
+${pidGuardPs('$h', expectedPid)}
 @{ok=$ok; code=if ($ok) { "" } else { "FOREGROUND_NOT_ACQUIRED" }; foreground=[ADPC]::GetForegroundWindow().ToInt64()} | ConvertTo-Json -Compress`;
 
 /** Atomic foreground fence + click. exec=0 unless the target is foreground. */
-const CLICK_PS = (hwnd, x, y, downFlag, upFlag) => `${PS_PRELUDE}
+const CLICK_PS = (hwnd, expectedPid, x, y, downFlag, upFlag) => `${PS_PRELUDE}
 ${NATIVE_CORE}
 $h = New-Object IntPtr ${Math.trunc(Number(hwnd))};
 if (-not [ADPC]::IsWindow($h)) { @{ok=$false; code="STALE_WINDOW"; executed=$false} | ConvertTo-Json -Compress; exit }
+${pidGuardPs('$h', expectedPid)}
 $fg = [ADPC]::GetForegroundWindow();
 if ($fg -ne $h) { @{ok=$false; code="FOREGROUND_CHANGED"; executed=$false; foreground=$fg.ToInt64()} | ConvertTo-Json -Compress; exit }
-[ADPC]::SetCursorPos(${Math.trunc(Number(x))}, ${Math.trunc(Number(y))}) | Out-Null;
+$adpRect = New-Object ADPC+RECT;
+if (-not [ADPC]::GetWindowRect($h, [ref]$adpRect)) { @{ok=$false; code="STALE_WINDOW"; executed=$false} | ConvertTo-Json -Compress; exit }
+if (${Math.trunc(Number(x))} -lt $adpRect.Left -or ${Math.trunc(Number(x))} -ge $adpRect.Right -or ${Math.trunc(Number(y))} -lt $adpRect.Top -or ${Math.trunc(Number(y))} -ge $adpRect.Bottom) { @{ok=$false; code="COMPUTER_TARGET_BOUNDS_VIOLATION"; executed=$false} | ConvertTo-Json -Compress; exit }
+${pidGuardPs('$h', expectedPid)}
+if (-not [ADPC]::SetCursorPos(${Math.trunc(Number(x))}, ${Math.trunc(Number(y))})) { @{ok=$false; code="CURSOR_POSITION_FAILED"; executed=$false} | ConvertTo-Json -Compress; exit }
+# Let the target process consume the cursor-move before the button pair. This
+# bounded 25 ms stabilization prevents WPF from occasionally hit-testing the
+# preceding cursor location. Identity and foreground are checked again at the
+# actual button-down action point, so the wait cannot create a retarget gap.
+Start-Sleep -Milliseconds 25;
+${pidGuardPs('$h', expectedPid)}
+if ([ADPC]::GetForegroundWindow() -ne $h) { @{ok=$false; code="FOREGROUND_CHANGED"; executed=$false} | ConvertTo-Json -Compress; exit }
 [ADPC]::mouse_event(${downFlag},0,0,0,[IntPtr]::Zero);
+Start-Sleep -Milliseconds 25;
 [ADPC]::mouse_event(${upFlag},0,0,0,[IntPtr]::Zero);
 @{ok=$true; executed=$true} | ConvertTo-Json -Compress`;
 
 /** Atomic foreground fence + SendKeys. */
-const SENDKEYS_PS = (hwnd, keysLiteral) => `${PS_PRELUDE}
+const SENDKEYS_PS = (hwnd, expectedPid, keysLiteral) => `${PS_PRELUDE}
 ${NATIVE_CORE}
 Add-Type -AssemblyName System.Windows.Forms;
 $h = New-Object IntPtr ${Math.trunc(Number(hwnd))};
-if ($h -ne [IntPtr]::Zero) {
-  if (-not [ADPC]::IsWindow($h)) { @{ok=$false; code="STALE_WINDOW"; executed=$false} | ConvertTo-Json -Compress; exit }
-  $fg = [ADPC]::GetForegroundWindow();
-  if ($fg -ne $h) { @{ok=$false; code="FOREGROUND_CHANGED"; executed=$false; foreground=$fg.ToInt64()} | ConvertTo-Json -Compress; exit }
-}
+if ($h -eq [IntPtr]::Zero) { @{ok=$false; code="TARGET_IDENTITY_REQUIRED"; executed=$false} | ConvertTo-Json -Compress; exit }
+if (-not [ADPC]::IsWindow($h)) { @{ok=$false; code="STALE_WINDOW"; executed=$false} | ConvertTo-Json -Compress; exit }
+${pidGuardPs('$h', expectedPid)}
+$fg = [ADPC]::GetForegroundWindow();
+if ($fg -ne $h) { @{ok=$false; code="FOREGROUND_CHANGED"; executed=$false; foreground=$fg.ToInt64()} | ConvertTo-Json -Compress; exit }
 [System.Windows.Forms.SendKeys]::SendWait(${keysLiteral});
 @{ok=$true; executed=$true} | ConvertTo-Json -Compress`;
 
 /** ATOMIC target-bound paste keys: ensure keyboard focus inside the target,
  * verify the foreground fence, then Ctrl+V — all in ONE helper call so no
  * focus can be stolen between "focus check" and "keys sent". */
-const PASTE_KEYS_PS = (hwnd) => `${PS_PRELUDE}
+const PASTE_KEYS_PS = (hwnd, expectedPid) => `${PS_PRELUDE}
 ${NATIVE_CORE}
 Add-Type -AssemblyName System.Windows.Forms;
 Add-Type -AssemblyName UIAutomationClient; Add-Type -AssemblyName UIAutomationTypes;
 $h = New-Object IntPtr ${Math.trunc(Number(hwnd))};
 if (-not [ADPC]::IsWindow($h)) { @{ok=$false; code="STALE_WINDOW"; executed=$false} | ConvertTo-Json -Compress; exit }
+${pidGuardPs('$h', expectedPid)}
 if ([ADPC]::GetForegroundWindow() -ne $h) { @{ok=$false; code="FOREGROUND_CHANGED"; executed=$false} | ConvertTo-Json -Compress; exit }
 try {
   $ae = [System.Windows.Automation.AutomationElement];
@@ -157,9 +230,13 @@ try {
       ))
     );
     $el = $root.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $cond);
-    if ($el -ne $null) { try { $el.SetFocus() } catch { } }
+    if ($el -ne $null) {
+      ${pidGuardPs('$h', expectedPid)}
+      try { $el.SetFocus() } catch { }
+    }
   }
 } catch { }
+${pidGuardPs('$h', expectedPid)}
 if ([ADPC]::GetForegroundWindow() -ne $h) { @{ok=$false; code="FOREGROUND_CHANGED"; executed=$false} | ConvertTo-Json -Compress; exit }
 [System.Windows.Forms.SendKeys]::SendWait('^v');
 @{ok=$true; executed=$true} | ConvertTo-Json -Compress`;
@@ -227,9 +304,12 @@ Walk $root 0 @();
 
 /** Resolve an element by tree path, verify RuntimeId (STALE_ELEMENT — never a
  * fuzzy "most similar" match), then run one semantic pattern action. */
-const ELEMENT_ACTION_PS = (hwnd, pathCsv, runtimeIdCsv, action, valueLiteral) => `${PS_PRELUDE}
+const ELEMENT_ACTION_PS = (hwnd, expectedPid, pathCsv, runtimeIdCsv, action, valueLiteral) => `${PS_PRELUDE}
+${NATIVE_CORE}
 Add-Type -AssemblyName UIAutomationClient; Add-Type -AssemblyName UIAutomationTypes;
 $h = New-Object IntPtr ${Math.trunc(Number(hwnd))};
+if (-not [ADPC]::IsWindow($h)) { @{ok=$false; code="STALE_WINDOW"; executed=$false} | ConvertTo-Json -Compress; exit }
+${pidGuardPs('$h', expectedPid)}
 $ae = [System.Windows.Automation.AutomationElement];
 $root = $ae::FromHandle($h);
 $walker = [System.Windows.Automation.TreeWalker]::ControlViewWalker;
@@ -248,6 +328,7 @@ if ($pathStr -ne '') {
 $expected = ${psLiteral(runtimeIdCsv)};
 $actual = ''; try { $actual = (@($el.Current.GetRuntimeId()) -join ',') } catch { }
 if ($expected -ne '' -and $actual -ne $expected) { @{ok=$false; code="STALE_ELEMENT"; reason="runtime-id-changed"} | ConvertTo-Json -Compress; exit }
+${pidGuardPs('$h', expectedPid)}
 $act = ${psLiteral(action)};
 $result = @{ok=$true; action=$act; verified=$false};
 try {
@@ -313,35 +394,48 @@ $fg = 0;
 /** Window capture: PrintWindow first; COPY_FROM_SCREEN fallback must say so;
  * minimized ⇒ MINIMIZED_WINDOW_UNCAPTURABLE unless an explicit restore was
  * authorized by the caller. */
-const WINDOW_SHOT_PS = (hwnd, file, allowRestore) => `${PS_PRELUDE}
+const WINDOW_SHOT_PS = (hwnd, expectedPid, file, allowRestore) => `${PS_PRELUDE}
 Add-Type -AssemblyName System.Windows.Forms; Add-Type -AssemblyName System.Drawing;
 Add-Type @"
 using System; using System.Runtime.InteropServices;
 public static class ADPShot {
+  [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr h);
   [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr h);
   [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int c);
   [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
   [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr h, IntPtr hdc, uint f);
   [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
   [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
+  public static bool ValidateTarget(IntPtr h, uint expectedPid, out uint actualPid) {
+    actualPid = 0;
+    if (h == IntPtr.Zero || expectedPid == 0 || !IsWindow(h)) return false;
+    GetWindowThreadProcessId(h, out actualPid);
+    return actualPid == expectedPid;
+  }
 }
 "@
 $h = New-Object IntPtr ${Math.trunc(Number(hwnd))};
+if (-not [ADPShot]::IsWindow($h)) { @{ok=$false; code="STALE_WINDOW"} | ConvertTo-Json -Compress; exit }
+${shotPidGuardPs(expectedPid)}
 if ([ADPShot]::IsIconic($h)) {
   if (${allowRestore ? '$true' : '$false'}) { [ADPShot]::ShowWindow($h, 9) | Out-Null; Start-Sleep -Milliseconds 350 }
   else { @{ok=$false; code="MINIMIZED_WINDOW_UNCAPTURABLE"} | ConvertTo-Json -Compress; exit }
 }
+${shotPidGuardPs(expectedPid)}
 $r = New-Object ADPShot+RECT; [ADPShot]::GetWindowRect($h, [ref]$r) | Out-Null;
 $w = $r.Right - $r.Left; $hh = $r.Bottom - $r.Top;
 if ($w -le 0 -or $hh -le 0) { @{ok=$false; code="INVALID_WINDOW_RECT"} | ConvertTo-Json -Compress; exit }
 $bmp = New-Object System.Drawing.Bitmap($w, $hh);
 $g = [System.Drawing.Graphics]::FromImage($bmp);
 $hdc = $g.GetHdc();
+${shotPidGuardPs(expectedPid)}
 $pw = [ADPShot]::PrintWindow($h, $hdc, 2);
 $g.ReleaseHdc($hdc);
 $method = '';
 $occluded = $false;
 if ($pw) { $method = 'PRINT_WINDOW' } else {
+  ${shotPidGuardPs(expectedPid)}
   $g.Dispose(); $bmp.Dispose();
   $bmp = New-Object System.Drawing.Bitmap($w, $hh);
   $g = [System.Drawing.Graphics]::FromImage($bmp);
@@ -449,6 +543,18 @@ class ComputerManager {
 
   activeCount() { return psHost.activeCount(); }
 
+  /** Central fail-closed target fence for every session-owned manager path. */
+  _requireAuthorizedTarget(sessionId, target) {
+    if (!sessionId) return { ok: true };
+    if (!this.sessions) {
+      return { ok: false, code: 'TARGET_AUTH_REQUIRED', error: 'Computer target authorizer is unavailable' };
+    }
+    if (!target || !Number(target.hwnd) || !Number(target.pid)) {
+      return { ok: false, code: 'TARGET_IDENTITY_REQUIRED', error: 'Target HWND and PID are required' };
+    }
+    return this.sessions.assertTargetAllowed(sessionId, target);
+  }
+
   /* ------------------------------------------------------- availability */
 
   async availability() {
@@ -518,9 +624,11 @@ class ComputerManager {
   }
 
   async focusWindowRef(ref, opts = {}) {
-    if (!ref || !ref.hwnd) return { ok: false, error: '缺少窗口身份', code: 'STALE_WINDOW' };
+    if (!ref || !ref.hwnd || !ref.pid) return { ok: false, error: '缺少窗口 HWND + PID 身份', code: 'TARGET_IDENTITY_REQUIRED', executed: false };
+    const authorized = this._requireAuthorizedTarget(opts.sessionId || null, ref);
+    if (!authorized.ok) return { ...authorized, executed: false };
     const started = Date.now();
-    const r = await runPs(FOCUS_PS(ref.hwnd, opts.verifyMs || 1200), {
+    const r = await runPs(FOCUS_PS(ref.hwnd, ref.pid, opts.verifyMs || 1200), {
       timeoutMs: opts.timeoutMs || 12000, sessionId: opts.sessionId || null, signal: opts.signal || null
     });
     if (!r.ok) {
@@ -661,8 +769,17 @@ class ComputerManager {
     if (!observationId) return { ok: false, code: 'STALE_OBSERVATION', error: '交互动作必须携带 observationId' };
     const obs = this.observations.get(observationId);
     if (!obs) return { ok: false, code: 'STALE_OBSERVATION', error: '观察不存在或已回收' };
-    if (sessionId && obs.sessionId && obs.sessionId !== sessionId) {
+    if (sessionId && obs.sessionId !== sessionId) {
       return { ok: false, code: 'SESSION_MISMATCH', error: '观察不属于该会话' };
+    }
+    // P3 Closure (C3): EVERY mutation is target-fenced — the fence check no
+    // longer depends on the caller passing an explicit `target`. The
+    // observation's own WindowRef is the identity being mutated, so it must be
+    // one of this session's authorized windows (covers legacy compat paths
+    // that resolve + observe internally without going through bindTarget).
+    if (sessionId && this.sessions && obs.windowRef) {
+      const allowed = this.sessions.assertTargetAllowed(sessionId, obs.windowRef);
+      if (!allowed.ok) return allowed;
     }
     const probe = await winId.validateWindowRef(obs.windowRef, { sessionId, signal: opts.signal || null });
     const v = this.observations.validate(observationId, probe, { requireForeground: false });
@@ -692,7 +809,7 @@ class ComputerManager {
       return { ok: false, code: 'COMPUTER_TARGET_BOUNDS_VIOLATION', error: '目标坐标越出窗口边界，拒绝执行', executed: false };
     }
     const flags = button === 'right' ? [8, 16] : [2, 4];
-    const r = await runPs(CLICK_PS(observation.windowRef.hwnd, conv.x, conv.y, flags[0], flags[1]), {
+    const r = await runPs(CLICK_PS(observation.windowRef.hwnd, observation.windowRef.pid, conv.x, conv.y, flags[0], flags[1]), {
       timeoutMs: opts.timeoutMs || 10000, sessionId, signal: opts.signal || null
     });
     if (!r.ok) {
@@ -729,7 +846,7 @@ class ComputerManager {
         return { ok: false, code: 'SENSITIVE_INPUT_DENIED', error: '向密码框写入需要 computer.sensitive_input 显式授权', executed: false };
       }
     }
-    const r = await runPs(ELEMENT_ACTION_PS(observation.windowRef.hwnd, parsed.path.join(','), parsed.runtimeId.join(','), action, action === 'scroll' ? Number(value) || 1 : psLiteral(String(value == null ? '' : value))), {
+    const r = await runPs(ELEMENT_ACTION_PS(observation.windowRef.hwnd, observation.windowRef.pid, parsed.path.join(','), parsed.runtimeId.join(','), action, action === 'scroll' ? Number(value) || 1 : psLiteral(String(value == null ? '' : value))), {
       timeoutMs: opts.timeoutMs || 12000, sessionId, signal: opts.signal || null
     });
     if (!r.ok) {
@@ -776,10 +893,29 @@ class ComputerManager {
    * Target-bound clipboard paste with restore-in-finally:
    * read current → set temp → paste into VERIFIED foreground → restore original
    * (also on cancel/error). The transaction counter must return to 0.
+   *
+   * P3 Closure (C9) — cancel truth at every precise point:
+   *   A. after backup read        → no mutation happened, settle clean
+   *   B. after temporary write    → finally restores the original
+   *   C. during focus/paste helper→ signal kills the helper, finally restores
+   *   D. paste ok but pre-restore → finally restores before the caller sees ok
+   * Every path ends with clipboard == original marker, tx == 0, backup = null.
    */
   async pasteToTarget({ target, text, sessionId = null }, opts = {}) {
     const started = Date.now();
+    if (!target || !target.hwnd || !target.pid) {
+      return { ok: false, code: 'TARGET_IDENTITY_REQUIRED', error: '粘贴目标必须包含 HWND + PID', executed: false };
+    }
+    const authorized = this._requireAuthorizedTarget(sessionId, target);
+    if (!authorized.ok) return { ...authorized, executed: false };
+    const signal = opts.signal || null;
+    const aborted = () => !!(signal && signal.aborted);
     const backup = await this._readClipboard(opts);
+    // Checkpoint A — cancel after backup read: nothing was overwritten yet.
+    if (aborted()) {
+      this.recordAction('paste', { method: 'clipboard' }, false, 'CANCELLED', { sessionId, started });
+      return { ok: false, code: 'CANCELLED', error: '已取消（剪贴板未改动）', executed: false };
+    }
     this._clipboardTx++;
     this._clipboardBackup = backup;
     try {
@@ -788,29 +924,43 @@ class ComputerManager {
         this.recordAction('paste', { method: 'clipboard' }, false, 'CLIPBOARD_WRITE_FAILED', { sessionId, started });
         return { ok: false, code: 'CLIPBOARD_WRITE_FAILED', error: '写入剪贴板失败', executed: false };
       }
+      // Checkpoint B — cancel after the temporary write: the finally block
+      // still restores the user's original content.
+      if (aborted()) {
+        this.recordAction('paste', { method: 'clipboard' }, false, 'CANCELLED', { sessionId, started });
+        return { ok: false, code: 'CANCELLED', error: '已取消（剪贴板将恢复）', executed: false };
+      }
       // Atomic: focus-inside-target + foreground fence + Ctrl+V in ONE helper —
       // nothing can steal focus between the check and the keys.
-      // (Test path with an injected fake clipboard keeps the stub-able pressKeys.)
+      // (Test path with an injected fake clipboard keeps the stub-able pressKeys...)
       let paste;
       if (this.clipboardFake) {
-        paste = await this.pressKeys('^v', { foregroundHwnd: target && target.hwnd, sessionId, signal: opts.signal || null });
+        paste = await this.pressKeys('^v', { foregroundHwnd: target && target.hwnd, foregroundPid: target && target.pid, sessionId, signal });
       } else {
-        const pasteR = await runPs(PASTE_KEYS_PS(target && target.hwnd ? target.hwnd : 0), {
-          timeoutMs: opts.timeoutMs || 15000, sessionId, signal: opts.signal || null
+        // Checkpoint C — cancellation mid paste helper: the signal kills the
+        // helper via psHost; settle is honest; finally restores.
+        const pasteR = await runPs(PASTE_KEYS_PS(target && target.hwnd ? target.hwnd : 0, target && target.pid ? target.pid : 0), {
+          timeoutMs: opts.timeoutMs || 15000, sessionId, signal
         });
         paste = (!pasteR.ok)
-          ? { ok: false, executed: false, code: pasteR.timedOut ? 'COMPUTER_TIMEOUT' : 'PASTE_FAILED', error: pasteR.error }
+          ? { ok: false, executed: false, code: pasteR.cancelled ? 'CANCELLED' : (pasteR.timedOut ? 'COMPUTER_TIMEOUT' : 'PASTE_FAILED'), error: pasteR.error }
           : (pasteR.data || {});
       }
       if (!paste.ok || paste.executed === false) {
         this.recordAction('paste', { method: 'clipboard', hwnd: target && target.hwnd }, false, paste.code || 'PASTE_FAILED', { sessionId, started });
         return { ok: false, code: paste.code || 'PASTE_FAILED', error: paste.error || '粘贴失败', executed: false };
       }
+      // Checkpoint D — paste succeeded; the clipboard restore below (finally)
+      // still runs BEFORE this result can be consumed by any late action.
       this.recordAction('paste', { hwnd: target && target.hwnd, process: target && target.processName, method: 'clipboard', textLength: String(text == null ? '' : text).length }, true, null, { sessionId, started, verified: false });
       return { ok: true, executed: true, outcome: 'EXECUTED', method: 'clipboard' };
     } finally {
       // Restore the user's clipboard — success, failure OR cancel.
-      try { await this._writeClipboard(backup == null ? '' : String(backup), opts); } catch { /* best effort */ }
+      // The RESTORE itself must never be cancelled by the caller's signal:
+      // an aborted run still owns the guarantee "clipboard == original".
+      // (The signal already killed the paste helper; cleanup runs fenced-off.)
+      const restoreOpts = { ...opts, signal: null };
+      try { await this._writeClipboard(backup == null ? '' : String(backup), restoreOpts); } catch { /* best effort */ }
       this._clipboardTx--;
       this._clipboardBackup = null;
     }
@@ -820,7 +970,13 @@ class ComputerManager {
   async pressKeys(keys, opts = {}) {
     const started = Date.now();
     const hwnd = opts.foregroundHwnd != null ? Math.trunc(Number(opts.foregroundHwnd)) : 0;
-    const r = await runPs(SENDKEYS_PS(hwnd, psLiteral(String(keys == null ? '' : keys))), {
+    const pid = opts.foregroundPid != null ? Math.trunc(Number(opts.foregroundPid)) : 0;
+    if (!hwnd || !pid) {
+      return { ok: false, code: 'TARGET_IDENTITY_REQUIRED', error: '按键目标必须包含 HWND + PID', executed: false };
+    }
+    const authorized = this._requireAuthorizedTarget(opts.sessionId || null, { hwnd, pid });
+    if (!authorized.ok) return { ...authorized, executed: false };
+    const r = await runPs(SENDKEYS_PS(hwnd, pid, psLiteral(String(keys == null ? '' : keys))), {
       timeoutMs: opts.timeoutMs || 10000, sessionId: opts.sessionId || null, signal: opts.signal || null
     });
     if (!r.ok) {
@@ -839,7 +995,9 @@ class ComputerManager {
 
   /** Type literal text into a VERIFIED target: UIA Value > paste > SendKeys. */
   async typeTextToTarget({ target, text, submit = false, sessionId = null }, opts = {}) {
-    if (!target || !target.hwnd) return { ok: false, code: 'NO_TARGET', error: '输入必须绑定已验证的目标窗口' };
+    if (!target || !target.hwnd || !target.pid) return { ok: false, code: 'TARGET_IDENTITY_REQUIRED', error: '输入必须绑定已验证的 HWND + PID 目标窗口', executed: false };
+    const authorized = this._requireAuthorizedTarget(sessionId, target);
+    if (!authorized.ok) return { ...authorized, executed: false };
     // 1) UIA ValuePattern straight into the control
     const focus = await this.focusWindowRef(target, { sessionId, signal: opts.signal || null });
     if (!focus.ok) return { ok: false, code: focus.code || 'FOREGROUND_NOT_ACQUIRED', error: focus.error, executed: false };
@@ -849,7 +1007,7 @@ class ComputerManager {
       if (edit) {
         const r = await this.setElementValue({ observationId: obs.observationId, elementRef: edit.elementRef, value: String(text == null ? '' : text), sessionId }, opts);
         if (r.ok) {
-          if (submit) await this.pressKeys('~', { foregroundHwnd: target.hwnd, sessionId, signal: opts.signal || null });
+          if (submit) await this.pressKeys('~', { foregroundHwnd: target.hwnd, foregroundPid: target.pid, sessionId, signal: opts.signal || null });
           return { ...r, method: 'uia-value' };
         }
       }
@@ -857,12 +1015,13 @@ class ComputerManager {
     // 2) clipboard paste (restore guaranteed)
     const paste = await this.pasteToTarget({ target, text, sessionId }, opts);
     if (paste.ok) {
-      if (submit) await this.pressKeys('~', { foregroundHwnd: target.hwnd, sessionId, signal: opts.signal || null });
+      if (submit) await this.pressKeys('~', { foregroundHwnd: target.hwnd, foregroundPid: target.pid, sessionId, signal: opts.signal || null });
       return paste;
     }
+    if (paste.code === 'CANCELLED') return paste; // a cancelled paste never falls through to more input
     // 3) SendKeys fallback (still foreground-fenced)
     const body = escapeSendKeys(String(text == null ? '' : text).replace(/\r?\n/g, ' '));
-    const keys = await this.pressKeys(body + (submit ? '~' : ''), { foregroundHwnd: target.hwnd, sessionId, signal: opts.signal || null });
+    const keys = await this.pressKeys(body + (submit ? '~' : ''), { foregroundHwnd: target.hwnd, foregroundPid: target.pid, sessionId, signal: opts.signal || null });
     if (keys.ok) return { ...keys, method: 'sendkeys' };
     return keys;
   }
@@ -880,6 +1039,35 @@ class ComputerManager {
     return this._tempFiles.size;
   }
   cleanupTemp() { for (const f of [...this._tempFiles]) this._untrackTemp(f); return this.tempResidue(); }
+
+  /**
+   * P3 Closure (C8/C8.1) — PNG downsample owned by psHost: sessionId,
+   * AbortSignal, timeout and truthful cancellation like every other helper.
+   * The `.small.png` intermediate is tracked by the manager temp registry and
+   * removed on success, failure, timeout AND cancel — residue = 0.
+   * @returns {Promise<string|null>} base64 of the downsampled PNG (null = keep original)
+   */
+  async _downsamplePng(file, w, h, opts = {}) {
+    const out = file + '.small.png';
+    this._trackTemp(out);
+    try {
+      const script = `${PS_PRELUDE}
+Add-Type -AssemblyName System.Drawing;
+$src = [System.Drawing.Image]::FromFile(${psLiteral(file)});
+$dst = New-Object System.Drawing.Bitmap(${Math.trunc(w)}, ${Math.trunc(h)});
+$g = [System.Drawing.Graphics]::FromImage($dst);
+$g.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic;
+$g.DrawImage($src, 0, 0, ${Math.trunc(w)}, ${Math.trunc(h)});
+$dst.Save(${psLiteral(out)}, [System.Drawing.Imaging.ImageFormat]::Png);
+$g.Dispose(); $dst.Dispose(); $src.Dispose();
+@{ok=$true} | ConvertTo-Json -Compress`;
+      const r = await runPs(script, { timeoutMs: opts.timeoutMs || 15000, sessionId: opts.sessionId || null, signal: opts.signal || null });
+      if (!r.ok) return null; // timeout / cancel / crash → original stays, temp cleaned below
+      const d = r.data || {};
+      if (d.ok === false) return null;
+      return fs.readFileSync(out).toString('base64');
+    } catch { return null; } finally { this._untrackTemp(out); }
+  }
 
   /** Full virtual desktop (multi-monitor incl. negative origins) + metadata. */
   async screenshot(opts = {}) {
@@ -916,13 +1104,15 @@ class ComputerManager {
    * windows), oversized ⇒ downsampled vision copy.
    */
   async screenshotWindowRef(ref, opts = {}) {
-    if (!ref || !ref.hwnd) return { ok: false, code: 'STALE_WINDOW', error: '缺少窗口身份' };
+    if (!ref || !ref.hwnd || !ref.pid) return { ok: false, code: 'TARGET_IDENTITY_REQUIRED', error: '缺少窗口 HWND + PID 身份' };
+    const authorized = this._requireAuthorizedTarget(opts.sessionId || null, ref);
+    if (!authorized.ok) return authorized;
     if (ref.minimized && !opts.allowRestore) {
       return { ok: false, code: 'MINIMIZED_WINDOW_UNCAPTURABLE', error: '窗口已最小化，无法可靠截图（恢复窗口需显式授权）' };
     }
     const file = this._trackTemp(path.join(os.tmpdir(), 'adp_win_' + Date.now() + '_' + crypto.randomBytes(3).toString('hex') + '.png'));
     try {
-      const r = await runPs(WINDOW_SHOT_PS(ref.hwnd, file, !!opts.allowRestore), {
+      const r = await runPs(WINDOW_SHOT_PS(ref.hwnd, ref.pid, file, !!opts.allowRestore), {
         timeoutMs: opts.timeoutMs || 20000, sessionId: opts.sessionId || null, signal: opts.signal || null
       });
       if (!r.ok) return { ok: false, error: r.timedOut ? '截图超时' : r.error, code: r.timedOut ? 'COMPUTER_TIMEOUT' : undefined };
@@ -937,7 +1127,9 @@ class ComputerManager {
       if ((width * height) > MAX_CAPTURE_PIXELS || width > MAX_VISION_DIM * 2 || height > MAX_VISION_DIM * 2) {
         // vision copy: cap the longest side to keep model calls affordable
         const scale = Math.min(1, MAX_VISION_DIM / Math.max(width, height));
-        const small = downsamplePng(file, Math.max(1, Math.round(width * scale)), Math.max(1, Math.round(height * scale)));
+        const small = await this._downsamplePng(file, Math.max(1, Math.round(width * scale)), Math.max(1, Math.round(height * scale)), {
+          sessionId: opts.sessionId || null, signal: opts.signal || null
+        });
         if (small) { b64 = small; downsampled = true; }
       }
       this.recordAction('screenshot', { hwnd: ref.hwnd, process: ref.processName, method: d.captureMethod }, true, null, { sessionId: opts.sessionId });
@@ -956,7 +1148,7 @@ class ComputerManager {
   /** Legacy typeText: foreground-fenced SendKeys when a target is known. */
   async typeText(text, o = {}) {
     const body = escapeSendKeys(String(text == null ? '' : text).replace(/\r?\n/g, ' '));
-    return this.pressKeys(body + (o.submit ? '~' : ''), { foregroundHwnd: o.foregroundHwnd, sessionId: o.sessionId });
+    return this.pressKeys(body + (o.submit ? '~' : ''), { foregroundHwnd: o.foregroundHwnd, foregroundPid: o.foregroundPid, sessionId: o.sessionId });
   }
 
   async setClipboard(text, opts = {}) {
@@ -971,8 +1163,9 @@ class ComputerManager {
 
   /** Legacy UIA value write — now via resolved WindowRef (ambiguous fails). */
   async setControlValue(title, text, o = {}) {
-    const q = o.hwnd ? { hwnd: o.hwnd } : { title };
-    const res = await this.resolveWindow(q, o);
+    const res = o.hwnd && o.pid
+      ? { ok: true, window: { hwnd: Number(o.hwnd), pid: Number(o.pid), title: String(title || ''), processName: o.processName || '' } }
+      : await this.resolveWindow(o.hwnd ? { hwnd: o.hwnd } : { title }, o);
     if (!res.ok) return { ok: false, error: res.error, code: res.code };
     const target = res.window;
     const r = await this.typeTextToTarget({ target, text, sessionId: o.sessionId || null }, o);
@@ -997,8 +1190,8 @@ class ComputerManager {
 
   /** Legacy control invoke by automationId — now path+RuntimeId verified. */
   async clickControl(title, automationId, opts = {}) {
-    const q = typeof title === 'object' ? title : { title };
-    const res = await this.resolveWindow(q, opts);
+    const exact = typeof title === 'object' && title && title.hwnd && title.pid;
+    const res = exact ? { ok: true, window: title } : await this.resolveWindow(typeof title === 'object' ? title : { title }, opts);
     if (!res.ok) return { ok: false, error: res.error, code: res.code };
     const obs = await this.observe({ hwnd: res.window.hwnd }, { ...opts, screenshot: false });
     if (!obs.ok) return { ok: false, error: obs.error, code: obs.code };
@@ -1009,27 +1202,68 @@ class ComputerManager {
 
   /**
    * DEPRECATED raw-coordinate click. High risk, explicit permission scope
-   * (computer.raw_coordinates), not part of the recommended schema. Kept only
-   * so old integrations keep working behind the fence.
+   * (computer.raw_coordinates), not part of the recommended schema.
+   *
+   * P3 Closure (C3.2): "deprecated" is NOT a security boundary. The raw path
+   * may only fire when ALL of these hold:
+   *   1. it belongs to a REAL, non-terminal Computer session
+   *   2. the point is inside the LIVE rect of one of that session's
+   *      authorized windows (HWND + PID re-validated at action time)
+   *   3. that window is foreground at the moment of the click (atomic helper)
+   * Anything else ⇒ executed = 0. Cross-window raw clicks are impossible.
    */
   async clickAt(x, y, opts = {}) {
     if (!coords.isFiniteNumber(x) || !coords.isFiniteNumber(y)) {
       return { ok: false, code: 'INVALID_COORDINATES', error: '坐标必须为有限数', executed: false };
     }
-    const flags = opts.button === 'right' ? [8, 16] : [2, 4];
-    // even the deprecated path refuses to fire at unknown foreground
-    const fg = await winId.getForegroundHwnd({ sessionId: opts.sessionId || null });
-    if (!fg.ok || !fg.hwnd) return { ok: false, code: 'FOREGROUND_NOT_ACQUIRED', error: '无法确认前台窗口，拒绝裸坐标点击', executed: false };
-    const script = `${PS_PRELUDE}
+    // 1) raw coordinates require a real Computer session (fail closed)
+    if (!this.sessions || !opts.sessionId) {
+      return { ok: false, code: 'SESSION_REQUIRED', error: '裸坐标点击必须属于一个真实 Computer 会话', executed: false };
+    }
+    const session = this.sessions.get(opts.sessionId);
+    if (!session) return { ok: false, code: 'SESSION_NOT_FOUND', error: 'Computer 会话不存在', executed: false };
+    if (session.status !== 'ACTIVE') {
+      const terminal = ['CANCELLED', 'COMPLETED', 'FAILED'].includes(session.status);
+      return { ok: false, code: terminal ? 'SESSION_TERMINATED' : 'SESSION_NOT_ACTIVE', error: `会话未处于 ACTIVE（${session.status}）`, executed: false };
+    }
+    if (!session.allowedTargets.length) {
+      return { ok: false, code: 'TARGET_NOT_ALLOWED', error: '该会话尚未绑定任何授权目标窗口，裸坐标点击被拒绝', executed: false };
+    }
+    // 2) the point must land inside the LIVE rect of an authorized target
+    const px = Math.trunc(x), py = Math.trunc(y);
+    for (const t of session.allowedTargets) {
+      const probe = await winId.validateWindowRef(t, { sessionId: opts.sessionId, signal: opts.signal || null });
+      if (!probe.ok) continue; // stale authorized entry — never auto-retarget
+      if (!coords.withinBounds(px, py, probe.rect)) continue;
+      const allowed = this.sessions.assertTargetAllowed(opts.sessionId, t);
+      if (!allowed.ok) return { ...allowed, executed: false };
+      const flags = opts.button === 'right' ? [8, 16] : [2, 4];
+      // 3) atomic helper: IsWindow + PID + foreground fence right before mutation
+      const script = `${PS_PRELUDE}
 ${NATIVE_CORE}
-[ADPC]::SetCursorPos(${Math.trunc(x)}, ${Math.trunc(y)}) | Out-Null;
+$h = New-Object IntPtr ${Math.trunc(Number(t.hwnd))};
+if (-not [ADPC]::IsWindow($h)) { @{ok=$false; code="STALE_WINDOW"; executed=$false} | ConvertTo-Json -Compress; exit }
+${pidGuardPs('$h', t.pid)}
+$fg = [ADPC]::GetForegroundWindow();
+if ($fg -ne $h) { @{ok=$false; code="FOREGROUND_CHANGED"; executed=$false; foreground=$fg.ToInt64()} | ConvertTo-Json -Compress; exit }
+$adpRect = New-Object ADPC+RECT;
+if (-not [ADPC]::GetWindowRect($h, [ref]$adpRect)) { @{ok=$false; code="STALE_WINDOW"; executed=$false} | ConvertTo-Json -Compress; exit }
+if (${px} -lt $adpRect.Left -or ${px} -ge $adpRect.Right -or ${py} -lt $adpRect.Top -or ${py} -ge $adpRect.Bottom) { @{ok=$false; code="COMPUTER_TARGET_BOUNDS_VIOLATION"; executed=$false} | ConvertTo-Json -Compress; exit }
+[ADPC]::SetCursorPos(${px}, ${py}) | Out-Null;
 [ADPC]::mouse_event(${flags[0]},0,0,0,[IntPtr]::Zero);
 [ADPC]::mouse_event(${flags[1]},0,0,0,[IntPtr]::Zero);
 @{ok=$true; executed=$true; deprecated=$true} | ConvertTo-Json -Compress`;
-    const r = await runPs(script, { timeoutMs: 10000, sessionId: opts.sessionId || null, signal: opts.signal || null });
-    if (!r.ok) return { ok: false, error: r.error, executed: false };
-    this.recordAction('click', { method: 'raw_deprecated', x: Math.trunc(x), y: Math.trunc(y) }, true, null, { sessionId: opts.sessionId });
-    return { ok: true, executed: true, deprecated: true, warning: 'computer_click_at 已弃用，请改用 computer_click_observed' };
+      const r = await runPs(script, { timeoutMs: 10000, sessionId: opts.sessionId, signal: opts.signal || null });
+      if (!r.ok) return { ok: false, error: r.error, executed: false, code: r.cancelled ? 'CANCELLED' : (r.timedOut ? 'COMPUTER_TIMEOUT' : 'COMPUTER_ERROR') };
+      const d = r.data || {};
+      if (!d.executed) {
+        this._reportProblem(d.code || 'FOREGROUND_CHANGED', '裸坐标点击前身份/前台校验失败', { sessionId: opts.sessionId });
+        return { ok: false, code: d.code || 'FOREGROUND_CHANGED', error: '裸坐标点击被拒绝（窗口身份或前台已变化）', executed: false };
+      }
+      this.recordAction('click', { method: 'raw_deprecated', hwnd: t.hwnd, x: px, y: py }, true, null, { sessionId: opts.sessionId });
+      return { ok: true, executed: true, deprecated: true, warning: 'computer_click_at 已弃用，请改用 computer_click_observed' };
+    }
+    return { ok: false, code: 'TARGET_NOT_ALLOWED', error: '坐标不在该会话任何已授权窗口的实时边界内，拒绝裸坐标点击', executed: false };
   }
 
   /* ------------------------------------------------------------ lifecycle */
@@ -1047,17 +1281,64 @@ ${NATIVE_CORE}
     return { ok: true, stopped: r.stopped, quiesced: r.quiesced, residual: leftover, activeBefore: before };
   }
 
-  /** Full session cancel ordering: abort grounding → stop helpers → clipboard
-   * restore → quiescence → THEN lock release (registered hooks run in order). */
+  /**
+   * P3 Closure (C1) — the ONE Computer session cancellation authority.
+   *
+   * ComputerManager.cancelSession() orchestrates the real resource teardown;
+   * ComputerSessionRegistry.cancel() stays the canonical terminal transition
+   * (status + hook lifecycle). There are no two competing cancel systems: a
+   * session is only ever cancelled HERE, and only ever marked CANCELLED there.
+   *
+   * Before this returns, the cancelled session can produce NO further
+   * mouse/keyboard/clipboard/UIA/vision mutation:
+   *   observations invalidated → pending lock acquires rejected (they may
+   *   NEVER inherit the lock later) → session helpers killed with CONFIRMED
+   *   exit → clipboard transactions settled → canonical terminal transition.
+   * The desktop lock itself frees via the in-flight action's finally after its
+   * helper confirmed dead — never before quiescence.
+   */
   async cancelSession(sessionId, { reason = '用户停止' } = {}) {
     const s = this.sessions ? this.sessions.get(sessionId) : null;
     if (!s) return { ok: false, code: 'SESSION_NOT_FOUND' };
+    // 1) no stale observation ticket outlives the cancel
     this.observations.invalidateForSession(sessionId);
+    // 2) queued (not yet granted) desktop-lock acquires reject NOW
+    if (this.lock) this.lock.cancelPending(sessionId);
+    // 3) stop this session's helpers and wait for CONFIRMED exit
     const stop = await this.stopActive({ sessionId });
-    // clipboard transaction restore happens inside pasteToTarget's finally;
-    // a cancel mid-transaction still leaves tx at 0 once the helper settled.
-    const lockState = this.lock ? this.lock.holder() : null;
-    return { ok: stop.residual === 0, session: s, stop, lockHolderAfter: lockState };
+    // 4) an in-flight clipboard transaction settles in its own finally once
+    //    its helper settled — wait (bounded) for the counter to return to 0.
+    for (let i = 0; i < 30 && this._clipboardTx > 0; i++) await new Promise(r => setTimeout(r, 100));
+    // 5) canonical terminal transition + hooks (registry is the status truth)
+    const reg = this.sessions ? await this.sessions.cancel(sessionId, { reason }) : { ok: true };
+    const residual = psHost.activeCount(sessionId);
+    const session = this.sessions ? this.sessions.get(sessionId) : s;
+    const quiesced = stop.quiesced && residual === 0 && this._clipboardTx === 0;
+    if (!quiesced) this._reportProblem('COMPUTER_RESIDUE', `会话取消后清理不完整（residual=${residual}, clipboardTx=${this._clipboardTx}）`, { sessionId });
+    return {
+      ok: !!(reg.ok && quiesced),
+      session, status: session ? session.status : null,
+      stop, residual, quiesced,
+      clipboardTransactions: this._clipboardTx,
+      lockHolderAfter: this.lock ? this.lock.holder() : null,
+      lockPendingAfter: this.lock ? this.lock.pendingCount() : null,
+      observationsAfter: this.observations.count()
+    };
+  }
+
+  /**
+   * P3 Closure (C10) — Run completed cleanly: settle the session into
+   * COMPLETED (not CANCELLED) with the same residue invariants: observations
+   * invalidated, pending lock acquires rejected, session helpers confirmed dead.
+   */
+  async completeSession(sessionId, { reason = 'Run 完成' } = {}) {
+    const s = this.sessions ? this.sessions.get(sessionId) : null;
+    if (!s) return { ok: false, code: 'SESSION_NOT_FOUND' };
+    this.observations.invalidateForSession(sessionId);
+    if (this.lock) this.lock.cancelPending(sessionId);
+    const stop = await this.stopActive({ sessionId });
+    const session = this.sessions ? this.sessions.complete(sessionId) : s;
+    return { ok: stop.residual === 0, session, stop, residual: stop.residual };
   }
 
   async cancelForConversation(conversationId) {
@@ -1083,29 +1364,6 @@ ${NATIVE_CORE}
       clipboardTransactions: this._clipboardTx
     };
   }
-}
-
-/** Tiny PNG downsample (no deps): re-encode via PowerShell System.Drawing. */
-function downsamplePng(file, w, h) {
-  try {
-    const out = file + '.small.png';
-    const script = `Add-Type -AssemblyName System.Drawing;
-$src = [System.Drawing.Image]::FromFile(${psLiteral(file)});
-$dst = New-Object System.Drawing.Bitmap(${Math.trunc(w)}, ${Math.trunc(h)});
-$g = [System.Drawing.Graphics]::FromImage($dst);
-$g.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic;
-$g.DrawImage($src, 0, 0, ${Math.trunc(w)}, ${Math.trunc(h)});
-$dst.Save(${psLiteral(out)}, [System.Drawing.Imaging.ImageFormat]::Png);
-$g.Dispose(); $dst.Dispose(); $src.Dispose();
-@{ok=$true} | ConvertTo-Json -Compress`;
-    // synchronous best-effort: failure just means the original stays
-    const { spawnSync } = require('child_process');
-    const r = spawnSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', script], { windowsHide: true, timeout: 15000 });
-    if (r.status !== 0) return null;
-    const b64 = fs.readFileSync(out).toString('base64');
-    try { fs.unlinkSync(out); } catch { /* ignore */ }
-    return b64;
-  } catch { return null; }
 }
 
 /** Strip anything resembling input content from audit details. */
@@ -1150,14 +1408,27 @@ function createComputerTools(runtime = {}) {
     { name: 'computer_click_at', description: '【已弃用·高风险】裸屏幕坐标点击。需要额外授权（computer.raw_coordinates），请改用 computer_click_observed。', risk_level: 'high', permission: 'computer.raw_coordinates', deprecated: true, input_schema: { type: 'object', properties: { x: { type: 'number' }, y: { type: 'number' } }, required: ['x', 'y'] } }
   ];
 
-  /** Session plumbing: one ComputerSession per Run, rootRunId from lineage. */
-  function ensureSession(ctx) {
+  /**
+   * P3 Closure (C2) — Session plumbing, FAIL CLOSED at the tool boundary.
+   *
+   * One ComputerSession per Run; rootRunId comes ONLY from the real
+   * RunManager lineage. A Model/Renderer that self-reports runId/rootRunId/
+   * parentRunId/sessionId gets nothing: unknown runId ⇒ SESSION_UNKNOWN_RUN
+   * and the ENTIRE tool call is refused by the normalizer below — never
+   * degraded into an unowned (sessionId=null) execution.
+   *
+   * This gate runs ONCE per tool call in the normalizer wrapper; execs read
+   * the pre-computed result via sessionOf(ctx) so no tool can skip it.
+   */
+  function gateSession(ctx) {
     if (!mgr.sessions) return { ok: true, session: null };
     const runId = (ctx && ctx.runId) || null;
     if (!runId) {
       // panel / manual calls without a Run get an unowned pass (no target fence)
       return { ok: true, session: null };
     }
+    // self-reported lineage fields are never trusted — only ctx.runId against
+    // the RunManager decides identity.
     const r = mgr.sessions.create({
       runId,
       ownerAgentId: (ctx && ctx.agentId) || (ctx && ctx.agentName) || null,
@@ -1168,6 +1439,11 @@ function createComputerTools(runtime = {}) {
     return { ok: true, session: r.session };
   }
 
+  /** Read the session the normalizer already gated (never re-derives). */
+  function sessionOf(ctx) {
+    return { ok: true, session: (ctx && ctx.__computerSession) || null };
+  }
+
   /** Resolve + (first-time) authorize + bind target for a session. */
   async function bindTarget(ctx, session, q, opts) {
     const res = await mgr.resolveWindow(q, opts);
@@ -1176,9 +1452,9 @@ function createComputerTools(runtime = {}) {
     if (session) {
       let allowed = mgr.sessions.assertTargetAllowed(session.sessionId, ref);
       if (!allowed.ok && allowed.code === 'TARGET_NOT_ALLOWED') {
-        // fresh authorization goes through the injected user prompt; without a
-        // prompt channel this stays denied (fail closed).
-        const reAuth = mgr.targetAuthorizer ? await mgr.targetAuthorizer({ sessionId: session.sessionId, windowRef: ref, ctx }) : true;
+        // P3 Closure (C3.1): fresh authorization goes through the injected
+        // user prompt; NO AUTHORIZER ⇒ DENY (fail closed, never default-allow).
+        const reAuth = mgr.targetAuthorizer ? await mgr.targetAuthorizer({ sessionId: session.sessionId, windowRef: ref, ctx }) : false;
         if (reAuth) {
           mgr.sessions.allowTarget(session.sessionId, { hwnd: ref.hwnd, pid: ref.pid, title: ref.title });
           allowed = mgr.sessions.assertTargetAllowed(session.sessionId, ref);
@@ -1190,12 +1466,32 @@ function createComputerTools(runtime = {}) {
     return { ok: true, window: ref };
   }
 
+  const TERMINAL_SESSION = new Set(['CANCELLED', 'COMPLETED', 'FAILED']);
+
   /** Serialize mutations through the desktop lock (never interleave). */
   async function withLock(sessionId, reason, fn) {
-    if (!mgr.lock) return fn();
+    const sessionDenied = () => {
+      if (sessionId && mgr.sessions) {
+        const s = mgr.sessions.get(sessionId);
+        if (!s || TERMINAL_SESSION.has(s.status)) {
+          return { ok: false, code: 'SESSION_CANCELLED', error: '会话已终态，动作未执行' };
+        }
+      }
+      return null;
+    };
+    if (!mgr.lock) {
+      const denied = sessionDenied();
+      if (denied) return denied;
+      return fn();
+    }
     let token = null;
     try {
       token = await mgr.lock.acquire({ sessionId, reason });
+      // P3 Closure (C1): re-check the session RIGHT AFTER the grant — a cancel
+      // that landed while this action was queued must win; a queued mutation
+      // may never execute against a terminal session.
+      const denied = sessionDenied();
+      if (denied) return denied;
       return await fn();
     } catch (e) {
       if (e && e.code === 'LOCK_ACQUIRE_CANCELLED') return { ok: false, code: 'SESSION_CANCELLED', error: '会话已取消，动作未执行' };
@@ -1207,19 +1503,19 @@ function createComputerTools(runtime = {}) {
 
   const execs = {
     computer_list_windows: async (ctx) => {
-      const s = ensureSession(ctx);
+      const s = sessionOf(ctx);
       const r = await mgr.listWindows(15000, { sessionId: s.session ? s.session.sessionId : null });
       if (!r.ok) return { ok: false, error: { code: r.code || 'COMPUTER_ERROR', message: r.error } };
       return { ok: true, data: { windows: r.windows.map(w => ({ hwnd: w.hwnd, pid: w.pid, title: w.title, process: w.processName, rect: w.rect, dpi: w.dpi, minimized: w.minimized, foreground: w.foreground })) } };
     },
     computer_focus_window: async (ctx, a) => {
-      const s = ensureSession(ctx);
+      const s = sessionOf(ctx);
       const bound = await bindTarget(ctx, s.session, a.hwnd ? { hwnd: a.hwnd } : { title: a.title }, { sessionId: s.session ? s.session.sessionId : null });
       if (!bound.ok) return { ok: false, error: { code: bound.code || 'COMPUTER_ERROR', message: bound.error } };
       return withLock(s.session ? s.session.sessionId : null, 'focus', () => mgr.focusWindowRef(bound.window, { sessionId: s.session ? s.session.sessionId : null }));
     },
     computer_observe: async (ctx, a) => {
-      const s = ensureSession(ctx);
+      const s = sessionOf(ctx);
       const q = a.hwnd ? { hwnd: a.hwnd } : { title: a.title };
       const bound = await bindTarget(ctx, s.session, q, {});
       if (!bound.ok) return { ok: false, error: { code: bound.code || 'COMPUTER_ERROR', message: bound.error } };
@@ -1230,61 +1526,61 @@ function createComputerTools(runtime = {}) {
       return { ok: true, data: { observation_id: r.observationId, window: { hwnd: bound.window.hwnd, title: bound.window.title }, window_rect: r.windowRect, dpi: r.dpi, foreground: r.foreground, elements, element_count: elements.length, screenshot: r.screenshot } };
     },
     computer_click_observed: async (ctx, a) => {
-      const s = ensureSession(ctx);
+      const s = sessionOf(ctx);
       const sid = s.session ? s.session.sessionId : null;
       return withLock(sid, 'click', () => mgr.clickObserved({ observationId: a.observation_id, normalizedX: a.normalized_x, normalizedY: a.normalized_y, button: a.button || 'left', sessionId: sid }));
     },
     computer_invoke_element: async (ctx, a) => {
-      const s = ensureSession(ctx);
+      const s = sessionOf(ctx);
       const sid = s.session ? s.session.sessionId : null;
       return withLock(sid, 'invoke', () => mgr.invokeElement({ observationId: a.observation_id, elementRef: a.element_ref, sessionId: sid }));
     },
     computer_set_element_value: async (ctx, a) => {
-      const s = ensureSession(ctx);
+      const s = sessionOf(ctx);
       const sid = s.session ? s.session.sessionId : null;
       return withLock(sid, 'set_value', () => mgr.setElementValue({ observationId: a.observation_id, elementRef: a.element_ref, value: a.text, sessionId: sid }));
     },
     computer_toggle_element: async (ctx, a) => {
-      const s = ensureSession(ctx);
+      const s = sessionOf(ctx);
       const sid = s.session ? s.session.sessionId : null;
       return withLock(sid, 'toggle', () => mgr.toggleElement({ observationId: a.observation_id, elementRef: a.element_ref, sessionId: sid }));
     },
     computer_select_element: async (ctx, a) => {
-      const s = ensureSession(ctx);
+      const s = sessionOf(ctx);
       const sid = s.session ? s.session.sessionId : null;
       return withLock(sid, 'select', () => mgr.selectElement({ observationId: a.observation_id, elementRef: a.element_ref, sessionId: sid }));
     },
     computer_scroll_element: async (ctx, a) => {
-      const s = ensureSession(ctx);
+      const s = sessionOf(ctx);
       const sid = s.session ? s.session.sessionId : null;
       return withLock(sid, 'scroll', () => mgr.scrollElement({ observationId: a.observation_id, elementRef: a.element_ref, value: a.value || 1, sessionId: sid }));
     },
     computer_type_text: async (ctx, a) => {
-      const s = ensureSession(ctx);
+      const s = sessionOf(ctx);
       const sid = s.session ? s.session.sessionId : null;
       const bound = await bindTarget(ctx, s.session, a.hwnd ? { hwnd: a.hwnd } : { title: a.title }, {});
       if (!bound.ok) return { ok: false, error: { code: bound.code || 'NO_TARGET', message: bound.error || '输入必须指定目标窗口（title 或 hwnd）' } };
       return withLock(sid, 'type', () => mgr.typeTextToTarget({ target: bound.window, text: a.text, submit: !!a.submit, sessionId: sid }));
     },
     computer_press_keys: async (ctx, a) => {
-      const s = ensureSession(ctx);
+      const s = sessionOf(ctx);
       const sid = s.session ? s.session.sessionId : null;
       const bound = await bindTarget(ctx, s.session, a.hwnd ? { hwnd: a.hwnd } : { title: a.title }, {});
       if (!bound.ok) return { ok: false, error: { code: bound.code || 'NO_TARGET', message: bound.error || '按键必须指定目标窗口（title 或 hwnd）' } };
       return withLock(sid, 'keys', async () => {
         const focus = await mgr.focusWindowRef(bound.window, { sessionId: sid });
         if (!focus.ok) return focus;
-        return mgr.pressKeys(a.keys, { foregroundHwnd: bound.window.hwnd, sessionId: sid });
+        return mgr.pressKeys(a.keys, { foregroundHwnd: bound.window.hwnd, foregroundPid: bound.window.pid, sessionId: sid });
       });
     },
     computer_screenshot: async (ctx) => {
-      const s = ensureSession(ctx);
+      const s = sessionOf(ctx);
       const r = await mgr.screenshot({ sessionId: s.session ? s.session.sessionId : null });
       if (!r.ok) return { ok: false, error: { code: 'COMPUTER_ERROR', message: r.error } };
       return { ok: true, data: r };
     },
     computer_screenshot_window: async (ctx, a) => {
-      const s = ensureSession(ctx);
+      const s = sessionOf(ctx);
       const bound = await bindTarget(ctx, s.session, a.hwnd ? { hwnd: a.hwnd } : { title: a.title }, {});
       if (!bound.ok) return { ok: false, error: { code: bound.code || 'COMPUTER_ERROR', message: bound.error } };
       const r = await mgr.screenshotWindowRef(bound.window, { sessionId: s.session ? s.session.sessionId : null });
@@ -1292,29 +1588,35 @@ function createComputerTools(runtime = {}) {
       return { ok: true, data: r };
     },
     computer_get_ui_tree: async (ctx, a) => {
-      const s = ensureSession(ctx);
+      const s = sessionOf(ctx);
       const r = await mgr.getUiTree(a.hwnd ? { hwnd: a.hwnd } : { title: a.title }, { sessionId: s.session ? s.session.sessionId : null });
       if (!r.ok) return { ok: false, error: { code: r.code || 'COMPUTER_ERROR', message: r.error } };
       return { ok: true, data: { nodes: r.nodes, truncated: r.truncated, tree: r.tree } };
     },
     computer_get_window_text: async (ctx, a) => {
-      const s = ensureSession(ctx);
+      const s = sessionOf(ctx);
       const r = await mgr.getWindowText(a.hwnd ? { hwnd: a.hwnd } : { title: a.title }, 400, { sessionId: s.session ? s.session.sessionId : null });
       if (!r.ok) return { ok: false, error: { code: r.code || 'COMPUTER_ERROR', message: r.error } };
       return { ok: true, data: { text: r.text, nodes: r.nodes } };
     },
     computer_click_control: async (ctx, a) => {
-      const s = ensureSession(ctx);
+      const s = sessionOf(ctx);
       const sid = s.session ? s.session.sessionId : null;
-      return withLock(sid, 'click_control', () => mgr.clickControl(a.title, a.automation_id, { sessionId: sid }));
+      // P3 Closure (C3): legacy automationId path goes through the SAME
+      // resolve + target fence before any mutation.
+      const bound = await bindTarget(ctx, s.session, a.hwnd ? { hwnd: a.hwnd } : { title: a.title }, { sessionId: sid });
+      if (!bound.ok) return { ok: false, error: { code: bound.code || 'COMPUTER_ERROR', message: bound.error } };
+      return withLock(sid, 'click_control', () => mgr.clickControl(bound.window, a.automation_id, { sessionId: sid }));
     },
     computer_set_control_value: async (ctx, a) => {
-      const s = ensureSession(ctx);
+      const s = sessionOf(ctx);
       const sid = s.session ? s.session.sessionId : null;
-      return withLock(sid, 'set_control_value', () => mgr.setControlValue(a.title, a.text, { automationId: a.automation_id || '', sessionId: sid }));
+      const bound = await bindTarget(ctx, s.session, a.hwnd ? { hwnd: a.hwnd } : { title: a.title }, { sessionId: sid });
+      if (!bound.ok) return { ok: false, error: { code: bound.code || 'COMPUTER_ERROR', message: bound.error } };
+      return withLock(sid, 'set_control_value', () => mgr.setControlValue(bound.window.title, a.text, { hwnd: bound.window.hwnd, pid: bound.window.pid, processName: bound.window.processName, automationId: a.automation_id || '', sessionId: sid }));
     },
     computer_click_at: async (ctx, a) => {
-      const s = ensureSession(ctx);
+      const s = sessionOf(ctx);
       const sid = s.session ? s.session.sessionId : null;
       return withLock(sid, 'raw_click', () => mgr.clickAt(a.x, a.y, { sessionId: sid }));
     }
@@ -1325,7 +1627,16 @@ function createComputerTools(runtime = {}) {
   for (const [name, fn] of Object.entries(execs)) {
     normalized[name] = async (ctx, a) => {
       try {
-        const r = await fn(ctx, a || {});
+        // P3 Closure (C2) — the ONE session gate for every Computer tool.
+        // A failed session (e.g. SESSION_UNKNOWN_RUN from a fake/self-reported
+        // runId) refuses the WHOLE call here: OS mutation exec = 0, helper
+        // spawn = 0, lock acquire = 0, target authorize = 0.
+        const gate = gateSession(ctx);
+        if (!gate.ok) {
+          return { ok: false, error: { code: gate.code || 'SESSION_DENIED', message: gate.error || 'Computer 会话创建失败（fail closed）' } };
+        }
+        const callCtx = { ...(ctx || {}), __computerSession: gate.session || null };
+        const r = await fn(callCtx, a || {});
         if (!r || r.ok === false) {
           const err = (r && r.error) || {};
           const code = (typeof err === 'object' && err.code) || r.code || 'COMPUTER_ERROR';

@@ -1,5 +1,7 @@
 # Architecture Freeze — v2.9.7
 
+> P3 status (v2.9.9): **Computer Use Production Hardening FROZEN**. The closure strengthens the existing canonical runtime with exact HWND+PID target authority, action-point validation, routed grounding, and psHost-only helpers. It does not change this architecture freeze version: `frozenAtVersion` remains **2.9.7**.
+
 This document freezes the production architecture after Framework First. Core framework changes now require an explicit architecture-manifest update and a passing architecture gate. Product work may compose these modules, but must not introduce another runtime, router, permission engine, tool executor, or framework truth.
 
 ## Production chain

@@ -44,6 +44,9 @@
     "test:computer-hardening": "node scripts/run-tests.js computerHardening.test",
     "test:computer-hardening:production": "node scripts/run-tests.js computerHardeningProduction",
     "test:computer-hardening:soak": "node scripts/run-tests.js computerHardeningSoak",
+    "test:computer-closure": "node scripts/run-tests.js computerClosure.test",
+    "test:computer-closure:production": "node scripts/run-tests.js computerClosureProduction",
+    "test:computer-closure:soak": "node scripts/run-tests.js computerClosureSoak",
     "icon": "node scripts/make-icon.js"
   },
   "dependencies": {

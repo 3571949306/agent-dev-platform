@@ -586,12 +586,25 @@ async function renderComputer() {
           <span class="chip small">${esc(MODE_LABEL[s.mode] || s.mode || '')}</span>
           <button class="btn tiny danger" data-cancel="${esc(s.sessionId)}">取消</button></div>
         <div class="small">Run：${esc(s.runId || '—')}　Agent：${esc(s.ownerAgentId || '—')}　时长：${Math.round((s.durationMs || 0) / 1000)}s　观察×${s.observationCount || 0}　动作×${s.actionCount || 0}</div>
-        <div class="small">绑定窗口：${s.target ? `<b>${esc(s.target.title || '')}</b>（${esc(s.target.process || '')}，HWND ${esc(s.target.hwnd || '')}）` : '<span class="muted">未绑定</span>'}</div>
+        <div class="small">绑定窗口：${s.target ? `<b>${esc(s.target.title || '')}</b>（${esc(s.target.process || '')}，HWND ${esc(s.target.hwnd || '')}，PID ${esc(s.target.pid || '')}）` : '<span class="muted">未绑定</span>'}</div>
         ${s.lastErrorCode ? `<div class="small"><span class="chip bad small">${esc(s.lastErrorCode)}</span></div>` : ''}
       </div>`).join('');
       $('#cp-out').innerHTML = head + cards;
       $('#cp-out').querySelectorAll('[data-cancel]').forEach(b => b.onclick = async () => {
-        try { await api.computerSessionCancel(b.dataset.cancel); toast('会话已取消（辅助进程/剪贴板/锁已清理）', 'ok'); renderSessions(); refreshActive(); } catch (e) { toast(e.message, 'error'); }
+        try {
+          const r = await api.computerSessionCancel(b.dataset.cancel);
+          // P3 Closure — GUI truth: “已取消” only after the backend REALLY
+          // completed Session Cancel + cleanup; residual>0 / quiesced=false
+          // must surface as ERROR/DEGRADED, never a premature success toast.
+          const residual = (r && r.residual) || 0;
+          if (r && r.ok && r.quiesced && residual === 0) {
+            toast('会话已取消（辅助进程/剪贴板/锁已清理）', 'ok');
+          } else {
+            toast(`会话取消不完整：残留进程 ${residual}，剪贴板事务 ${(r && r.clipboardTransactions) || 0} — DEGRADED`, 'error');
+            addProblem(`Computer 会话取消后清理不完整（residual=${residual}）`, { code: 'COMPUTER_CANCEL_DEGRADED', relatedKey: `computer-cancel:${b.dataset.cancel}` });
+          }
+          renderSessions(); refreshActive();
+        } catch (e) { toast(e.message, 'error'); }
       });
     } catch (e) { $('#cp-out').innerHTML = `<div class="err">${esc(e.message)}</div>`; }
   };

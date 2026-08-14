@@ -56,6 +56,13 @@ function waitForExit(child, timeoutMs = 3000) {
   });
 }
 
+// P3 Closure (C6) — controlled test seam: lets the closure suite simulate a
+// helper whose exit CANNOT be confirmed, proving the registry never lies.
+// Production always uses waitForExit; anything else is a test override.
+let _exitWaiterOverride = null;
+function _setExitWaiter(fn) { _exitWaiterOverride = typeof fn === 'function' ? fn : null; }
+function exitWaiter(child, timeoutMs) { return (_exitWaiterOverride || waitForExit)(child, timeoutMs); }
+
 /** Parse the helper's stdout: last JSON line wins, else raw text. */
 function parseOutput(out, err) {
   const trimmed = String(out || '').trim();
@@ -96,9 +103,16 @@ function runPs(script, { timeoutMs = 30000, signal = null, sessionId = null } = 
       clearTimeout(timer);
       if (signal && typeof signal.removeEventListener === 'function') signal.removeEventListener('abort', onAbort);
       // The registry only shrinks once death is CONFIRMED — never a blind clear.
-      waitForExit(child, 3000).then(() => {
-        active.delete(child);
-        resolve(verdict);
+      // P3 Closure (C6): an UNCONFIRMED exit keeps the active record AND
+      // upgrades the verdict to an honest non-quiesced failure — reporting
+      // helpers=0 while the process may still be alive is forbidden.
+      exitWaiter(child, 3000).then((exited) => {
+        if (exited) {
+          active.delete(child);
+          resolve(verdict);
+        } else {
+          resolve({ ...verdict, ok: false, quiesced: false, code: 'COMPUTER_HELPER_NOT_QUIESCED', error: (verdict && verdict.error) || '辅助进程退出未确认（COMPUTER_HELPER_NOT_QUIESCED）' });
+        }
       });
     };
 
@@ -169,4 +183,4 @@ public static class ADPDpi {
 "@
 [ADPDpi]::Init() | Out-Null } catch { }`;
 
-module.exports = { runPs, stopAll, activeCount, isIdle, killTree, waitForExit, psLiteral, PS_PRELUDE, _active: active };
+module.exports = { runPs, stopAll, activeCount, isIdle, killTree, waitForExit, psLiteral, PS_PRELUDE, _active: active, _setExitWaiter };

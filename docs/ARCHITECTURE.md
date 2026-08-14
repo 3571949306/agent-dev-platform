@@ -11,6 +11,12 @@ Agent Dev Platform 是一个**本地桌面 AI Agent IDE**，目标是让 Coding 
 | **真实可运行** | 测试覆盖真实浏览器、真实 PowerShell、真实 JSON-RPC 服务器，**不靠 mock 装成功** |
 | **可打包成单机应用** | 单文件 HTML 内联进打包，CSS / JS / 图标内联；原生模块按 Electron ABI 编译 |
 
+### v2.9.9 P3 Computer Use frozen security path
+
+所有有 Run ownership 的 Computer mutation 只允许沿同一条链执行：`RunManager lineage → ACTIVE ComputerSession → exact WindowRef(HWND+PID) target authorization → current HWND+PID revalidation → PermissionEngine → DesktopInteractionLock → same-helper action-point identity/foreground/bounds check → OS action`。任一依赖或身份缺失都 fail closed；legacy API 只保留 schema compatibility，不保留旧 authority 语义。
+
+`ComputerGroundingService` 只生成 inert proposal，并通过现有 `RuntimeModelResolver → Model Router → ProviderModelAdapter → model.decide` 调用模型；它不读取连接 secret、不直连 provider、也不执行 OS mutation。Computer 子进程 transport 只有 `src/services/computer/psHost.js`。这些变化收口于既有架构，不创建第二套 runtime/router/permission/target registry；架构 `frozenAtVersion` 保持 2.9.7。
+
 ## 2. 模块全景
 
 ```

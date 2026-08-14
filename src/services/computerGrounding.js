@@ -4,15 +4,19 @@
  *
  * Vision is the SECOND choice (UIA semantic > Vision grounding > raw
  * coordinate). When UIA is insufficient, a vision model grounded on the
- * observation's screenshot proposes a normalized target; the backend — never
- * the model — turns it into a physical click that still passes the
- * observation fence, target bounds fence and PermissionEngine.
+ * observation's screenshot PROPOSES a normalized target; the proposal is
+ * inert — execution must re-enter the canonical Computer Tool (Tool Gate →
+ * PermissionEngine → ComputerSession → Target Fence → Observation Fence →
+ * DesktopInteractionLock). This service never executes anything.
  *
- * Model access goes through the injected provider (Model Router →
- * ProviderModelAdapter; see pickVisionModel). This module never re-implements
- * a provider client. Confidence below threshold → no execution, full stop:
- * confidence is NOT a substitute for PermissionEngine and never replaces the
- * destructive-confirmation path.
+ * P3 Closure (C4): model access goes through the REAL routing chain —
+ * Model Catalog → Model Router → RuntimeModelResolver → ProviderModelAdapter
+ * → selected wire model. The injected `resolveVision` returns
+ * `{ modelAdapter, selection }` exactly as createRuntimeModelResolver does;
+ * this module performs ZERO direct provider calls, ZERO connection secret
+ * access and owns NO provider client. Confidence below threshold → no
+ * proposal accepted, full stop: confidence is NOT a substitute for
+ * PermissionEngine and never replaces the destructive-confirmation path.
  */
 const { extractJson } = require('./visionReader');
 const { textPart, imagePart } = require('../providers/content');
@@ -71,67 +75,95 @@ function validateGroundingResponse(parsed, { minConfidence = MIN_CONFIDENCE_DEFA
 
 class ComputerGroundingService {
   /**
-   * @param opts.resolveReader () => DesktopVisionReader-like { provider, model } | null
-   *        (wired to pickVisionModel: Model Router → ProviderModelAdapter)
+   * @param opts.resolveVision () => { modelAdapter, selection } | null
+   *        production wiring: runtimeModelResolver.resolveRuntimeModel({
+   *          mode: 'auto', requirements: { required: { vision: true } }, … })
+   *        — i.e. Model Catalog → Model Router → ProviderModelAdapter.
+   *        modelAdapter.decide({ system, context, abortSignal }) is the ONLY
+   *        model call surface this service ever touches.
    * @param opts.minConfidence
    * @param opts.timeoutMs
    */
-  constructor({ resolveReader = null, minConfidence = MIN_CONFIDENCE_DEFAULT, timeoutMs = 60000 } = {}) {
-    this.resolveReader = resolveReader || (() => null);
+  constructor({ resolveVision = null, minConfidence = MIN_CONFIDENCE_DEFAULT, timeoutMs = 60000 } = {}) {
+    this.resolveVision = resolveVision || (() => null);
     this.minConfidence = minConfidence;
     this.timeoutMs = timeoutMs;
     this.calls = 0;
+    this.lastRoute = null; // public route audit truth (never contains secrets)
   }
 
-  available() { return !!this.resolveReader(); }
+  available() {
+    try { return !!this.resolveVision(); } catch { return false; }
+  }
+
+  /** Public route audit snapshot: capability/connection/model/reasons only. */
+  routeAudit() { return this.lastRoute ? { ...this.lastRoute } : null; }
 
   /**
    * @param {object} req GroundingRequest { observationId, goal, screenshotDataUrl,
    *                        windowMeta, uiaNodes }
-   * @returns {Promise<{ok:true, grounding}|{ok:false, code, error}>}
+   * @param {object} [o] { signal } Run/Session AbortSignal — cancellation aborts
+   *                     the routed adapter and a late result can never act.
+   * @returns {Promise<{ok:true, grounding, route}|{ok:false, code, error}>}
    */
   async ground(req = {}, { signal = null } = {}) {
-    const reader = this.resolveReader();
-    if (!reader || !reader.provider || !reader.model) {
+    let route = null;
+    try { route = this.resolveVision({ signal }); } catch (e) {
+      return { ok: false, code: 'VISION_MODEL_REQUIRED', error: '视觉模型路由失败：' + (e.message || e) };
+    }
+    if (!route || !route.modelAdapter || typeof route.modelAdapter.decide !== 'function') {
       return { ok: false, code: 'VISION_MODEL_REQUIRED', error: '未配置可用的视觉模型（Grounding 需要多模态连接）' };
     }
     if (!req.screenshotDataUrl) return { ok: false, code: 'NO_FRAME', error: '缺少观察截图' };
     if (!req.goal) return { ok: false, code: 'NO_GOAL', error: '缺少 grounding 目标描述' };
 
+    const selection = route.selection || null;
+    const selected = (selection && selection.selected) || {};
+    // Route audit truth: requested capability / connection / model / reasons.
+    // NEVER secrets — decrypted connection material never enters this module.
+    this.lastRoute = {
+      requestedCapability: 'vision',
+      connectionId: selected.connectionId || null,
+      model: selected.modelId || null,
+      mode: (selection && selection.mode) || null,
+      reasons: Array.isArray(selection && selection.reasons) ? selection.reasons.map(r => r && r.code).filter(Boolean) : [],
+      decisionId: (selection && selection.decisionId) || null
+    };
+
     const uiaHint = Array.isArray(req.uiaNodes) && req.uiaNodes.length
       ? `\n\nUI 自动化已识别的元素（优先利用）：\n${req.uiaNodes.slice(0, 30).join('\n')}`
       : '';
     const meta = req.windowMeta ? `\n窗口：${req.windowMeta.title || ''}（${req.windowMeta.processName || ''}）` : '';
-    const messages = [{
-      role: 'user',
-      content: [
-        textPart(`任务目标：${String(req.goal).slice(0, 400)}${meta}${uiaHint}`),
-        imagePart(req.screenshotDataUrl)
-      ]
-    }];
+    // ProviderModelAdapter.decide sends `context` as the single user message —
+    // multipart parts carry the screenshot to the wire model.
+    const context = [
+      textPart(`任务目标：${String(req.goal).slice(0, 400)}${meta}${uiaHint}`),
+      imagePart(req.screenshotDataUrl)
+    ];
 
     this.calls++;
     let raw = '';
     try {
-      const r = await reader.provider.streamResponse({
-        model: reader.model,
+      const r = await route.modelAdapter.decide({
         system: GROUNDING_SYSTEM_PROMPT,
-        messages,
-        maxTokens: 512,
-        timeoutMs: this.timeoutMs,
-        signal,
-        onChunk: () => {}
+        context,
+        iteration: 0,
+        abortSignal: signal || undefined
       });
-      raw = (r && r.content) || '';
+      raw = (r && r.text) || '';
     } catch (e) {
-      const aborted = e.aborted === true || e.name === 'AbortError';
+      const aborted = (e && (e.aborted === true || e.name === 'AbortError')) || !!(signal && signal.aborted);
       return { ok: false, code: aborted ? 'CANCELLED' : 'GROUNDING_CALL_FAILED', error: e.message };
     }
 
     const parsed = extractJson(raw);
     const v = validateGroundingResponse(parsed, { minConfidence: this.minConfidence });
     if (!v.ok) return v;
-    return { ok: true, grounding: { ...v.grounding, model: reader.model, observationId: req.observationId || null } };
+    return {
+      ok: true,
+      grounding: { ...v.grounding, model: this.lastRoute.model, observationId: req.observationId || null },
+      route: this.routeAudit()
+    };
   }
 }
 

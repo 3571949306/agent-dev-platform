@@ -261,6 +261,9 @@ test('P3 target fence: specialist bound to Notepad cannot drive Chrome', () => {
   const chrome = { hwnd: 301, pid: 31, title: 'Google Chrome' };
 
   // nothing authorized yet → denied
+  assert.strictEqual(reg.assertTargetAllowed(sid, notepad).code, 'SESSION_NOT_ACTIVE');
+  assert.strictEqual(reg.allowTarget(sid, notepad), false, 'CREATED sessions cannot acquire target authority');
+  reg.setStatus(sid, 'ACTIVE');
   assert.strictEqual(reg.assertTargetAllowed(sid, notepad).code, 'TARGET_NOT_ALLOWED');
   reg.allowTarget(sid, notepad);
   assert.ok(reg.assertTargetAllowed(sid, notepad).ok, 'bound window allowed');
@@ -372,7 +375,7 @@ test('P3 clipboard transaction: original content restored even on failure/cancel
   // pressKeys would spawn PowerShell; stub the foreground-fenced send path
   m.pressKeys = async () => ({ ok: true, executed: true });
 
-  const r = await m.pasteToTarget({ target: { hwnd: 1 }, text: 'agent payload' });
+  const r = await m.pasteToTarget({ target: { hwnd: 1, pid: 1 }, text: 'agent payload' });
   assert.ok(r.ok);
   assert.strictEqual(clip, MARKER, 'user clipboard restored after paste');
   assert.ok(writes.includes('agent payload'), 'temp text was set');
@@ -380,13 +383,13 @@ test('P3 clipboard transaction: original content restored even on failure/cancel
 
   // failure mid-way (paste refused) → still restored
   m.pressKeys = async () => ({ ok: false, executed: false, code: 'FOREGROUND_CHANGED' });
-  const r2 = await m.pasteToTarget({ target: { hwnd: 1 }, text: 'x' });
+  const r2 = await m.pasteToTarget({ target: { hwnd: 1, pid: 1 }, text: 'x' });
   assert.strictEqual(r2.ok, false);
   assert.strictEqual(clip, MARKER, 'restored on failure');
 
   // exception mid-way → finally still restores
   m.pressKeys = async () => { throw new Error('boom'); };
-  await assert.rejects(m.pasteToTarget({ target: { hwnd: 1 }, text: 'x' }));
+  await assert.rejects(m.pasteToTarget({ target: { hwnd: 1, pid: 1 }, text: 'x' }));
   assert.strictEqual(clip, MARKER, 'restored on exception (cancel path)');
   assert.strictEqual(m._clipboardTx, 0);
   console.log('CLIPBOARD_RESTORE=PASS');

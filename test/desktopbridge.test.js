@@ -247,6 +247,30 @@ test('DesktopBridge: UIA 不可用时自动降级到剪贴板粘贴', async () =
   assert.ok(app.calls.includes('pressKeys:^v'), '剪贴板路径必须真的发出 Ctrl+V');
 });
 
+test('DesktopBridge: production clipboard fallback uses the target-bound restoring transaction', async () => {
+  const app = fakeApp({
+    windows: [{ hwnd: 9001, pid: 701, title: 'WorkBuddy — 工作台' }],
+    supports: { uia: false, clipboard: true, type: true, text: true },
+    script: (i, st) => i === 0 ? '基线' : `基线\n结果\n${st.sentinel}`
+  });
+  let target = null;
+  app.pasteToTarget = async ({ target: exact, text }) => {
+    target = exact;
+    app.calls.push('pasteToTarget');
+    app.state.typed = text;
+    const marker = /ADP-[A-Z0-9]{6}/.exec(text);
+    if (marker) app.state.sentinel = marker[0];
+    return { ok: true, executed: true };
+  };
+  const { bridge } = build(app);
+  const result = await bridge.run('任务');
+  assert.strictEqual(result.status, 'completed');
+  assert.strictEqual(result.inputVia, 'clipboard');
+  assert.deepStrictEqual(target, { hwnd: 9001, pid: 701, title: 'WorkBuddy — 工作台' });
+  assert.ok(!app.calls.includes('setClipboard'), 'raw clipboard compatibility path is not used in production');
+  assert.ok(!app.calls.includes('pressKeys:^v'), 'canonical transaction owns the target-bound paste');
+});
+
 test('DesktopBridge: UIA 与剪贴板都失败时降级到 SendKeys 键入', async () => {
   const app = fakeApp({
     supports: { uia: true, clipboard: true, type: true, text: true },

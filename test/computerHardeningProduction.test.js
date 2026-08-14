@@ -290,7 +290,7 @@ test('P3 Scenario 5 — focus theft: input to stolen foreground executes 0', asy
     const FAIL_CLOSED = new Set(['FOREGROUND_CHANGED', 'STALE_OBSERVATION', 'STALE_WINDOW']);
     let executed = 0;
     for (let i = 0; i < 5; i++) {
-      const k = await manager.pressKeys('stolen', { foregroundHwnd: target.hwnd });
+      const k = await manager.pressKeys('stolen', { foregroundHwnd: target.hwnd, foregroundPid: target.pid });
       if (k.executed === true) executed++;
       assert.ok(FAIL_CLOSED.has(k.code), `keys fenced (${k.code})`);
       const c = await manager.clickObserved({ observationId: obs.observationId, normalizedX: 0.5, normalizedY: 0.5 });
@@ -470,18 +470,25 @@ test('P3 Scenario 11 — vision grounding via Model Router fake (paid calls = 0)
 
     // The fake vision model returns the TRUE center of the Do It button —
     // computed from the observation's UIA tree, exactly what a grounded model
-    // would do. Execution still goes through the backend fences.
+    // would do. P3 Closure: grounding goes through the routed adapter contract
+    // (modelAdapter.decide) — never a direct provider client; execution stays
+    // in the canonical fenced click path.
     const btn = obs.elements.find(e => e.automationId === 'actionButton');
+    assert.ok(btn && btn.boundingRect, 'grounded target exists in the real UIA tree');
     const bc = normalizedCenter(btn, obs.windowRect);
     const received = [];
-    const fakeProvider = {
-      protocol: 'fake-vision',
-      streamResponse: async (req) => {
-        received.push(req);
-        return { content: JSON.stringify({ action: 'click', target: 'Do It 按钮', normalizedX: bc.x, normalizedY: bc.y, confidence: 0.92, reason: '按钮清晰可见' }) };
+    const fakeAdapter = {
+      name: 'FakeRoutedVisionAdapter',
+      decide: async ({ system, context, abortSignal }) => {
+        received.push({ system, context, abortSignal });
+        return { text: JSON.stringify({ action: 'click', target: 'Do It 按钮', normalizedX: bc.x, normalizedY: bc.y, confidence: 0.92, reason: '按钮清晰可见' }) };
       }
     };
-    const grounding = new ComputerGroundingService({ resolveReader: () => ({ provider: fakeProvider, model: 'fake-vision-1' }) });
+    const fakeSelection = {
+      selected: { connectionId: 'conn-fake', modelId: 'fake-vision-1' },
+      mode: 'auto', reasons: [{ code: 'VISION_REQUIRED_PROVEN' }], decisionId: 'dec-fake-1'
+    };
+    const grounding = new ComputerGroundingService({ resolveVision: () => ({ modelAdapter: fakeAdapter, selection: fakeSelection }) });
     const t1 = Date.now();
     const g = await grounding.ground({
       observationId: obs.observationId, goal: '点击 Do It 按钮',
@@ -492,9 +499,10 @@ test('P3 Scenario 11 — vision grounding via Model Router fake (paid calls = 0)
     LATENCY.visionGroundingMs = Date.now() - t1;
     assert.ok(g.ok, 'structured grounding returned');
     assert.strictEqual(g.grounding.action, 'click');
-    assert.ok(received.length === 1, 'fake provider called exactly once');
-    const msg = received[0].messages[0];
-    assert.ok(Array.isArray(msg.content) && msg.content.some(p => p.type === 'image'), 'screenshot really sent to the model');
+    assert.strictEqual(g.grounding.model, 'fake-vision-1', 'grounding reports the routed model');
+    assert.ok(g.route && g.route.connectionId === 'conn-fake' && g.route.requestedCapability === 'vision', 'route audit truth surfaced (no secrets)');
+    assert.ok(received.length === 1, 'routed adapter called exactly once');
+    assert.ok(Array.isArray(received[0].context) && received[0].context.some(p => p.type === 'image'), 'screenshot really sent to the model');
 
     // backend executes the proposal through the SAME fenced click path;
     // verify the effect and repair within a bounded budget (max 3 re-clicks).
@@ -515,9 +523,11 @@ test('P3 Scenario 11 — vision grounding via Model Router fake (paid calls = 0)
 
     // low confidence variant never executes
     const lowService = new ComputerGroundingService({
-      resolveReader: () => ({
-        provider: { streamResponse: async () => ({ content: JSON.stringify({ action: 'click', normalizedX: 0.5, normalizedY: 0.5, confidence: 0.2, target: 'x', reason: 'blurry' }) }) },
-        model: 'fake-vision-1'
+      resolveVision: () => ({
+        modelAdapter: {
+          decide: async () => ({ text: JSON.stringify({ action: 'click', normalizedX: 0.5, normalizedY: 0.5, confidence: 0.2, target: 'x', reason: 'blurry' }) })
+        },
+        selection: fakeSelection
       })
     });
     const low = await lowService.ground({ observationId: obs.observationId, goal: 'x', screenshotDataUrl: obs.screenshot.data_url });

@@ -341,7 +341,7 @@ const problemCenter = (require('../services/problemCenter').createProblemCenter)
  * Sessions root their identity in the REAL RunManager lineage; every fence
  * failure lands in the Problems Center; sensitive input / new-target prompts
  * go through the same permission channel as tools (no channel ⇒ denied). */
-const { ComputerSessionRegistry } = require('../services/computerSession');
+const { ComputerSessionRegistry, bindSessionLifecycle } = require('../services/computerSession');
 const { ComputerGroundingService } = require('../services/computerGrounding');
 const computerSessions = new ComputerSessionRegistry({
   runManager,
@@ -354,7 +354,12 @@ computer.manager.sensitiveAuthorizer = async (req) => {
     const d = await requestPermission({
       scope: 'computer.sensitive_input', tool: 'computer_set_element_value',
       args: { reason: (req && req.reason) || 'password_input' },
-      agent: 'Computer', conversationId: (req && req.conversationId) || null, taskId: null,
+      // P3 Closure: the permission card carries REAL Run/Agent identity when
+      // available — never a fixed "Computer" placeholder.
+      agent: (req && req.ctx && (req.ctx.agentName || req.ctx.agentId)) || 'Computer',
+      runId: (req && req.ctx && req.ctx.runId) || null,
+      conversationId: (req && req.ctx && req.ctx.conversationId) || (req && req.conversationId) || null,
+      taskId: null,
       risk: '向密码/敏感输入框写入内容（内容不会被记录或回读）'
     });
     return !!(d && d.decision === 'allow');
@@ -362,20 +367,43 @@ computer.manager.sensitiveAuthorizer = async (req) => {
 };
 computer.manager.targetAuthorizer = async (req) => {
   try {
+    const w = (req && req.windowRef) || {};
+    const ctx = (req && req.ctx) || {};
     const d = await requestPermission({
       scope: 'computer', tool: 'computer_focus_window',
-      args: { target: (req && req.windowRef && req.windowRef.title) || '' },
-      agent: 'Computer', conversationId: null, taskId: null,
-      risk: `Computer 会话请求操作新窗口「${(req && req.windowRef && req.windowRef.title) || '?'}」`
+      // target identity truth: HWND + PID + title (title is discovery info only)
+      args: { target: w.title || '', hwnd: w.hwnd != null ? Number(w.hwnd) : null, pid: w.pid != null ? Number(w.pid) : null },
+      agent: ctx.agentName || ctx.agentId || 'Computer',
+      runId: ctx.runId || null,
+      conversationId: ctx.conversationId || null,
+      taskId: null,
+      risk: `Computer 会话请求操作新窗口「${w.title || '?'}」（HWND ${w.hwnd != null ? w.hwnd : '?'} / PID ${w.pid != null ? w.pid : '?'}）`
     });
     return !!(d && d.decision === 'allow');
   } catch { return false; }
 };
-// Vision grounding goes through Model Router → ProviderModelAdapter (pickVisionModel),
-// never a second provider client inside the Computer subsystem.
+// P3 Closure (C4) — Vision grounding goes through the REAL routing chain:
+// Model Catalog → Model Router → RuntimeModelResolver → ProviderModelAdapter.
+// The Computer subsystem owns no provider client and never decrypts a
+// connection itself; requirements.required.vision=true is the hard constraint.
 const computerGrounding = new ComputerGroundingService({
-  resolveReader: () => { try { return pickVisionModel({ store, providers }, {}); } catch { return null; } }
+  resolveVision: () => {
+    try {
+      const { modelAdapter, selection } = runtimeModelResolver.resolveRuntimeModel({
+        mode: 'auto',
+        requirements: { required: { vision: true } },
+        context: { capability: 'computer-vision-grounding', timeoutMs: 60000 }
+      });
+      return { modelAdapter, selection };
+    } catch { return null; } // no vision-capable candidate ⇒ VISION_MODEL_REQUIRED
+  }
 });
+
+// P3 Closure (C10) — Session lifecycle aligned with the REAL Run state
+// machine: a terminal Run always terminates its Computer sessions (no
+// "Run completed but ComputerSession ACTIVE" residue). Reuses the single
+// finishRun terminal entry — no second Run listener framework.
+bindSessionLifecycle({ runManager, manager: computer.manager });
 
 const productDiagnostics = createProductDiagnostics({
   version: require('../../package.json').version,
@@ -1675,31 +1703,44 @@ function register(window) {
   reg('computer:history', (limit) => computer.manager.history(limit || 100));
   reg('computer:active', () => ({ active: computer.manager.activeCount() }));
   reg('computer:stop', async () => {
-    // P3 — Stop = cancel every Computer session in the right order (helpers,
-    // clipboard, quiescence, lock), not a blind kill of one PowerShell.
+    // P3 Closure (C1) — Stop = cancel every Computer session through the ONE
+    // cancellation authority (observations, pending lock acquires, helpers,
+    // clipboard, then canonical terminal transition). No manual setStatus.
     for (const s of computerSessions.activeList()) {
       try { await computer.manager.cancelSession(s.sessionId, { reason: '用户停止' }); } catch { /* best effort */ }
     }
-    const r = await computer.manager.stopActive();
-    computerSessions && computerSessions.activeList().forEach(s => computerSessions.setStatus(s.sessionId, 'CANCELLED'));
-    return r;
+    // unowned helpers (panel/manual paths without a session) still quiesce
+    return computer.manager.stopActive();
   });
   // P3 — Computer sessions / diagnostics / grounding（Renderer 只读 + 取消）
   reg('computer:sessions', () => computerSessions.summary());
   reg('computer:diagnostics', () => computer.manager.diagnostics());
   reg('computer:session-cancel', async (sessionId) => computer.manager.cancelSession(sessionId, { reason: '用户停止' }));
   reg('computer:ground', async (req) => {
-    const g = await computerGrounding.ground(req || {});
+    // P3 Closure (C5) — Vision grounding is PROPOSAL ONLY. The renderer IPC
+    // is NOT an OS mutation authority: this channel returns the grounded
+    // proposal and NOTHING else. Actual execution must re-enter the canonical
+    // Computer Tool (computer_click_observed …) through the Tool Gate +
+    // PermissionEngine + ComputerSession + Target Fence + Observation Fence +
+    // DesktopInteractionLock.
+    const g = await computerGrounding.ground(req || {}, { signal: (req && req.signal) || null });
     if (!g.ok) return g;
-    // The model only proposes; the backend re-validates observation + bounds,
-    // then executes through the same fenced click path.
-    const click = await computer.manager.clickObserved({
-      observationId: g.grounding.observationId,
-      normalizedX: g.grounding.normalizedX,
-      normalizedY: g.grounding.normalizedY,
-      sessionId: (req && req.sessionId) || null
-    });
-    return { ok: click.ok !== false, grounding: g.grounding, click };
+    return {
+      ok: true,
+      executed: false, // invariant: this channel never executes
+      proposal: {
+        action: g.grounding.action,
+        target: g.grounding.target,
+        normalizedX: g.grounding.normalizedX,
+        normalizedY: g.grounding.normalizedY,
+        confidence: g.grounding.confidence,
+        reason: g.grounding.reason,
+        model: g.grounding.model,
+        observationId: g.grounding.observationId
+      },
+      route: g.route,
+      next: g.grounding.action === 'click' ? 'computer_click_observed' : null
+    };
   });
   reg('browser:status', () => browser.manager.status());
 

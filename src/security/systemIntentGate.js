@@ -87,13 +87,53 @@ function detectSystemAction(command) {
   return { isSystem: false };
 }
 
-/** Does the CURRENT user message actually ask for this kind of action? */
+/**
+ * P3 Closure — intent hardening.
+ *
+ * Pure keyword matching is NOT intent: "不要关机", "解释 shutdown 命令",
+ * "测试不要真的重启" and "代码里有 Restart-Computer" all contain the keyword
+ * yet are the OPPOSITE of an execution request. Two extra fences:
+ *
+ *   negation      — a negator (不要/别/勿/不用/don't/never …) governs the
+ *                   keyword occurrence → NO intent for that action kind.
+ *   mention-only  — the message talks ABOUT the command (解释/说明/示例/
+ *                   代码里/文档 …) instead of requesting it → NO intent.
+ *
+ * A genuine request like "请帮我关机" passes both fences untouched.
+ */
+
+/** Negators that invalidate a keyword match when they govern it. */
+const NEGATORS_RE = /(不要|不需要|不用|别去|别|勿|禁止|不能|不许|千万别|绝不|无需|没让|没有让|don'?t|do\s+not|never|avoid|no\s+need)/i;
+/** How far BEFORE a keyword occurrence a negator still governs it. */
+const NEGATION_WINDOW = 10;
+/** Discourse markers that turn a command mention into talk ABOUT the command. */
+const MENTION_MARKERS_RE = /(解释|说明|是什么意思|什么意思|什么作用|介绍|科普|学习|了解|文档|注释|代码里|代码中|脚本里|示例|举例|比如|例如|就像|假如|如果.*才|假装|模拟|提到|说过|不要真的|别真的)/i;
+
+/** Does `msg` contain a keyword occurrence that is NOT negated? */
+function hasAffirmativeKeyword(rule, msg) {
+  for (const re of rule.keywords) {
+    const global = new RegExp(re.source, re.flags.includes('g') ? re.flags : re.flags + 'g');
+    let m;
+    while ((m = global.exec(msg)) !== null) {
+      const before = msg.slice(Math.max(0, m.index - NEGATION_WINDOW), m.index);
+      if (!NEGATORS_RE.test(before)) return true; // this occurrence is affirmative
+      if (m.index === global.lastIndex) global.lastIndex++; // zero-width safety
+    }
+  }
+  return false;
+}
+
+/** Does the CURRENT user message actually ask for this kind of action?
+ * Keyword present + not negated + not a mere mention of the command. */
 function intentMatches(kind, userMessage) {
   const rule = SYSTEM_ACTIONS.find(r => r.kind === kind);
   if (!rule) return false;
   const msg = String(userMessage == null ? '' : userMessage);
   if (!msg.trim()) return false;
-  return rule.keywords.some(re => re.test(msg));
+  if (!rule.keywords.some(re => re.test(msg))) return false;           // no keyword at all
+  if (MENTION_MARKERS_RE.test(msg)) return false;                      // talking about it
+  if (!hasAffirmativeKeyword(rule, msg)) return false;                 // every occurrence negated
+  return true;
 }
 
 /**

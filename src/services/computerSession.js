@@ -20,6 +20,16 @@ const STATUS = Object.freeze({
 
 const TERMINAL = new Set([STATUS.CANCELLED, STATUS.COMPLETED, STATUS.FAILED]);
 
+function hasExactWindowIdentity(target) {
+  return !!target && Number.isSafeInteger(Number(target.hwnd)) && Number(target.hwnd) > 0 &&
+    Number.isSafeInteger(Number(target.pid)) && Number(target.pid) > 0;
+}
+
+function copyExactWindowIdentity(target) {
+  if (!hasExactWindowIdentity(target)) return null;
+  return { ...target, hwnd: Number(target.hwnd), pid: Number(target.pid) };
+}
+
 class ComputerSessionRegistry {
   /**
    * @param opts.runManager   real RunManager (lineage truth). Optional only in
@@ -62,7 +72,9 @@ class ComputerSessionRegistry {
       conversationId: conversationId || null,
       createdAt: Date.now(),
       status: STATUS.CREATED,
-      allowedTargets: Array.isArray(allowedTargets) ? allowedTargets.slice() : [],
+      // Authority is always an exact HWND + PID pair. Title-only/PID-only
+      // compatibility selectors are discovery inputs, never durable grants.
+      allowedTargets: Array.isArray(allowedTargets) ? allowedTargets.map(copyExactWindowIdentity).filter(Boolean) : [],
       activeTarget: null,          // WindowRef currently being driven
       mode: 'UIA',                 // UIA | VISION | COORDINATE_FALLBACK
       observationCount: 0,
@@ -104,10 +116,12 @@ class ComputerSessionRegistry {
 
   allowTarget(sessionId, target) {
     const s = this._sessions.get(sessionId);
-    if (!s || !target) return;
+    const exact = copyExactWindowIdentity(target);
+    if (!s || !exact || s.status !== STATUS.ACTIVE) return false;
     const dup = s.allowedTargets.some(t =>
-      (t.hwnd && Number(t.hwnd) === Number(target.hwnd)) || (t.pid && Number(t.pid) === Number(target.pid) && !t.hwnd));
-    if (!dup) s.allowedTargets.push(target);
+      Number(t.hwnd) === exact.hwnd && Number(t.pid) === exact.pid);
+    if (!dup) s.allowedTargets.push(exact);
+    return true;
   }
 
   /**
@@ -118,17 +132,17 @@ class ComputerSessionRegistry {
     const s = this._sessions.get(sessionId);
     if (!s) return { ok: false, code: 'SESSION_NOT_FOUND', error: 'Computer 会话不存在' };
     if (TERMINAL.has(s.status)) return { ok: false, code: 'SESSION_TERMINATED', error: `Computer 会话已终态（${s.status}）` };
+    if (s.status !== STATUS.ACTIVE) return { ok: false, code: 'SESSION_NOT_ACTIVE', error: `Computer 会话未激活（${s.status}）` };
     if (!s.allowedTargets.length) {
       // First bind happens with the user's computer permission fresh — caller
       // must allowTarget() after the permission gate, then re-check.
       return { ok: false, code: 'TARGET_NOT_ALLOWED', error: '该 Computer 会话尚未绑定任何允许的目标窗口' };
     }
-    const ok = s.allowedTargets.some(t => {
-      if (t.hwnd && windowRef && Number(t.hwnd) === Number(windowRef.hwnd)) return true;
-      if (!t.hwnd && t.pid && windowRef && Number(t.pid) === Number(windowRef.pid)) return true;
-      if (!t.hwnd && !t.pid && t.title && windowRef && String(windowRef.title || '') === String(t.title)) return true;
-      return false;
-    });
+    // A recycled HWND belongs to a different authority domain. Both values
+    // must match the grant; titles and process names are audit metadata only.
+    const candidate = copyExactWindowIdentity(windowRef);
+    const ok = !!candidate && s.allowedTargets.some(t =>
+      Number(t.hwnd) === candidate.hwnd && Number(t.pid) === candidate.pid);
     if (!ok) {
       try {
         this.onProblem({
@@ -190,4 +204,30 @@ class ComputerSessionRegistry {
   }
 }
 
-module.exports = { ComputerSessionRegistry, COMPUTER_SESSION_STATUS: STATUS };
+module.exports = { ComputerSessionRegistry, COMPUTER_SESSION_STATUS: STATUS, bindSessionLifecycle };
+
+/**
+ * P3 Closure (C10) — the SINGLE wiring truth aligning ComputerSession
+ * lifecycle with the real Run state machine. A terminal Run always settles
+ * its Computer sessions into a real terminal state (never "Run completed but
+ * ComputerSession ACTIVE"). It observes the existing RunManager terminal
+ * entry — this is NOT a second Run listener framework.
+ *
+ * @param {object} deps { runManager, manager: ComputerManager }
+ * @returns {Function} unsubscribe
+ */
+function bindSessionLifecycle({ runManager, manager } = {}) {
+  if (!runManager || typeof runManager.onTerminal !== 'function' || !manager) return () => {};
+  return runManager.onTerminal(({ runId, status }) => {
+    try {
+      const sessions = manager.sessions ? manager.sessions.forRun(runId) : [];
+      for (const s of sessions) {
+        if (status === 'completed') {
+          void manager.completeSession(s.sessionId, { reason: 'Run completed' });
+        } else {
+          void manager.cancelSession(s.sessionId, { reason: `Run ${status}` });
+        }
+      }
+    } catch { /* lifecycle hooks must never break the Run state machine */ }
+  });
+}

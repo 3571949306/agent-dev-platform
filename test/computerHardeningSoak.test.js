@@ -165,7 +165,7 @@ test('P3 soak: focus theft fence 20/20', async (t) => {
       let stolen = false;
       for (let k = 0; k < 3 && !stolen; k++) { stolen = (await manager.focusWindowRef(thief)).ok; if (!stolen) await sleep(200); }
       if (!stolen) { setupFails++; continue; }
-      const k = await manager.pressKeys('x', { foregroundHwnd: target.hwnd });
+      const k = await manager.pressKeys('x', { foregroundHwnd: target.hwnd, foregroundPid: target.pid });
       const c = await manager.clickObserved({ observationId: obs.observationId, normalizedX: 0.5, normalizedY: 0.5 });
       // a fence VIOLATION (input executed despite stolen foreground) is fatal;
       // any fail-closed verdict counts as a proven round.

@@ -1,5 +1,61 @@
 # Test Report — Agent Dev Platform (v2.9.9)
 
+## v2.9.9 — P3 Computer Use Final Closure (2026-08-14)
+
+Starting point: `2942e0a`（v2.9.9 P3 Computer Use Production Hardening — BUILD，starting worktree DIRTY with the requested closure changes）。本轮把 Hardening 的每条承诺升级为**可重跑的机器证明**（C1–C10 闭包矩阵），关闭 C3 Target Fence、C7 action-point HWND+PID、Architecture 与 clean release 四个最终 blocker。Paid provider calls = 0；真实桌面矩阵只驱动 TEST-ONLY WPF fixture（`test/fixtures/computerFixture.ps1`），绝不驱动生产软件。
+
+Final status: **P3 Computer Use Production Hardening FROZEN**。package version 保持 2.9.9；architecture `frozenAtVersion` 保持 2.9.7。
+
+### 收口矩阵（C1–C10）
+
+| ID | 收口承诺 | 证明位置 | 机器证据 token |
+| --- | --- | --- | --- |
+| C1 | 已取消会话的 pending lock 动作执行 0（cancel 对 queued action 必胜，即使锁先释放） | `computerClosure.test.js` + production | `LOCK_CANCEL_PENDING_PRODUCT_REAL=20/20`、`SESSION_CANCEL_PENDING_ACTION_EXEC_REAL=0` |
+| C2 | fake runId → 全部 9 个 mutation 工具 `SESSION_UNKNOWN_RUN`，exec=0；rootRunId 只来自 RunManager lineage，绝不采信自报 | `computerClosure.test.js` | `SESSION_UNKNOWN_RUN=9/9`、lineage-only |
+| C3 | authority 是 exact HWND+PID pair 且只对 ACTIVE session 有效；授权 A ⇒ 对 B 的一切 mutation API（含 legacy、observation 走私、裸坐标）全部拒绝，跨窗执行 0 | unit + production | `TARGET_HWND_PID_AUTHORITY=PASS`、`SESSION_ACTIVE_TARGET_AUTHORITY=PASS`、`CROSS_SESSION_OBSERVATION_EXEC=0`、`CROSS_WINDOW_MUTATION_EXEC=0`、`LEGACY_TARGET_BYPASS_EXEC=0`、`RAW_COORD_CROSS_WINDOW_EXEC=0` |
+| C3.1 | 无 targetAuthorizer ⇒ 真实桌面 focus 拒绝（fail closed，绝不 default-allow）；授予 authorizer ⇒ 真实执行且 verified | production | `MISSING_AUTHORIZER_REAL_EXEC=0`、`AUTHORIZER_GRANTED_REAL_EXEC=PASS` |
+| C4 | computerGrounding 零 provider/secret 直面：只走 Model Router 选出的 `modelAdapter.decide`；架构策略对任何未来直连判 UNSAFE_DUPLICATE | `computerClosure.test.js` + `executionPathPolicy.js` | grounding 源扫描 0 直连 + 合成对抗用例全 BLOCKED |
+| C5 | grounding 提案自身执行 0 个 OS 动作（`executed:false` 不变量）；PermissionEngine deny/ask/allow 经唯一工具门 | `computerClosure.test.js` | `GROUNDING_PROPOSAL_DIRECT_EXEC=0` |
+| C6 | 未确认退出的 helper 绝不从注册表消失（0 假零）；registry 只反映真实静默 | `computerClosure.test.js`（psHost `_setExitWaiter` 测试缝） | `HELPER_REGISTRY_TRUTH` |
+| C7 | focus/click/keys/paste/UIA/screenshot helper 在实际 OS action point 同时验证 HWND+PID；错误 PID ⇒ `STALE_WINDOW`、exec 0；同名窗口关闭重开 20/20 绝不自动 retarget | unit + production | `ACTION_POINT_PID_MISMATCH=20/20`、`ACTION_POINT_PID_MISMATCH_VIOLATIONS=0`、`SAME_TITLE_RETARGET=20/20`、`SAME_TITLE_RETARGET_VIOLATIONS=0` |
+| C8 | psHost 是 Computer 唯一的子进程通道（`computer.js` 已从 execution-path 白名单移除）；`.small.png` 中间产物全路径残留 0 | `computerClosure.test.js` + production | `COMPUTER_CHILD_PROCESS_PATHS=1`、`COMPUTER_UNOWNED_HELPER=0`、`DOWNSAMPLE_TEMP_RESIDUE=0 (20/20)` |
+| C9 | 剪贴板事务跨 cancel 缝隙（A/B/C/D 四检查点）真实恢复原内容，tx 归 0 | production | `CLIPBOARD_REAL_CANCEL_RESTORE=20/20`、`CLIPBOARD_TRANSACTION_RESIDUE_REAL=0` |
+| C10 | Run 终态必须结清工具创建的会话；终局残留（helpers/sessions/lock/observations/tx/temp）全 0 | production | `SESSION_LIFECYCLE_PRODUCTION=PASS`、`CLOSURE_FINAL_RESIDUE=0` |
+
+Soak：`computerClosureSoak.test.js` 100 轮完整生命周期（创建→绑定→观察→围栏内允许/拒绝混合 mutation→取消/完成→残留审计），证明 `CLOSURE_SOAK=100/100` 且终局计数器全零。
+
+### 收口过程中发现并修复的真实问题（2026-08-14）
+
+1. **C9 恢复被取消信号吞掉（源码 bug）**：`pasteToTarget` 的 finally 恢复复用了调用方已 abort 的 `opts.signal`，abort 恰好落在恢复窗口时剪贴板停留在临时 payload（复现规律：i%4==3 轮必失败）。修复：恢复写入与调用方取消信号**隔离**（`restoreOpts.signal = null`）——"剪贴板 == 原内容"的保证不受取消影响。
+2. **C3.1 测试竞态**：fixture 窗口未出现即断言授权围栏，测到的是 `WINDOW_NOT_FOUND` 而非围栏。修复：断言前 `waitForWindow` 确认窗口真实存在——不削弱契约，只保证测量对象正确。
+3. **C3 测试几何重叠**：fixture 宽 600，B 置于 x=690 与授权窗口 A（[130,730]）重叠，"B 内裸坐标"合法落在 A 实时边界内导致围栏放行。修复：B 移至 x=900——围栏行为本身正确，是测试几何错误。
+4. **C3 HWND-only target authority（源码 bug）**：旧 registry 只按 HWND 比较，recycled HWND 可继承旧 PID 的 authority。修复：allowed target、bind 与 assert 全部使用 exact HWND+PID，并要求 session 已 ACTIVE；无 owner 的 observation 不能被新 session 收养。
+5. **C7 product key path 丢 PID / same-helper 缺 PID 可执行（源码 bug）**：`computer_press_keys` 曾只传 HWND。修复：product path 转发 resolved PID；所有 mutation helper 缺 PID fail closed，并在同一 PowerShell/native helper 内于实际 OS action 前复检 PID。
+6. **真实点击与重复 focus handoff 可靠性（源码 bug）**：高 DPI WPF 物理点击偶发命中移动前的 cursor location；重复 helper focus handoff 最终会失去 Windows foreground eligibility。修复：click 在有界 cursor settle 后于 mouse-down 前再次验证 HWND+PID+foreground；focus 在同一已验证 helper 内用有界 `AttachThreadInput`/`BringWindowToTop`，成功仍必须由 `GetForegroundWindow()==authorized HWND` 证明。
+
+### GUI 真话（panels.js）
+
+会话取消的 toast 只在 backend 真正完成 Session Cancel + 清理后出现；`residual>0` 或 `quiesced=false` 一律呈现为 ERROR + Problems（`COMPUTER_CANCEL_DEGRADED`），绝不提前报成功。
+
+### 发布门禁
+
+| 门禁 | 结果 |
+| --- | --- |
+| `test:computer-closure:production`（真实桌面，C1–C10） | **11/11 PASS / 0 fail**；`CROSS_WINDOW_MUTATION_EXEC=0 (denied=13)`、PID mismatch 20/20、same-title retarget 20/20、clipboard restore 20/20、final residue 0 |
+| `test:computer-closure`（确定性单测） | **22/22 PASS** |
+| `test:computer-closure:soak` | 1/1 PASS（`CLOSURE_SOAK=100/100`、`CROSS_WINDOW_EXEC=0`、`CANCEL_LATE_EXEC=0`、`RESIDUE=0`） |
+| `test:computer-hardening` | **17/17 PASS** |
+| `test:computer-hardening:production`（Scenario 1–11 + end state） | **15/15 PASS**；`COMPUTER_PRODUCTION_REPEAT=10/10` |
+| `test:computer-hardening:soak` | **6/6 PASS**；fixture 100/100（retries=1）；cancel/focus theft/stale move/lock 各 20/20，violations=0，focus setupFails=0 |
+| `test:architecture` | PASS（DEFAULT_DENY，UNSAFE_DUPLICATE=0；grounding 仅 `model.decide` routed-adapter consumer；Computer child process 仅 psHost） |
+| `test:architecture-policy` | 4/4 PASS（合成对抗全 BLOCKED、正向对照完好） |
+| `npm test` 全量回归 | **1788 tests：1787 pass / 0 fail / 1 skip**；唯一 skip 是已由另一测试文件替代的 Cline SDK bridge |
+| 全部 30 条 clean release 命令 | **PASS / 0 failure**；中途失败的诊断轮全部作废，修复后从 `npm test` 重新开始 |
+| `npm run e2e` | **159/159 PASS** |
+| `npm run dist` | **PASS**（NSIS + portable） |
+
+Paid provider calls = 0；Computer secret leaks = 0。终局 helpers/sessions/desktop lock/pending lock/observations/clipboard tx/temp/fixture processes 全部 0。P4 未开始。
+
 ## v2.9.9 — Phase B Final Productization & Systems Workbench (2026-08-13)
 
 Starting HEAD: `dab27613fd21955cd9e8997e47be3b9dd5b96097`（v2.9.8 包版本，architecture frozenAtVersion=2.9.7）。本轮完成 Phase B 剩余产品化（PART A 增量审计 + B15-B72），全部使用 fake network provider + real production runtime，paid provider calls = 0，无外部网络依赖。

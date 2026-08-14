@@ -135,6 +135,7 @@ class DesktopAgentBridge {
     this.state = 'idle';
     this.trace = [];
     this.targetHwnd = null; // P3 — verified foreground identity for input fencing
+    this.targetPid = null;
   }
 
   setState(state, detail = {}) {
@@ -172,31 +173,45 @@ class DesktopAgentBridge {
 
     if (this.cfg.inputMode !== 'keys' && this.cfg.inputMode !== 'clipboard') {
       try {
-        const r = await this.computer.setControlValue(title, text, { automationId: this.cfg.inputAutomationId || '' });
+        const r = await this.computer.setControlValue(title, text, {
+          automationId: this.cfg.inputAutomationId || '',
+          hwnd: this.targetHwnd,
+          pid: this.targetPid
+        });
         if (r && r.ok) return { ok: true, via: 'uia-value', attempts };
         attempts.push({ via: 'uia-value', error: (r && r.error) || 'ValuePattern 不可用' });
       } catch (e) { attempts.push({ via: 'uia-value', error: e.message }); }
     }
 
-    if (this.cfg.inputMode !== 'keys' && typeof this.computer.setClipboard === 'function') {
+    if (this.cfg.inputMode !== 'keys' &&
+      (typeof this.computer.pasteToTarget === 'function' || typeof this.computer.setClipboard === 'function')) {
       try {
-        const c = await this.computer.setClipboard(text);
-        if (c && c.ok !== false) {
-          // P3 compatibility fix: paste goes to the VERIFIED foreground window,
-          // never to whatever happens to hold focus.
-          const paste = await this.computer.pressKeys('^v', { foregroundHwnd: this.targetHwnd });
+        if (typeof this.computer.pasteToTarget === 'function' && this.targetHwnd && this.targetPid) {
+          // Production compatibility uses the canonical transaction: exact
+          // HWND+PID action fence plus restore-in-finally clipboard semantics.
+          const paste = await this.computer.pasteToTarget({
+            target: { hwnd: this.targetHwnd, pid: this.targetPid, title },
+            text
+          }, { signal: this.signal });
           if (paste && paste.ok !== false) return { ok: true, via: 'clipboard', attempts };
           attempts.push({ via: 'clipboard', error: (paste && paste.error) || '粘贴失败' });
         } else {
-          attempts.push({ via: 'clipboard', error: (c && c.error) || '写入剪贴板失败' });
+          const c = await this.computer.setClipboard(text);
+          if (c && c.ok !== false) {
+            const paste = await this.computer.pressKeys('^v', { foregroundHwnd: this.targetHwnd, foregroundPid: this.targetPid });
+            if (paste && paste.ok !== false) return { ok: true, via: 'clipboard', attempts };
+            attempts.push({ via: 'clipboard', error: (paste && paste.error) || '粘贴失败' });
+          } else {
+            attempts.push({ via: 'clipboard', error: (c && c.error) || '写入剪贴板失败' });
+          }
         }
       } catch (e) { attempts.push({ via: 'clipboard', error: e.message }); }
     }
 
     try {
       const t = typeof this.computer.typeText === 'function'
-        ? await this.computer.typeText(text, { foregroundHwnd: this.targetHwnd })
-        : await this.computer.pressKeys(String(text).replace(/[+^%~(){}\[\]]/g, m => '{' + m + '}'), { foregroundHwnd: this.targetHwnd });
+        ? await this.computer.typeText(text, { foregroundHwnd: this.targetHwnd, foregroundPid: this.targetPid })
+        : await this.computer.pressKeys(String(text).replace(/[+^%~(){}\[\]]/g, m => '{' + m + '}'), { foregroundHwnd: this.targetHwnd, foregroundPid: this.targetPid });
       if (t && t.ok !== false) return { ok: true, via: 'sendkeys', attempts };
       attempts.push({ via: 'sendkeys', error: (t && t.error) || '按键发送失败' });
     } catch (e) { attempts.push({ via: 'sendkeys', error: e.message }); }
@@ -205,7 +220,7 @@ class DesktopAgentBridge {
   }
 
   async submit() {
-    const r = await this.computer.pressKeys(this.cfg.submitKeys || '~', { foregroundHwnd: this.targetHwnd });
+    const r = await this.computer.pressKeys(this.cfg.submitKeys || '~', { foregroundHwnd: this.targetHwnd, foregroundPid: this.targetPid });
     this.setState('submitted', { ok: r && r.ok !== false });
     return r && r.ok !== false;
   }
@@ -429,7 +444,9 @@ class DesktopAgentBridge {
 
     const title = loc.window.title;
     this.setState('focusing', { title });
-    const focused = await this.computer.focusWindow(title);
+    const focused = typeof this.computer.focusWindowRef === 'function'
+      ? await this.computer.focusWindowRef(loc.window)
+      : await this.computer.focusWindow(title);
     if (focused && focused.ok === false) {
       const err = `无法聚焦窗口「${title}」：${focused.error || '未知原因'}`;
       this.setState('failed', { error: err });
@@ -438,6 +455,7 @@ class DesktopAgentBridge {
     // P3 compatibility fix: keep the VERIFIED window identity (HWND) so every
     // later keystroke is fenced to this exact window.
     this.targetHwnd = (loc.window && loc.window.hwnd) || (focused && focused.hwnd) || null;
+    this.targetPid = (loc.window && loc.window.pid) || (focused && focused.pid) || null;
 
     const baseline = (await this.readWindowText(title)) || '';
 

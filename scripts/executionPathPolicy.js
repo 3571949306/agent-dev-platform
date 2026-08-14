@@ -41,11 +41,12 @@ const EXECUTION_PATH_POLICY = Object.freeze({
       'src/agent/runtime.js',
       // External-Agent compatibility transport.
       'src/services/externalAgents.js',
-      // Vision fallback path.
-      'src/services/visionReader.js',
-      // P3 Computer vision grounding (Model Router → ProviderModelAdapter;
-      // exact narrow path — the Computer subsystem owns no provider client).
-      'src/services/computerGrounding.js'
+      // Vision fallback path (WorkBuddy desktop bridge, pre-P3 contract).
+      'src/services/visionReader.js'
+      // P3 Closure (C4/C4.1): src/services/computerGrounding.js was REMOVED
+      // from this list — Computer vision grounding now goes through the real
+      // Model Router → ProviderModelAdapter chain; any direct provider call
+      // inside the Computer subsystem is UNSAFE_DUPLICATE again.
     ]
   }),
 
@@ -56,7 +57,12 @@ const EXECUTION_PATH_POLICY = Object.freeze({
       // RuntimeModelResolver drives the routed adapter.
       'src/models/router/runtimeModelResolver.js',
       // Generator configuration generation.
-      'src/generator/generatorService.js'
+      'src/generator/generatorService.js',
+      // P3 Closure (C4): Computer vision grounding drives ONLY the routed
+      // ProviderModelAdapter (Model Router selection) — exact narrow path.
+      // It is NOT in the provider.streamResponse list: any direct provider
+      // call inside the Computer subsystem stays UNSAFE_DUPLICATE.
+      'src/services/computerGrounding.js'
     ],
     legacy: []
   }),
@@ -81,9 +87,10 @@ const EXECUTION_PATH_POLICY = Object.freeze({
       'src/agent/runtime/gitHelper.js',
       // Owned MCP / Computer / external-Agent transports.
       'src/services/mcp.js',
-      'src/services/computer.js',
       // P3 — the ONLY Computer child-process transport (hardened PowerShell
       // host: taskkill /T /F + bounded quiescence; exact path, no prefix).
+      // P3 Closure (C8): src/services/computer.js was REMOVED — the old
+      // spawnSync downsample helper moved into psHost ownership.
       'src/services/computer/psHost.js',
       'src/services/externalAgents.js',
       // Owned CLI adapter + supervisor transports.
@@ -186,7 +193,18 @@ const SYNTHETIC_ADVERSARIAL_CASES = Object.freeze([
   { signature: 'fs.write', filePath: 'src/hooks/hookFileWriter.js' },
   { signature: 'AgentHub.start', filePath: 'src/generator/hubLauncher.js' },
   { signature: 'model.decide', filePath: 'src/foo/newRuntime.js' },
-  { signature: 'runMainAgent', filePath: 'src/foo/secondMain.js' }
+  { signature: 'runMainAgent', filePath: 'src/foo/secondMain.js' },
+  // P3 Closure (C4.1/C33) — Computer subsystem duplicate-proof: a second
+  // provider client / process host / permission gate / router / runtime under
+  // src/services/computer/** must all fail closed, and Computer Grounding
+  // itself may never call provider.streamResponse directly again.
+  { signature: 'provider.streamResponse', filePath: 'src/services/computer/newProvider.js' },
+  { signature: 'provider.streamResponse', filePath: 'src/services/computerGrounding.js' },
+  { signature: 'provider.streamResponse', filePath: 'src/future/computerVisionClient.js' },
+  { signature: 'child_process', filePath: 'src/services/computer/newProcessHost.js' },
+  { signature: 'PermissionEngine.evaluate', filePath: 'src/services/computer/newPermission.js' },
+  { signature: 'model.decide', filePath: 'src/services/computer/newRouter.js' },
+  { signature: 'runMainAgent', filePath: 'src/services/computer/newRuntime.js' }
 ]);
 
 /** Positive controls: the policy must still allow the frozen known paths. */

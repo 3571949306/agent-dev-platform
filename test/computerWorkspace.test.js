@@ -43,28 +43,33 @@ test('B18.1 availability on this machine comes from a real probe (no guessed REA
   console.log('COMPUTER_AVAILABILITY_TRUTH=PASS');
 });
 
-test('B18.4 action history is bounded and records real actions only', () => {
+test('B18.4 action history is bounded and records real actions only (redacted detail)', () => {
   const m = new ComputerManager();
-  for (let i = 0; i < 250; i++) m.recordAction('screenshot', { i }, true);
+  for (let i = 0; i < 250; i++) m.recordAction('screenshot', { method: 'VIRTUAL_SCREEN_COPY' }, true);
   const history = m.history();
-  assert.strictEqual(history.length, 100, 'history bounded at 100');
-  assert.strictEqual(history[0].detail.i, 249, 'newest first');
+  assert.strictEqual(history.length, 200, 'history bounded at 200');
+  assert.strictEqual(history[0].detail.method, 'VIRTUAL_SCREEN_COPY', 'newest first');
+  // P3 redaction: free-form detail keys (typed text etc.) never reach the audit
+  m.recordAction('input_text', { method: 'uia-value', textLength: 7, secret: 'COMPUTER_SECRET_X' }, true);
+  const json = JSON.stringify(m.history(5));
+  assert.ok(!json.includes('COMPUTER_SECRET_X'), 'unsanitized detail must never be audited');
   console.log('COMPUTER_ACTION_HISTORY_BOUNDED=PASS');
 });
 
-test('B18.5 stop really cancels the active child process (residue = 0)', async () => {
+test('B18.5 stop really cancels the active child process tree (residue = 0, confirmed exit)', async () => {
   if (process.platform !== 'win32') { console.log('COMPUTER_STOP=SKIPPED_NON_WINDOWS'); return; }
   const { ps } = require('../src/services/computer');
   const activeBefore = manager.activeCount();
 
   // 真实长进程（30 秒 sleep）走同一 ps 通道 → 登记进活动子进程集合；
-  // Stop 必须让它立刻消失，残留 = 0。
+  // Stop 必须让它真实死亡（taskkill /T /F + 确认退出），残留 = 0。
   const longRunning = ps('Start-Sleep -Seconds 30', 60000);
   for (let i = 0; i < 400 && manager.activeCount() === activeBefore; i++) await new Promise(r => setTimeout(r, 10));
   assert.ok(manager.activeCount() > activeBefore, 'a real child process is active');
 
-  const stop = manager.stopActive();
+  const stop = await manager.stopActive();
   assert.ok(stop.ok && stop.stopped >= 1, 'stop reports real terminated count');
+  assert.strictEqual(stop.residual, 0, 'no residual helpers after confirmed quiescence');
   assert.strictEqual(manager.activeCount(), 0, 'residue after stop must be 0');
 
   // 被 cancel 的 30s 长进程必须立刻结算（绝不允许跑满 30s）

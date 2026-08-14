@@ -246,6 +246,10 @@ export const api = {
   computerHistory: (limit) => call('computer:history', limit),
   computerActive: () => call('computer:active'),
   computerStop: () => call('computer:stop'),
+  // P3 Computer Hardening — 会话身份 / 诊断 / 真实会话取消
+  computerSessions: () => call('computer:sessions'),
+  computerDiagnostics: () => call('computer:diagnostics'),
+  computerSessionCancel: (sessionId) => call('computer:session-cancel', sessionId),
   browserStatus: () => call('browser:status'),
 
   // v2.7.0 — Agent Integration Hub

@@ -20,6 +20,9 @@ const SCOPES = [
   'network',
   'browser',
   'computer',
+  // P3 Computer Hardening — high-risk sub-scopes (default: ask, never implied)
+  'computer.sensitive_input',   // writing into IsPassword fields
+  'computer.raw_coordinates',   // deprecated blind coordinate clicks
   'clipboard',
   'mcp',
   'subagent'
@@ -41,6 +44,8 @@ const DEFAULT_POLICY = {
   'network': 'allow',
   'browser': 'ask',
   'computer': 'ask',
+  'computer.sensitive_input': 'ask',
+  'computer.raw_coordinates': 'ask',
   'clipboard': 'ask',
   'mcp': 'allow',
   'subagent': 'allow'

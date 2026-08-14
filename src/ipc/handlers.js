@@ -81,7 +81,12 @@ const mcpToolMap = new Map();
 const dynamicTools = new Map();
 
 for (const [n, fn] of Object.entries(browser.execs)) dynamicTools.set(n, { def: browser.defs.find(d => d.name === n), exec: fn, permission: 'computer', source: 'browser' });
-for (const [n, fn] of Object.entries(computer.execs)) dynamicTools.set(n, { def: computer.defs.find(d => d.name === n), exec: fn, permission: 'computer', source: 'computer' });
+// P3 — each computer tool carries its OWN permission scope (computer /
+// computer.raw_coordinates …); the gate must honour it, not flatten to 'computer'.
+for (const [n, fn] of Object.entries(computer.execs)) {
+  const def = computer.defs.find(d => d.name === n);
+  dynamicTools.set(n, { def, exec: fn, permission: (def && def.permission) || 'computer', source: 'computer' });
+}
 
 // v2.9.3 — 平台可用工具名（builtin + MCP + dynamic）。Skill 解析用它做 R4 可用性校验；
 // 必须是函数：mcpToolMap 在 register(window) 时才重建，调用时再求值。
@@ -331,6 +336,46 @@ agentHub.register(claudeCodeAdapter);
 // v2.9.9 Phase B Final（B21）— Problems Center 唯一真源：持久化、去重、
 // dismiss != resolved。所有子系统的问题都上报到这里，绝不停留在 toast。
 const problemCenter = (require('../services/problemCenter').createProblemCenter)({ store, emit });
+
+/* P3 Computer Use Hardening — Computer runtime wiring.
+ * Sessions root their identity in the REAL RunManager lineage; every fence
+ * failure lands in the Problems Center; sensitive input / new-target prompts
+ * go through the same permission channel as tools (no channel ⇒ denied). */
+const { ComputerSessionRegistry } = require('../services/computerSession');
+const { ComputerGroundingService } = require('../services/computerGrounding');
+const computerSessions = new ComputerSessionRegistry({
+  runManager,
+  onProblem: (p) => { try { problemCenter.report(p); } catch { /* source/dedup guards */ } }
+});
+computer.manager.sessions = computerSessions;
+computer.manager.onProblem = (p) => { try { problemCenter.report(p); } catch { /* non-fatal */ } };
+computer.manager.sensitiveAuthorizer = async (req) => {
+  try {
+    const d = await requestPermission({
+      scope: 'computer.sensitive_input', tool: 'computer_set_element_value',
+      args: { reason: (req && req.reason) || 'password_input' },
+      agent: 'Computer', conversationId: (req && req.conversationId) || null, taskId: null,
+      risk: '向密码/敏感输入框写入内容（内容不会被记录或回读）'
+    });
+    return !!(d && d.decision === 'allow');
+  } catch { return false; }
+};
+computer.manager.targetAuthorizer = async (req) => {
+  try {
+    const d = await requestPermission({
+      scope: 'computer', tool: 'computer_focus_window',
+      args: { target: (req && req.windowRef && req.windowRef.title) || '' },
+      agent: 'Computer', conversationId: null, taskId: null,
+      risk: `Computer 会话请求操作新窗口「${(req && req.windowRef && req.windowRef.title) || '?'}」`
+    });
+    return !!(d && d.decision === 'allow');
+  } catch { return false; }
+};
+// Vision grounding goes through Model Router → ProviderModelAdapter (pickVisionModel),
+// never a second provider client inside the Computer subsystem.
+const computerGrounding = new ComputerGroundingService({
+  resolveReader: () => { try { return pickVisionModel({ store, providers }, {}); } catch { return null; } }
+});
 
 const productDiagnostics = createProductDiagnostics({
   version: require('../../package.json').version,
@@ -1629,7 +1674,33 @@ function register(window) {
   reg('computer:availability', () => computer.manager.availability());
   reg('computer:history', (limit) => computer.manager.history(limit || 100));
   reg('computer:active', () => ({ active: computer.manager.activeCount() }));
-  reg('computer:stop', () => computer.manager.stopActive());
+  reg('computer:stop', async () => {
+    // P3 — Stop = cancel every Computer session in the right order (helpers,
+    // clipboard, quiescence, lock), not a blind kill of one PowerShell.
+    for (const s of computerSessions.activeList()) {
+      try { await computer.manager.cancelSession(s.sessionId, { reason: '用户停止' }); } catch { /* best effort */ }
+    }
+    const r = await computer.manager.stopActive();
+    computerSessions && computerSessions.activeList().forEach(s => computerSessions.setStatus(s.sessionId, 'CANCELLED'));
+    return r;
+  });
+  // P3 — Computer sessions / diagnostics / grounding（Renderer 只读 + 取消）
+  reg('computer:sessions', () => computerSessions.summary());
+  reg('computer:diagnostics', () => computer.manager.diagnostics());
+  reg('computer:session-cancel', async (sessionId) => computer.manager.cancelSession(sessionId, { reason: '用户停止' }));
+  reg('computer:ground', async (req) => {
+    const g = await computerGrounding.ground(req || {});
+    if (!g.ok) return g;
+    // The model only proposes; the backend re-validates observation + bounds,
+    // then executes through the same fenced click path.
+    const click = await computer.manager.clickObserved({
+      observationId: g.grounding.observationId,
+      normalizedX: g.grounding.normalizedX,
+      normalizedY: g.grounding.normalizedY,
+      sessionId: (req && req.sessionId) || null
+    });
+    return { ok: click.ok !== false, grounding: g.grounding, click };
+  });
   reg('browser:status', () => browser.manager.status());
 
   // ---------- events / logs / system ----------
@@ -1676,10 +1747,14 @@ function register(window) {
     })();
     return { accepted: true, runId, conversationId, status: 'preparing' };
   });
-  ipcMain.handle('agent:stop', (_e, { conversationId }) => {
+  ipcMain.handle('agent:stop', async (_e, { conversationId }) => {
     const ac = activeRuns.get(conversationId);
     if (ac) ac.abort();
     activeRuns.delete(conversationId);
+    // P3 — Stop must also quiesce the desktop: cancel this conversation's
+    // Computer sessions (helpers + clipboard + lock) before returning, so the
+    // user pressing Stop can never be raced by a lingering click.
+    try { await computer.manager.cancelForConversation(conversationId); } catch { /* best effort */ }
     // v2.3.1 (P0-3): 终态由 RunManager 唯一宣布；若 Run 已终态（例如刚好完成），
     // cancel 会被忽略，保证 cancelled 后绝不出现 completed。
     const run = runManager.cancelByConversation(conversationId);

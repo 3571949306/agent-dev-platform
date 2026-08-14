@@ -41,6 +41,9 @@
     "test:reliability:soak": "node scripts/run-tests.js reliabilitySoak",
     "test:gui": "node scripts/run-tests.js guiWorkbench",
     "test:gui:production": "node scripts/gui-production-smoke.js",
+    "test:computer-hardening": "node scripts/run-tests.js computerHardening.test",
+    "test:computer-hardening:production": "node scripts/run-tests.js computerHardeningProduction",
+    "test:computer-hardening:soak": "node scripts/run-tests.js computerHardeningSoak",
     "icon": "node scripts/make-icon.js"
   },
   "dependencies": {

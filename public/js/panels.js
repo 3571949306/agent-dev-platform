@@ -527,13 +527,14 @@ async function renderComputer() {
   pane.innerHTML = `<div class="cp">
       <div class="cp-bar">
         <span class="chip" id="cp-status">检测中…</span>
+        <button class="btn small" id="cp-sessions">会话</button>
         <button class="btn small" id="cp-win">列出窗口</button>
         <button class="btn small" id="cp-shot">刷新截图</button>
         <button class="btn small" id="cp-history">动作历史</button>
         <button class="btn small danger" id="cp-stop" disabled>Stop</button>
         <span class="muted" id="cp-browser"></span>
       </div>
-      <div class="cp-out" id="cp-out"><div class="muted">用于查看「电脑操作」能力：窗口列表、截图、动作历史。本页面的存在不代表主智能体拥有 Computer 能力：普通编码任务的 Computer/Browser exposure 为 OFF，只有委派 Computer Specialist 时才按 Definition/Permission 策略提供。</div></div>
+      <div class="cp-out" id="cp-out"><div class="muted">用于查看「电脑操作」能力：会话身份、窗口列表、截图、动作历史。本页面的存在不代表主智能体拥有 Computer 能力：普通编码任务的 Computer/Browser exposure 为 OFF，只有委派 Computer Specialist 时才按 Definition/Permission 策略提供。</div></div>
     </div>`;
 
   const refreshActive = async () => {
@@ -565,14 +566,45 @@ async function renderComputer() {
     addProblem(`Computer 能力异常：${e.message}`, { code: 'COMPUTER_PANEL_ERROR', relatedKey: 'computer-panel' });
   }
 
+  // P3 — 会话卡片：让用户一眼知道 Agent 正在操作哪个窗口、什么模式、安不安全
+  const renderSessions = async () => {
+    $('#cp-out').innerHTML = '<div class="muted">读取会话…</div>';
+    try {
+      const [sessions, diag] = await Promise.all([api.computerSessions(), api.computerDiagnostics()]);
+      const list = Array.isArray(sessions) ? sessions : [];
+      const safety = [];
+      if (diag && diag.desktopLock) safety.push(`目标已锁定（${diag.desktopLock.sessionId || ''}）`);
+      if (diag && diag.activeHelpers > 0) safety.push(`活动辅助进程 ${diag.activeHelpers}`);
+      if (diag && diag.tempResidue > 0) safety.push(`临时截图残留 ${diag.tempResidue}`);
+      const head = `<div class="cp-safety"><b>安全状态：</b>${safety.length ? safety.map(s => `<span class="chip small">${esc(s)}</span>`).join(' ') : '<span class="chip ok small">空闲</span>'}
+        <span class="muted small">观察：${diag && diag.lastObservationAt ? esc(fmtTime(diag.lastObservationAt)) : '无'}　最后动作：${diag && diag.lastActionAt ? esc(fmtTime(diag.lastActionAt)) : '无'}</span></div>`;
+      if (!list.length) { $('#cp-out').innerHTML = head + '<div class="empty" data-page-state="empty">当前没有活动 Computer 会话</div>'; return; }
+      const MODE_LABEL = { UIA: 'UI 自动化', VISION: '视觉定位', COORDINATE_FALLBACK: '坐标回退' };
+      const cards = list.map(s => `<div class="card" style="margin:6px 0">
+        <div class="acard-h"><b>会话 ${esc((s.sessionId || '').slice(-6))}</b>
+          <span class="chip ${s.status === 'ACTIVE' ? 'ok' : 'small'}">${esc(s.status)}</span>
+          <span class="chip small">${esc(MODE_LABEL[s.mode] || s.mode || '')}</span>
+          <button class="btn tiny danger" data-cancel="${esc(s.sessionId)}">取消</button></div>
+        <div class="small">Run：${esc(s.runId || '—')}　Agent：${esc(s.ownerAgentId || '—')}　时长：${Math.round((s.durationMs || 0) / 1000)}s　观察×${s.observationCount || 0}　动作×${s.actionCount || 0}</div>
+        <div class="small">绑定窗口：${s.target ? `<b>${esc(s.target.title || '')}</b>（${esc(s.target.process || '')}，HWND ${esc(s.target.hwnd || '')}）` : '<span class="muted">未绑定</span>'}</div>
+        ${s.lastErrorCode ? `<div class="small"><span class="chip bad small">${esc(s.lastErrorCode)}</span></div>` : ''}
+      </div>`).join('');
+      $('#cp-out').innerHTML = head + cards;
+      $('#cp-out').querySelectorAll('[data-cancel]').forEach(b => b.onclick = async () => {
+        try { await api.computerSessionCancel(b.dataset.cancel); toast('会话已取消（辅助进程/剪贴板/锁已清理）', 'ok'); renderSessions(); refreshActive(); } catch (e) { toast(e.message, 'error'); }
+      });
+    } catch (e) { $('#cp-out').innerHTML = `<div class="err">${esc(e.message)}</div>`; }
+  };
+  $('#cp-sessions').onclick = renderSessions;
+
   $('#cp-win').onclick = async () => {
     $('#cp-out').innerHTML = '<div class="muted">读取中…</div>';
     try {
       const r = await api.computerWindows();
       const arr = Array.isArray(r) ? r : (r && r.windows) || (r && r.data) || [];
       const list = Array.isArray(arr) ? arr : [arr];
-      $('#cp-out').innerHTML = `<table class="tbl"><thead><tr><th>窗口标题</th><th>进程</th><th>PID</th><th>前台</th><th></th></tr></thead><tbody>${
-        list.map(w => `<tr><td>${esc(w.Title || w.title || '')}</td><td class="mono small">${esc(w.Process || w.process || '')}</td><td>${esc(w.Id || w.pid || '')}</td><td>${(w.Focused || w.focused) ? '<span class="chip ok small">focused</span>' : ''}</td><td><button class="btn tiny" data-focus="${esc(w.Title || w.title || '')}">聚焦</button></td></tr>`).join('')
+      $('#cp-out').innerHTML = `<table class="tbl"><thead><tr><th>窗口标题</th><th>进程</th><th>PID</th><th>HWND</th><th>DPI</th><th>前台</th><th></th></tr></thead><tbody>${
+        list.map(w => `<tr><td>${esc(w.Title || w.title || '')}</td><td class="mono small">${esc(w.Process || w.process || w.processName || '')}</td><td>${esc(w.Id || w.pid || '')}</td><td class="mono small">${esc(w.hwnd || '')}</td><td>${esc(w.dpi || '')}</td><td>${(w.Focused || w.focused || w.foreground) ? '<span class="chip ok small">focused</span>' : ''}</td><td><button class="btn tiny" data-focus="${esc(w.Title || w.title || '')}">聚焦</button></td></tr>`).join('')
         }</tbody></table>`;
       $('#cp-out').querySelectorAll('[data-focus]').forEach(b => b.onclick = () => api.computerFocus(b.dataset.focus).then(() => { toast('已聚焦'); refreshActive(); }).catch(e => toast(e.message, 'error')));
       refreshActive();
@@ -587,25 +619,31 @@ async function renderComputer() {
       refreshActive();
     } catch (e) { $('#cp-out').innerHTML = `<div class="err">${esc(e.message)}</div>`; }
   };
-  // B18.4 — 动作历史（Focus/Click/Input/Key/Screenshot…）
+  // B18.4 / P3 — 动作历史（Focus/Click/Input/Invoke/Screenshot/Verify；不展示敏感输入正文）
   $('#cp-history').onclick = async () => {
     $('#cp-out').innerHTML = '<div class="muted">读取中…</div>';
     try {
       const list = await api.computerHistory(100);
-      $('#cp-out').innerHTML = list.length ? `<table class="tbl"><thead><tr><th>时间</th><th>动作</th><th>目标</th><th>结果</th></tr></thead><tbody>${
-        list.map(h => `<tr><td class="small muted">${esc(fmtTime(h.at))}</td><td class="mono small">${esc(h.action)}</td><td class="small">${esc(h.detail && h.detail.title || (h.detail && h.detail.x !== undefined ? `(${h.detail.x},${h.detail.y})` : '') || '—')}</td><td>${h.ok ? '<span class="chip ok small">ok</span>' : `<span class="chip bad small" title="${esc(h.error || '')}">failed</span>`}</td></tr>`).join('')
+      $('#cp-out').innerHTML = list.length ? `<table class="tbl"><thead><tr><th>时间</th><th>动作</th><th>目标</th><th>方式</th><th>结果</th></tr></thead><tbody>${
+        list.map(h => {
+          const okFlag = h.outcome ? (h.outcome !== 'FAILED') : h.ok;
+          const outcomeLabel = h.outcome || (h.ok ? 'EXECUTED' : 'FAILED');
+          const target = (h.detail && h.detail.title) || (h.targetProcess || '') || (h.detail && h.detail.x !== undefined ? `(${h.detail.x},${h.detail.y})` : '') || (h.targetHwnd ? `HWND ${h.targetHwnd}` : '—');
+          return `<tr><td class="small muted">${esc(fmtTime(h.at))}</td><td class="mono small">${esc(h.action)}</td><td class="small">${esc(target)}</td><td class="small muted">${esc((h.detail && h.detail.method) || h.method || '—')}</td><td>${okFlag ? `<span class="chip ok small">${esc(outcomeLabel)}</span>` : `<span class="chip bad small" title="${esc(h.errorCode || h.error || '')}">${esc(h.errorCode || 'FAILED')}</span>`}</td></tr>`;
+        }).join('')
       }</tbody></table>` : '<div class="empty" data-page-state="empty">还没有 computer 动作记录</div>';
     } catch (e) { $('#cp-out').innerHTML = `<div class="err">${esc(e.message)}</div>`; }
   };
-  // B18.5 — Stop 必须真实 cancel（终止活动子进程）
+  // B18.5 / P3 — Stop 绑定真实 ComputerSession cancel（辅助进程树 + 剪贴板 + 锁）
   $('#cp-stop').onclick = async () => {
     try {
       const r = await api.computerStop();
-      toast(`已终止 ${r.stopped} 个活动 computer 操作`, 'ok');
+      toast(`已终止 ${r.stopped} 个活动 computer 操作${r.residual ? `（残留 ${r.residual}）` : ''}`, r.residual ? 'error' : 'ok');
       refreshActive();
     } catch (e) { toast(e.message, 'error'); }
   };
   refreshActive();
+  renderSessions();
   try {
     const b = await api.browserStatus();
     $('#cp-browser').textContent = `浏览器：${b.installed ? 'Playwright 已安装' : '未安装 playwright'}${b.launched ? '（已启动）' : ''}`;

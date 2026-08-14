@@ -42,7 +42,10 @@ const EXECUTION_PATH_POLICY = Object.freeze({
       // External-Agent compatibility transport.
       'src/services/externalAgents.js',
       // Vision fallback path.
-      'src/services/visionReader.js'
+      'src/services/visionReader.js',
+      // P3 Computer vision grounding (Model Router → ProviderModelAdapter;
+      // exact narrow path — the Computer subsystem owns no provider client).
+      'src/services/computerGrounding.js'
     ]
   }),
 
@@ -79,6 +82,9 @@ const EXECUTION_PATH_POLICY = Object.freeze({
       // Owned MCP / Computer / external-Agent transports.
       'src/services/mcp.js',
       'src/services/computer.js',
+      // P3 — the ONLY Computer child-process transport (hardened PowerShell
+      // host: taskkill /T /F + bounded quiescence; exact path, no prefix).
+      'src/services/computer/psHost.js',
       'src/services/externalAgents.js',
       // Owned CLI adapter + supervisor transports.
       'src/agents/adapters/cliAgentAdapter.js',

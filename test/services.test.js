@@ -184,9 +184,15 @@ test('Computer: 聚焦不存在的窗口返回结构化失败而不是崩溃', a
 
 test('Computer: 工具层把失败规范化为 {ok:false,error}', async () => {
   const { defs, execs } = require('../src/services/computer').createComputerTools();
-  assert.ok(defs.every(d => d.permission === 'computer'));
+  // P3: canonical tools stay on scope 'computer'; only the DEPRECATED raw
+  // coordinate click requires the explicit high-risk sub-scope.
+  assert.ok(defs.every(d => d.permission === 'computer' || d.permission === 'computer.raw_coordinates'));
+  const raw = defs.find(d => d.name === 'computer_click_at');
+  assert.strictEqual(raw.permission, 'computer.raw_coordinates', 'raw click gated by explicit scope');
+  assert.strictEqual(raw.deprecated, true, 'raw click marked deprecated');
   const r = await execs.computer_get_ui_tree({}, { title: '绝对不存在的窗口标题-zzz' });
   assert.strictEqual(r.ok, false);
+  assert.ok(r.error && r.error.code, 'normalized {ok:false,error{code}}');
 });
 
 /* ------------------------------------------------------- External agents */

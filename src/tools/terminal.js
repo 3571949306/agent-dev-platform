@@ -7,6 +7,7 @@ const { spawn } = require('child_process');
 const path = require('path');
 const { guard, PathGuardError } = require('../security/pathguard');
 const { analyzeCommandRisk } = require('../security/commandRiskAnalyzer');
+const { authorizeSystemAction } = require('../security/systemIntentGate');
 
 function ok(data) { return { ok: true, data }; }
 function fail(code, message, retryable = false) { return { ok: false, error: { code, message, retryable } }; }
@@ -233,6 +234,18 @@ const tools = [
     },
     async exec(ctx, args) {
       try {
+        // P3 P0 safety — system-level actions (shutdown/restart/format/…) require
+        // the CURRENT user request + explicit destructive confirmation. Stale
+        // history / model suggestions never count; without a confirm channel the
+        // gate fails closed (spawn = 0), even with an `always` grant.
+        const gate = await authorizeSystemAction({
+          command: args.command,
+          currentUserMessage: ctx.currentUserMessage,
+          confirm: ctx.confirmSystemAction || null
+        });
+        if (!gate.allowed) {
+          return fail(gate.code || 'SYSTEM_ACTION_DENIED', gate.error || '系统级动作被拦截', false);
+        }
         const cwd = guard(ctx.projectRoot, args.cwd || '.');
         const runId = 'run_' + Math.random().toString(36).slice(2, 10);
         if (ctx.emit) ctx.emit('terminal_start', { runId, command: args.command, cwd });

@@ -5,11 +5,11 @@
 > 一切权威在 main 进程：唯一执行真源、唯一权限真源（PermissionEngine）、
 > 唯一模型路由真源（Model Router）、唯一终端真源、唯一密钥边界（DPAPI）。
 
-共 193 条 Renderer 使用的 IPC 通道。
+共 196 条 Renderer 使用的 IPC 通道。
 
 | 分类 | 语义 | 通道数 |
 |---|---|---|
-| READ | 对应 backend store / service | 124 |
+| READ | 对应 backend store / service | 127 |
 | WRITE | 对应 backend store | 38 |
 | RUN | Main Agent Runtime / Provider / Terminal Runtime | 13 |
 | CANCEL | RunManager / TerminalManager / Workflow Runtime | 9 |
@@ -33,7 +33,10 @@
 | `checkpoints:list` | renderer → main（invoke/handle，请求-响应） |
 | `computer:active` | renderer → main（invoke/handle，请求-响应） |
 | `computer:availability` | renderer → main（invoke/handle，请求-响应） |
+| `computer:diagnostics` | renderer → main（invoke/handle，请求-响应） |
 | `computer:history` | renderer → main（invoke/handle，请求-响应） |
+| `computer:session-cancel` | renderer → main（invoke/handle，请求-响应） |
+| `computer:sessions` | renderer → main（invoke/handle，请求-响应） |
 | `connections:getDefaults` | renderer → main（invoke/handle，请求-响应） |
 | `connections:list` | renderer → main（invoke/handle，请求-响应） |
 | `connections:models` | renderer → main（invoke/handle，请求-响应） |

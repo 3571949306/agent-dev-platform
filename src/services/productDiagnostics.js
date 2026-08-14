@@ -221,12 +221,36 @@ function createProductDiagnostics(deps = {}) {
       report.computerUse = { status: 'UNKNOWN', reason: '未探测', lastCheckedAt: checkedAt };
     } else {
       try {
-        const result = await computerManager.listWindows();
-        report.computerUse = result && result.ok === true
-          ? { status: 'AVAILABLE', windowCount: Array.isArray(result.windows) ? result.windows.length : 0, lastCheckedAt: checkedAt }
-          : { status: 'UNAVAILABLE', error: result && result.error || 'Window discovery failed.', lastCheckedAt: checkedAt };
-        if (report.computerUse.status === 'UNAVAILABLE') {
-          reportProblem({ severity: 'WARNING', source: 'Computer', code: 'COMPUTER_PROBE_ERROR', message: String(report.computerUse.error), relatedKey: 'computer-probe' });
+        // P3 — truth over READY: availability probe + interactive-desktop probe
+        // + live runtime residue (sessions / lock / helpers / temp screenshots).
+        const avail = typeof computerManager.availability === 'function' ? await computerManager.availability() : null;
+        const diag = typeof computerManager.diagnostics === 'function' ? computerManager.diagnostics() : {};
+        const interactive = !!(avail && avail.interactiveDesktop);
+        const base = avail && avail.status === 'AVAILABLE' ? 'AVAILABLE' : (avail && avail.status) || 'UNAVAILABLE';
+        report.computerUse = {
+          status: base,
+          // UIA 可用但无交互桌面（session 0 / 无前台）绝不是 READY
+          interactive,
+          effectiveStatus: base === 'AVAILABLE' && !interactive ? 'AVAILABLE_NON_INTERACTIVE' : base,
+          windowCount: null,
+          activeSessions: diag.activeSessions || 0,
+          desktopLock: diag.desktopLock || null,
+          desktopLockPending: diag.desktopLockPending || 0,
+          activeHelpers: diag.activeHelpers || 0,
+          lastObservationAt: diag.lastObservationAt || null,
+          lastActionAt: diag.lastActionAt || null,
+          tempResidue: diag.tempResidue || 0,
+          lastCheckedAt: checkedAt
+        };
+        try {
+          const result = await computerManager.listWindows();
+          if (result && result.ok === true) report.computerUse.windowCount = Array.isArray(result.windows) ? result.windows.length : 0;
+        } catch { /* window count is informational only */ }
+        if (report.computerUse.status === 'UNAVAILABLE' || report.computerUse.status === 'ERROR') {
+          reportProblem({ severity: 'WARNING', source: 'Computer', code: 'COMPUTER_PROBE_ERROR', message: String((avail && avail.reason) || 'Window discovery failed.'), relatedKey: 'computer-probe' });
+        }
+        if ((diag.tempResidue || 0) > 0) {
+          reportProblem({ severity: 'WARNING', source: 'Computer', code: 'COMPUTER_RESIDUE', message: `截图临时文件残留 ${diag.tempResidue} 个`, relatedKey: 'computer-temp-residue' });
         }
       } catch (error) {
         report.computerUse = { status: 'UNAVAILABLE', error: error.message, lastCheckedAt: checkedAt };

@@ -3,7 +3,7 @@
 const MUTATION_SCOPES = new Set([
   'filesystem.write', 'filesystem.delete', 'filesystem.outside_workspace',
   'terminal.write', 'terminal.dangerous', 'terminal.admin', 'git.write',
-  'computer', 'clipboard'
+  'computer', 'computer.sensitive_input', 'computer.raw_coordinates', 'clipboard'
 ]);
 
 class DynamicPermissionEngine {

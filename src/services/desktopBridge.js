@@ -134,6 +134,7 @@ class DesktopAgentBridge {
     this.vision = opts.visionReader || null;
     this.state = 'idle';
     this.trace = [];
+    this.targetHwnd = null; // P3 — verified foreground identity for input fencing
   }
 
   setState(state, detail = {}) {
@@ -181,7 +182,9 @@ class DesktopAgentBridge {
       try {
         const c = await this.computer.setClipboard(text);
         if (c && c.ok !== false) {
-          const paste = await this.computer.pressKeys('^v');
+          // P3 compatibility fix: paste goes to the VERIFIED foreground window,
+          // never to whatever happens to hold focus.
+          const paste = await this.computer.pressKeys('^v', { foregroundHwnd: this.targetHwnd });
           if (paste && paste.ok !== false) return { ok: true, via: 'clipboard', attempts };
           attempts.push({ via: 'clipboard', error: (paste && paste.error) || '粘贴失败' });
         } else {
@@ -192,8 +195,8 @@ class DesktopAgentBridge {
 
     try {
       const t = typeof this.computer.typeText === 'function'
-        ? await this.computer.typeText(text)
-        : await this.computer.pressKeys(String(text).replace(/[+^%~(){}\[\]]/g, m => '{' + m + '}'));
+        ? await this.computer.typeText(text, { foregroundHwnd: this.targetHwnd })
+        : await this.computer.pressKeys(String(text).replace(/[+^%~(){}\[\]]/g, m => '{' + m + '}'), { foregroundHwnd: this.targetHwnd });
       if (t && t.ok !== false) return { ok: true, via: 'sendkeys', attempts };
       attempts.push({ via: 'sendkeys', error: (t && t.error) || '按键发送失败' });
     } catch (e) { attempts.push({ via: 'sendkeys', error: e.message }); }
@@ -202,7 +205,7 @@ class DesktopAgentBridge {
   }
 
   async submit() {
-    const r = await this.computer.pressKeys(this.cfg.submitKeys || '~');
+    const r = await this.computer.pressKeys(this.cfg.submitKeys || '~', { foregroundHwnd: this.targetHwnd });
     this.setState('submitted', { ok: r && r.ok !== false });
     return r && r.ok !== false;
   }
@@ -432,6 +435,9 @@ class DesktopAgentBridge {
       this.setState('failed', { error: err });
       return this.result('failed', '', { errors: [err], window: title });
     }
+    // P3 compatibility fix: keep the VERIFIED window identity (HWND) so every
+    // later keystroke is fenced to this exact window.
+    this.targetHwnd = (loc.window && loc.window.hwnd) || (focused && focused.hwnd) || null;
 
     const baseline = (await this.readWindowText(title)) || '';
 

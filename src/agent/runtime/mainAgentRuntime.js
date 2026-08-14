@@ -153,6 +153,22 @@ function runMainAgent(opts) {
     parentRunId: opts.parentRunId || run.parentRunId || null,
     projectRoot, projectId, agentId, agentName,
     conversationId, taskId: null,
+    // P3 — system intent gate truth: THIS Run's user goal (never history)
+    currentUserMessage: goal || '',
+    // System-level actions always require an interactive destructive confirm,
+    // even with an `always` grant; without a channel the gate fails closed.
+    confirmSystemAction: typeof requestPermission === 'function'
+      ? async ({ kind, label, command }) => {
+          try {
+            const d = await requestPermission({
+              scope: 'terminal.admin', tool: 'terminal_run',
+              args: { command }, agent: agentName, conversationId,
+              systemAction: { kind, label }
+            });
+            return { approved: !!(d && d.decision === 'allow') };
+          } catch { return { approved: false }; }
+        }
+      : null,
     store, emit: trackedEmit, abortSignal: ac.signal,
     // 工具需要的字段
     permissionEngine: opts.permissionEngine || null,

@@ -104,6 +104,8 @@ async function runAgentTurn(deps, opts) {
   const runCtx = {
     projectRoot, projectId: project?.id || null, agentId: agent.id, agentName: agent.name,
     conversationId, abortSignal, store, taskId: null,
+    // P3 — system intent gate truth: THIS turn's user request (never history)
+    currentUserMessage: userMessage || '',
     toolTimeoutMs: TOOL_TIMEOUT,
     permissionEngine: deps.permissionEngine,
     emit: deps.emit,

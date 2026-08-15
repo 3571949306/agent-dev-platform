@@ -232,6 +232,7 @@ test('P4 independent effect proof rejects prose-only completion and accepts an e
   });
   await waitTerminal(falseEnv.hub, falseRun.runId);
   const falseResult = await falseEnv.hub.result(falseRun.runId);
+  assert.strictEqual(falseResult.status, LIFECYCLE.FAILED);
   assert.strictEqual(falseResult.result.effectObserved, false);
   assert.strictEqual(falseResult.result.verificationStatus, 'EXTERNAL_EFFECT_NOT_OBSERVED');
   assert.notStrictEqual(falseEnv.verificationRegistry.getLevel(falseAdapter.id), 'real_agent_task_verified');
@@ -251,6 +252,7 @@ test('P4 independent effect proof rejects prose-only completion and accepts an e
   });
   await waitTerminal(trueEnv.hub, trueRun.runId);
   const trueResult = await trueEnv.hub.result(trueRun.runId);
+  assert.strictEqual(trueResult.status, LIFECYCLE.COMPLETED);
   assert.strictEqual(trueResult.result.effectObserved, true);
   assert.deepStrictEqual(trueResult.result.observedChangedFiles, ['adp_verify.txt']);
   assert.strictEqual(trueEnv.projectLock.snapshot().writeLocks.length, 0);

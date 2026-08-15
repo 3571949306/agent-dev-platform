@@ -1,12 +1,15 @@
 # Changelog
 
-## v2.9.9 — P4 External Agent Production Verification (BUILD)
+## v2.9.9 — P4 External Agent Production Verification (FINAL CLOSURE — FROZEN)
 
 - External coding work now enters through `AgentHub` with one canonical Run ID and canonical project root, independent pre/post effect verification, per-project writer locking, adapter quiescence, and a unique terminal gate. Cancellation, timeout, crash, ID mismatch, false completion, and late events fail closed.
 - ACP, shared CLI supervision, Codex, Claude Code, Cline sidecar, OpenCode managed server, OpenHands, and WorkBuddy/P3 desktop paths implement bounded cleanup contracts. Production fallback is forbidden after external execution begins.
 - Added a persistent, recursively sanitized verification registry and separate Safe Test / explicit-consent Real Verification services. Safe and automated release verification perform zero model calls and zero paid-provider calls; real verification uses one isolated temporary git project and requires independently observed effects.
-- Agent Center now renders availability, health, installed/configured, transport/runtime, verification level, evidence source, and last verification separately. Installed != Available != Verified; Protocol Verified != Real Task Verified.
-- Added 216-assertion production smoke, cancellation/lifecycle/lock/late-event soak, opt-in-only real harness, and GUI cases 160–180 (full suite target 180). P4 is IMPLEMENTED, not FROZEN; P5 is not included.
+- A canonical bounded terminal finalizer now owns each external Run. A mutating adapter completion cannot become `COMPLETED` until quiescence and independent effect proof both succeed; never-quiescent runtimes settle truthfully as failed while retaining their lock/slot in quarantine.
+- Verification is transport-aware across CLI/process, SDK, ACP, HTTP/server and desktop runtimes. Paid/subscription transports may gain real evidence only from one immediately consented action; an environment variable cannot substitute for service-level consent. Claude external-login `UNKNOWN` remains unknown but may be tested once with consent without reading credentials.
+- WorkBuddy real verification is response-only: exact HWND+PID, owned P3 session and a fresh nonce response are required. Response proof never grants project-writer proof. External-runtime model/paid counts remain `UNKNOWN` when telemetry is unavailable rather than being fabricated as zero or one.
+- Agent Center renders availability, health, installed/configured, transport/runtime, protocol, response, project task, call-count evidence source and last verification separately. Installed != Available; Available != Verified; Health != Verification; Protocol Verified != Response Verified; Response Verified != Project Task Verified.
+- Closure proof: production 229/229 and 10/10 repeats, soak 20/20 repeats, closure 13/13, P4 GUI 33/33, full E2E 192/192, architecture DEFAULT_DENY with 0 unsafe duplicates. Default release external task dispatches and paid-provider calls are both 0. P4 platform contracts are FROZEN; P5 is not included and remains NOT STARTED.
 
 ## v2.9.9 — Unified GUI / UX & Product Workbench (Phase B Final)
 

@@ -55,11 +55,15 @@ async function main() {
 
   let modelCalls = 0;
   let paidCalls = 0;
+  let modelCallsKnown = true;
+  let paidCallsKnown = true;
   try {
     for (const adapter of adapters) {
       const result = await service.realVerify(adapter.id, { explicitConsent: true });
-      modelCalls += Number(result.modelCalls || 0);
-      paidCalls += Number(result.paidCalls || 0);
+      if (result.externalModelCalls == null && result.taskDispatches > 0) modelCallsKnown = false;
+      else modelCalls += Number(result.externalModelCalls || 0);
+      if (result.paidCalls == null && result.taskDispatches > 0) paidCallsKnown = false;
+      else paidCalls += Number(result.paidCalls || 0);
       const status = result.ok
         ? 'REAL_AGENT_TASK_VERIFIED'
         : (result.errorCode || result.verificationLevel || 'FAILED');
@@ -72,8 +76,8 @@ async function main() {
       }
     }
   }
-  console.log(`REAL_EXTERNAL_MODEL_CALLS=${modelCalls}`);
-  console.log(`PAID_PROVIDER_CALLS=${paidCalls}`);
+  console.log(`REAL_EXTERNAL_MODEL_CALLS=${modelCallsKnown ? modelCalls : 'UNKNOWN'}`);
+  console.log(`PAID_PROVIDER_CALLS=${paidCallsKnown ? paidCalls : 'UNKNOWN'}`);
 }
 
 main().catch(error => {

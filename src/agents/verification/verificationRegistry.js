@@ -38,7 +38,7 @@ const SECRET_KEY_PATTERN = /token|key|auth|secret|password|bearer|session|creden
  * 采用全局匹配（非 ^ 锚定），确保凭据嵌在句子中间也会被脱敏片段替换。
  * @type {RegExp}
  */
-const SECRET_VALUE_PATTERN = /(sk-[A-Za-z0-9]|gh[pous]_[A-Za-z0-9]{20,}|Bearer\s+[A-Za-z0-9._-]+|AKIA[0-9A-Z]{16}|xox[bpoa]-[A-Za-z0-9-]+|-----BEGIN[\s\S]*?END [A-Z ]+-----|Cookie=[^;\s]+|refresh_token[=:]\S+)/gi;
+const SECRET_VALUE_PATTERN = /(sk-[A-Za-z0-9]|gh[pous]_[A-Za-z0-9]{20,}|Bearer\s+[A-Za-z0-9._-]+|AKIA[0-9A-Z]{16}|xox[bpoa]-[A-Za-z0-9-]+|-----BEGIN[\s\S]*?END [A-Z ]+-----|Cookie=[^;\s]+|refresh_token[=:]\S+|ADP_P4_(?:SECRET|TOKEN|COOKIE)_[A-Z0-9]+)/gi;
 
 /**
  * 对单个字符串字段执行凭据脱敏。
@@ -76,7 +76,7 @@ function sanitizeEvidence(record, parentKey = '') {
   return out;
 }
 
-const RUNTIME_EVIDENCE_TYPES = new Set(['local_detection', 'protocol', 'agent_task', 'task']);
+const RUNTIME_EVIDENCE_TYPES = new Set(['local_detection', 'protocol', 'agent_response', 'agent_task', 'task']);
 
 function createVerificationFingerprint(input = {}) {
   const safe = sanitizeEvidence({
@@ -112,10 +112,13 @@ function summarizeEvidence(records) {
     hasImplementation: false,
     hasFixture: false,
     hasPackaged: false,
+    localDetectionVerified: false,
     executableFound: false,
     versionSucceeded: false,
     protocolInitialized: false,
-    agentTaskCompleted: false
+    agentResponseVerified: false,
+    agentTaskCompleted: false,
+    agentTaskEffectObserved: false
   };
 
   for (const r of records) {
@@ -136,15 +139,21 @@ function summarizeEvidence(records) {
         summary.hasPackaged = true;
         break;
       case 'local_detection':
+        summary.localDetectionVerified = true;
         summary.executableFound = true;
         summary.versionSucceeded = true;
         break;
       case 'protocol':
         summary.protocolInitialized = true;
         break;
+      case 'agent_response':
+        summary.agentResponseVerified = true;
+        summary.protocolInitialized = true;
+        break;
       case 'agent_task':
       case 'task':
         summary.agentTaskCompleted = true;
+        summary.agentTaskEffectObserved = r.effectObserved === true;
         break;
       default:
         break;
@@ -217,6 +226,14 @@ function createVerificationRegistry(opts = {}) {
       runId: evidence.runId || null,
       projectFingerprint: evidence.projectFingerprint || fingerprints.get(agentId) || '',
       effectObserved: evidence.effectObserved === true,
+      verificationKind: evidence.verificationKind || '',
+      transportProfile: evidence.transportProfile || '',
+      userConsentedRealVerification: evidence.userConsentedRealVerification === true,
+      taskDispatches: Number.isFinite(evidence.taskDispatches) ? evidence.taskDispatches : null,
+      platformProviderCalls: Number.isFinite(evidence.platformProviderCalls) ? evidence.platformProviderCalls : null,
+      externalModelCalls: Number.isFinite(evidence.externalModelCalls) ? evidence.externalModelCalls : null,
+      paidCalls: Number.isFinite(evidence.paidCalls) ? evidence.paidCalls : null,
+      callCountEvidence: evidence.callCountEvidence || '',
       reason: evidence.reason || '',
       details: evidence.details || ''
     });
@@ -226,7 +243,9 @@ function createVerificationRegistry(opts = {}) {
       r.type === sanitized.type && r.status === sanitized.status &&
       r.version === sanitized.version && r.source === sanitized.source &&
       r.projectFingerprint === sanitized.projectFingerprint &&
-      r.runId === sanitized.runId && r.reason === sanitized.reason);
+      r.runId === sanitized.runId && r.reason === sanitized.reason &&
+      r.callCountEvidence === sanitized.callCountEvidence &&
+      r.verificationKind === sanitized.verificationKind);
     if (duplicate) return { ...duplicate };
     store.get(agentId).push(sanitized);
     if (persistence && typeof persistence.append === 'function') {
@@ -300,6 +319,8 @@ function createVerificationRegistry(opts = {}) {
 
   function getFingerprint(agentId) { return fingerprints.get(agentId) || null; }
 
+  function getSummary(agentId) { return { ...summarizeEvidence(validRecords(agentId)) }; }
+
   return {
     record,
     getLevel,
@@ -307,7 +328,8 @@ function createVerificationRegistry(opts = {}) {
     serialize,
     clear,
     setFingerprint,
-    getFingerprint
+    getFingerprint,
+    getSummary
   };
 }
 

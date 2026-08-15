@@ -17,9 +17,9 @@
 | `implementation_verified` | 实现级验证 | 仓库中存在真实实现（`src/agents/adapters/*`） |
 | `fixture_verified` | Fixture 验证 | 存在真实 fixture 测试并可通过（`test/*`） |
 | `packaged_verified` | 打包级验证 | 在打包产物中验证过（如 sidecar 随包启动） |
-| `local_detection_verified` | 本地检测验证 | 运行时探测到可执行文件且 `--version` 成功 |
+| `local_detection_verified` | 本地检测验证 | 运行时满足其 transport profile 的真实本机/端点前置条件 |
 | `real_protocol_verified` | 真实协议验证 | 真实 initialize / session / prompt 握手发生过 |
-| `real_agent_task_verified` | 真实任务验证 | 真实端到端 Agent 任务完成（非付费 fixture 亦可） |
+| `real_agent_task_verified` | 真实任务验证 | 真实端到端 Agent 任务完成且独立项目 effect 已观察 |
 
 等级判定是偏序：任何证据只允许声明"不超过其证明强度"的等级，绝不越级。
 
@@ -29,11 +29,12 @@
 
 | 场景 | 允许的最高等级 |
 | --- | --- |
-| 未找到可执行文件（如本机未安装 codex CLI） | `packaged_verified`（最高） |
-| 仅 `--version` 成功，无协议交互 | `local_detection_verified`（最高） |
+| CLI/process 未找到可执行文件（如本机未安装 codex CLI） | `packaged_verified`（最高） |
+| CLI 仅 `--version` 成功，无协议交互 | `local_detection_verified`（最高） |
+| HTTP endpoint 已配置/探测；SDK API surface 存在；Desktop 唯一 HWND+PID | `local_detection_verified`（最高） |
 | 无真实 initialize / session / prompt | 不得声明 `real_protocol_verified` |
-| 真实端到端 Agent 任务未完成 | 不得声明 `real_agent_task_verified` |
-| 付费 provider 且从未真实消费 | 强制 `not_verified`（fixture 用本地模型，不消耗付费额度） |
+| 仅真实响应、未观察到项目 mutation | 不得声明 `real_agent_task_verified` |
+| 付费/subscription transport | 自动验证 0 task；立即显式同意的真实证据可按实际强度升级 |
 
 **判例（spec §101）：**
 - Codex 未安装却标 `real_protocol_verified` → Release Blocker。
@@ -50,10 +51,10 @@
 | `localDetection` | 本机探测 | 已验证 / 未验证 |
 | `protocolImpl` | 协议实现 | Fixture 已验证 / 仅实现级 / 未验证 |
 | `realProtocol` | 真实本机协议 | 已验证 / 未验证 |
+| `agentResponse` | 真实新响应 | 已验证 / 未验证 |
 | `realAgentTask` | 真实模型任务 | 已验证 / 未验证 |
 
-维度取值只来自 `agentVerification.js` 的 `DIM` 常量；探测到进程但拿不到版本号时，
-`localDetection` 记"未验证"并落一条 `local_detection` fail 证据，防止误判。
+维度取值只来自 `agentVerification.js` 的 `DIM` 常量。CLI 的本机探测需要 executable + version；SDK/ACP/HTTP/server/desktop 使用各自 transport profile。Desktop 仅窗口存在仍不是协议证据；响应证据仍不是项目 mutation 证据。
 
 ---
 
@@ -62,12 +63,13 @@
 每条证据含：
 
 ```text
-type       — implementation | fixture | packaged | local_detection | protocol | agent_task
+type       — implementation | fixture | packaged | local_detection | protocol | agent_response | agent_task
 status     — pass | fail | skipped
 timestamp  — ISO 8601
 version    — 探测到的版本（可能为空）
 source     — 真实来源（源码路径 / 测试文件 / runtime detect() / 握手事件）
 details    — 补充说明
+callCountEvidence — EXACT | UNOBSERVABLE_EXTERNAL_RUNTIME
 ```
 
 **不含任何 credentials**（spec §78）。证据不是永久假设：用户升级 Claude CLI 后旧的

@@ -20,6 +20,8 @@ const SIGNATURE_PATTERNS = Object.freeze([
   ['child_process', /require\(['"]child_process['"]\)/g],
   ['fs.write', /\b(?:fs|fsp)(?:\.promises)?\.(?:writeFile|writeFileSync|appendFile|appendFileSync|createWriteStream|rename|renameSync)\s*\(/g],
   ['AgentHub.start', /\bagentHub\.start(?:Auto)?\s*\(/g],
+  ['adapter.startTask', /\badapter\.startTask\s*\(/g],
+  ['runExternalAgent', /\brunExternalAgent\s*\(/g],
   ['runMainAgent', /\brunMainAgent\s*\(/g],
   ['PermissionEngine.evaluate', /\bpermissionEngine\.evaluate\s*\(/g]
 ]);
@@ -135,6 +137,26 @@ const EXECUTION_PATH_POLICY = Object.freeze({
     legacy: []
   }),
 
+  'adapter.startTask': Object.freeze({
+    canonical: [
+      // The Hub is the only production owner permitted to enter an adapter.
+      'src/agents/hub/agentHub.js'
+    ],
+    legacy: []
+  }),
+
+  runExternalAgent: Object.freeze({
+    canonical: [],
+    legacy: [
+      // Compatibility implementation plus two explicitly fenced call sites.
+      // Production handlers use Hub; subagent fallback requires
+      // externalExecutionMode='legacy-fixture'.
+      'src/services/externalAgents.js',
+      'src/ipc/handlers.js',
+      'src/agent/subagent.js'
+    ]
+  }),
+
   runMainAgent: Object.freeze({
     canonical: [
       // Application Main service entry.
@@ -198,6 +220,8 @@ const SYNTHETIC_ADVERSARIAL_CASES = Object.freeze([
   { signature: 'fs.write', filePath: 'src/skills/skillFileWriter.js' },
   { signature: 'fs.write', filePath: 'src/hooks/hookFileWriter.js' },
   { signature: 'AgentHub.start', filePath: 'src/generator/hubLauncher.js' },
+  { signature: 'adapter.startTask', filePath: 'src/future/directExternalAdapter.js' },
+  { signature: 'runExternalAgent', filePath: 'src/future/externalHubBypass.js' },
   { signature: 'model.decide', filePath: 'src/foo/newRuntime.js' },
   { signature: 'runMainAgent', filePath: 'src/foo/secondMain.js' },
   // P3 Closure (C4.1/C33) — Computer subsystem duplicate-proof: a second
@@ -223,6 +247,8 @@ const POSITIVE_CONTROL_CASES = Object.freeze([
   { signature: 'child_process', filePath: 'src/tools/terminal.js', expected: 'CANONICAL' },
   { signature: 'fs.write', filePath: 'src/tools/patch.js', expected: 'CANONICAL' },
   { signature: 'AgentHub.start', filePath: 'src/ipc/handlers.js', expected: 'CANONICAL' },
+  { signature: 'adapter.startTask', filePath: 'src/agents/hub/agentHub.js', expected: 'CANONICAL' },
+  { signature: 'runExternalAgent', filePath: 'src/agent/subagent.js', expected: 'LEGACY_COMPATIBILITY' },
   { signature: 'provider.streamResponse', filePath: 'src/agent/runtime.js', expected: 'LEGACY_COMPATIBILITY' },
   { signature: 'tool.exec', filePath: 'src/agent/runtime.js', expected: 'LEGACY_COMPATIBILITY' },
   { signature: 'PermissionEngine.evaluate', filePath: 'src/agent/runtime.js', expected: 'LEGACY_COMPATIBILITY' },

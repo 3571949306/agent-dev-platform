@@ -22,7 +22,8 @@ const {
 test('architecture path policy is explicit for every frozen signature', () => {
   const signatures = [
     'provider.streamResponse', 'model.decide', 'tool.exec', 'child_process',
-    'fs.write', 'AgentHub.start', 'runMainAgent', 'PermissionEngine.evaluate'
+    'fs.write', 'AgentHub.start', 'adapter.startTask', 'runExternalAgent',
+    'runMainAgent', 'PermissionEngine.evaluate'
   ];
   for (const signature of signatures) {
     const policy = EXECUTION_PATH_POLICY[signature];

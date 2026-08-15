@@ -39,6 +39,12 @@ const PROTOCOL_ENDPOINTS = {
 
 const ALL_PROTOCOLS = ['openai', 'openai-responses', 'anthropic', 'ollama'];
 
+/** Release an unread fetch body so long probe matrices cannot retain sockets. */
+async function discardResponse(response) {
+  if (!response || !response.body || typeof response.body.cancel !== 'function') return;
+  try { await response.body.cancel(); } catch { /* already consumed/closed */ }
+}
+
 // §31: 协议偏好顺序（当多协议同时 supported 时用于推荐）
 const PROTOCOL_PREFERENCE = ['openai-responses', 'openai', 'anthropic', 'ollama'];
 
@@ -185,6 +191,8 @@ async function probe(candidate, opts = {}) {
                 if (onProgress) onProgress({ protocolAttempted: 'ollama' });
               }
             } catch { /* not json */ }
+          } else {
+            await discardResponse(r);
           }
         } catch (err) { if (isAbortError(err) || aborted()) throw err; /* network error, continue */ }
       }
@@ -218,6 +226,7 @@ async function probe(candidate, opts = {}) {
               report.modelDiscovery = { status: 'auth_failed', path: mp, models: [] };
             }
           }
+          if (r.status !== 200) await discardResponse(r);
           // 404/405 等：继续尝试下一个路径
         } catch (err) { if (isAbortError(err) || aborted()) throw err; /* network error, continue */ }
       }
@@ -271,6 +280,7 @@ async function probe(candidate, opts = {}) {
           }
         } else {
           report.protocols.push({ protocol: proto, status, endpoint: ep.path, confidence: status === 'supported' ? 0.85 : 0.6 });
+          await discardResponse(r);
         }
       } catch (err) {
         if (isAbortError(err) || aborted()) throw err;
@@ -368,4 +378,4 @@ function pickRecommended(protocols, hint) {
   return supported[0].protocol;
 }
 
-module.exports = { probe, MAX_TOTAL_PROBES, PROBE_TIMEOUT_MS, prioritizeProtocols, ALL_PROTOCOLS, PROTOCOL_ENDPOINTS };
+module.exports = { probe, MAX_TOTAL_PROBES, PROBE_TIMEOUT_MS, prioritizeProtocols, ALL_PROTOCOLS, PROTOCOL_ENDPOINTS, discardResponse };

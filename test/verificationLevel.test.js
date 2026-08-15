@@ -9,7 +9,7 @@
  * 核心不变量：
  *   §42 仅 --version 成功（无协议交互）→ 封顶 LOCAL_DETECTION_VERIFIED，
  *       不得声明 REAL_PROTOCOL_VERIFIED
- *   §43 付费 provider → 强制 NOT_VERIFIED
+ *   §43 付费 provider 只受调用授权约束，不受永久等级上限约束
  */
 const test = require('node:test');
 const assert = require('node:assert');
@@ -59,10 +59,10 @@ test('补齐 protocolInitialized 后可声明 REAL_PROTOCOL_VERIFIED', () => {
   );
 });
 
-test('付费 provider → 强制 NOT_VERIFIED，不得声明 PACKAGED_VERIFIED（§43）', () => {
+test('付费 provider 有实际证据时可声明 PACKAGED_VERIFIED（§43）', () => {
   assert.strictEqual(
-    isClaimAllowed(VERIFICATION_LEVEL.PACKAGED_VERIFIED, { paidProvider: true }),
-    false
+    isClaimAllowed(VERIFICATION_LEVEL.PACKAGED_VERIFIED, { paidProvider: true, hasPackaged: true }),
+    true
   );
 });
 
@@ -71,6 +71,12 @@ test('付费 provider 仍可声明 NOT_VERIFIED（§43）', () => {
     isClaimAllowed(VERIFICATION_LEVEL.NOT_VERIFIED, { paidProvider: true }),
     true
   );
+});
+
+test('真实任务必须同时有完成与独立 effect 证据', () => {
+  const base = { localDetectionVerified: true, protocolInitialized: true, agentTaskCompleted: true };
+  assert.strictEqual(isClaimAllowed(VERIFICATION_LEVEL.REAL_AGENT_TASK_VERIFIED, base), false);
+  assert.strictEqual(isClaimAllowed(VERIFICATION_LEVEL.REAL_AGENT_TASK_VERIFIED, { ...base, agentTaskEffectObserved: true }), true);
 });
 
 test('formatLevel 返回非空的可读标签', () => {

@@ -15,7 +15,7 @@ const { test } = require('node:test');
 const assert = require('node:assert');
 const http = require('node:http');
 
-const { probe, MAX_TOTAL_PROBES } = require('../src/providers/onboarding/probe');
+const { probe, MAX_TOTAL_PROBES, discardResponse } = require('../src/providers/onboarding/probe');
 const { createCandidate } = require('../src/providers/onboarding/candidate');
 
 /** 构造一个按路由表响应的 fake server。routes: { [path]: status | {status, body} } */
@@ -69,6 +69,13 @@ function makeCandidate(baseUrl, protocolHint) {
   c.protocolHint = protocolHint || 'openai';
   return c;
 }
+
+test('Probe response cleanup releases unread status-only bodies', async () => {
+  let cancelled = 0;
+  await discardResponse({ body: { async cancel() { cancelled++; } } });
+  await discardResponse(null);
+  assert.strictEqual(cancelled, 1);
+});
 
 // ─── Server A: OpenAI Chat ──────────────────────────────────────────────────
 

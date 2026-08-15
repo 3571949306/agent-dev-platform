@@ -366,9 +366,21 @@ test('Closure C7.1 production: close A, reopen same title B — old ref executes
       if (sh.ok === true && Number(sh.pid || 0) === Number(newWin.pid)) violations++; // captured B under A's identity
       if (sh.ok !== false && !FAIL_CLOSED.has(sh.code)) { /* capture of a live window is only ok if it is A */ }
       // B must remain pristine — the old identity never retargeted it
-      const textB = await manager.getWindowText({ hwnd: newWin.hwnd });
-      if (!textB.text.includes('READY')) violations++;
-      if (textB.text.includes('CLICKED') || textB.text.includes('retarget?')) violations++;
+      // UIA can transiently rebuild its tree immediately after the hostile
+      // stale-reference calls. Retry the exact HWND+PID observation within a
+      // small bound; an unreadable result remains a violation, never a pass.
+      let textB = null;
+      for (let attempt = 0; attempt < 5; attempt++) {
+        textB = await manager.getWindowText({ hwnd: newWin.hwnd, pid: newWin.pid });
+        if (textB && textB.ok === true && typeof textB.text === 'string') break;
+        await sleep(100);
+      }
+      if (!textB || textB.ok !== true || typeof textB.text !== 'string') {
+        violations++;
+      } else {
+        if (!textB.text.includes('READY')) violations++;
+        if (textB.text.includes('CLICKED') || textB.text.includes('retarget?')) violations++;
+      }
     } finally { killFixtures(); }
     await sleep(150);
   }

@@ -25,6 +25,8 @@ class TestAgentAdapter extends BaseAgentAdapter {
     this._startFails = !!config.startFails;
     this._resultText = config.resultText || 'Test agent completed';
     this._delayMs = config.delayMs || 0;
+    this._quiesced = config.quiesced !== false;
+    this._detectResult = config.detectResult || null;
     this._runs = new Map();
 
     // 覆盖基类实例属性（基类构造器已从 manifest 设置初值，这里用 config 覆盖）
@@ -67,7 +69,11 @@ class TestAgentAdapter extends BaseAgentAdapter {
     };
   }
 
-  async detect() { return { available: this._available, version: 'test-1.0', path: null }; }
+  async detect() {
+    const result = this._detectResult || { available: this._available, installed: this._available, configured: this._available, version: 'test-1.0', path: null };
+    this._detected = { ...result };
+    return { ...result };
+  }
   async healthCheck() { return { status: this._healthStatus, version: 'test-1.0', latencyMs: 1 }; }
 
   async startTask(task, context) {
@@ -106,7 +112,10 @@ class TestAgentAdapter extends BaseAgentAdapter {
   async cancel(runId) {
     const run = this._runs.get(runId);
     if (run) { run.status = 'cancelled'; }
+    return { ok: this._quiesced, status: this._quiesced ? 'cancelled' : 'cancelling', quiesced: this._quiesced, residual: this._quiesced ? 0 : { runId } };
   }
+  async awaitQuiescence(runId) { return { quiesced: this._quiesced, residual: this._quiesced ? 0 : { runId } }; }
+  setTestQuiesced(value) { this._quiesced = value === true; return this._quiesced; }
   async getStatus(runId) {
     const run = this._runs.get(runId);
     return run ? { status: run.status } : { status: 'unknown' };

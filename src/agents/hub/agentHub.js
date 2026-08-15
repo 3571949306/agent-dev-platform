@@ -28,7 +28,7 @@
 const { HEALTH_STATE, LIFECYCLE, ERROR_CODE, AGENT_EVENT } = require('./types');
 const { createExternalAgentTerminalGate } = require('../runtime/externalTerminalGate');
 const { captureProjectState, verifyExternalResult } = require('../verification/externalResultVerifier');
-const { sanitizeExternalResult } = require('../runtime/resultSanitizer');
+const { stripSecrets, sanitizeExternalResult } = require('../runtime/resultSanitizer');
 const pathSecurity = require('../../security/pathSecurity');
 
 /** 最大 fallback 次数（不含首次尝试）。 */
@@ -92,6 +92,7 @@ function createAgentHub(opts = {}) {
     emit, projectLock,
     verificationRegistry,
     reportProblem,
+    externalFinalizer = {},
     contextFactory,   // v2.9.0 §39-40：统一 Adapter context 构建（修复 §7B 缺口）
     delegationAuthorityVerifier   // v2.9.8 Final Closure（A5）：(parentRunId, token) => boolean
   } = opts;
@@ -106,6 +107,9 @@ function createAgentHub(opts = {}) {
   // single lifecycle truth; this map guards resources around that truth.
   const runControls = new Map();
   const terminalGate = createExternalAgentTerminalGate();
+  const finalizerPollMs = Math.max(5, Number(externalFinalizer.pollIntervalMs) || 100);
+  const finalizerAttemptMs = Math.max(5, Number(externalFinalizer.attemptTimeoutMs) || 1000);
+  const finalizerDeadlineMs = Math.max(finalizerAttemptMs, Number(externalFinalizer.deadlineMs) || 30000);
 
   function isExternal(adapter) {
     return !!(adapter && adapter.manifest && adapter.manifest.source === 'external');
@@ -114,12 +118,12 @@ function createAgentHub(opts = {}) {
   function report(code, message, detail = {}) {
     if (typeof reportProblem !== 'function') return;
     try {
-      reportProblem({
+      reportProblem(stripSecrets({
         severity: 'ERROR', source: 'External Agent', code, message,
         runId: detail.runId || null,
         relatedKey: detail.runId ? `${code}:${detail.runId}` : code,
         detail
-      });
+      }));
     } catch { /* Problems Center must never break execution */ }
   }
 
@@ -153,31 +157,36 @@ function createAgentHub(opts = {}) {
     if (!tr.accepted) return tr;
     control.terminal = true;
     control.pendingTerminal = null;
-    runBridge.finishAgentRun(control.runId, status, result);
+    const terminalResult = isExternal(control.adapter)
+      ? sanitizeExternalResult(result, { agentId: control.adapter.id, runId: control.runId })
+      : result;
+    runBridge.finishAgentRun(control.runId, status, terminalResult);
     if (release) releaseControl(control);
     return tr;
   }
 
-  async function finishFromAdapter(control, status, result) {
-    if (!control || control.terminal) return;
-    if (control.cancelInProgress) {
-      control.pendingTerminal = { status, result };
-      return;
-    }
-    if (isExternal(control.adapter) && typeof control.adapter.awaitQuiescence === 'function') {
-      let q;
-      try { q = await control.adapter.awaitQuiescence(control.runId, 10000); }
-      catch (e) { q = { quiesced: false, residual: e.message }; }
-      if (!q || q.quiesced !== true) {
-        control.pendingTerminal = { status, result };
-        report(ERROR_CODE.AGENT_CANCEL_NOT_QUIESCED, 'External Agent reached a terminal result before runtime quiescence was confirmed', {
-          runId: control.runId, agentId: control.adapter.id, residual: q && q.residual
-        });
-        return;
-      }
-    }
+  function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
+
+  function boundedQuiescenceAttempt(control) {
+    let timer = null;
+    const timeout = new Promise(resolve => {
+      timer = setTimeout(() => resolve({ quiesced: false, residual: 'awaitQuiescence attempt timed out' }), finalizerAttemptMs);
+    });
+    return Promise.race([
+      Promise.resolve().then(() => control.adapter.awaitQuiescence(control.runId, finalizerAttemptMs)),
+      timeout
+    ]).finally(() => { if (timer) clearTimeout(timer); });
+  }
+
+  async function finalizeVerifiedTerminal(control, status, result) {
+    if (!control || control.terminal) return null;
     let finalResult = result;
-    if (status === LIFECYCLE.COMPLETED && control.beforeState) {
+    let finalStatus = status;
+    if (status === LIFECYCLE.COMPLETED && !control.beforeState && (control.readOnly || control.responseOnly)) {
+      finalResult = (result && typeof result === 'object')
+        ? { ...result, effectObserved: false, verificationStatus: 'NOT_APPLICABLE' }
+        : { summary: result, effectObserved: false, verificationStatus: 'NOT_APPLICABLE' };
+    } else if (status === LIFECYCLE.COMPLETED && control.beforeState) {
       try {
         const effect = await verifyExternalResult({
           projectRoot: control.projectRoot,
@@ -185,10 +194,18 @@ function createAgentHub(opts = {}) {
           result,
           expectedFile: control.expectedFile,
           expectedContent: control.expectedContent,
-          readOnly: control.readOnly
+          readOnly: control.readOnly || control.responseOnly
         });
         finalResult = (result && typeof result === 'object') ? { ...result, ...effect } : { summary: result, ...effect };
         if (!effect.effectObserved && effect.verificationStatus !== 'NOT_APPLICABLE') {
+          finalStatus = LIFECYCLE.FAILED;
+          finalResult = {
+            ...finalResult,
+            ok: false,
+            status: LIFECYCLE.FAILED,
+            errorCode: effect.verificationStatus || ERROR_CODE.AGENT_EFFECT_NOT_OBSERVED,
+            errors: [...(Array.isArray(finalResult.errors) ? finalResult.errors : []), effect.verificationStatus || ERROR_CODE.AGENT_EFFECT_NOT_OBSERVED]
+          };
           report(ERROR_CODE.AGENT_EFFECT_NOT_OBSERVED, 'External Agent reported completion without an independently observed project effect', {
             runId: control.runId, agentId: control.adapter.id,
             reportedChangedFiles: effect.reportedChangedFiles,
@@ -196,15 +213,105 @@ function createAgentHub(opts = {}) {
           });
         }
       } catch (e) {
+        finalStatus = LIFECYCLE.FAILED;
         finalResult = (result && typeof result === 'object')
-          ? { ...result, effectObserved: false, verificationStatus: 'EXTERNAL_EFFECT_VERIFICATION_FAILED', verificationError: e.message }
-          : { summary: result, effectObserved: false, verificationStatus: 'EXTERNAL_EFFECT_VERIFICATION_FAILED', verificationError: e.message };
+          ? { ...result, ok: false, status: LIFECYCLE.FAILED, effectObserved: false, verificationStatus: 'EXTERNAL_EFFECT_VERIFICATION_FAILED', errorCode: 'EXTERNAL_EFFECT_VERIFICATION_FAILED', verificationError: e.message, errors: [...(Array.isArray(result.errors) ? result.errors : []), 'EXTERNAL_EFFECT_VERIFICATION_FAILED'] }
+          : { summary: result, ok: false, status: LIFECYCLE.FAILED, effectObserved: false, verificationStatus: 'EXTERNAL_EFFECT_VERIFICATION_FAILED', errorCode: 'EXTERNAL_EFFECT_VERIFICATION_FAILED', verificationError: e.message, errors: ['EXTERNAL_EFFECT_VERIFICATION_FAILED'] };
       }
     }
     if (isExternal(control.adapter)) {
       finalResult = sanitizeExternalResult(finalResult, { agentId: control.adapter.id, runId: control.runId });
     }
-    finishControl(control, status, finalResult);
+    return finishControl(control, finalStatus, finalResult);
+  }
+
+  async function runExternalFinalizer(control) {
+    const deadline = Date.now() + finalizerDeadlineMs;
+    let lastQuiescence = { quiesced: false, residual: 'not checked' };
+    while (!control.terminal && Date.now() < deadline) {
+      if (control.cancelInProgress) {
+        await sleep(finalizerPollMs);
+        continue;
+      }
+      try {
+        lastQuiescence = await boundedQuiescenceAttempt(control);
+      } catch (error) {
+        lastQuiescence = { quiesced: false, residual: error.message };
+      }
+      control.lastQuiescence = lastQuiescence;
+      if (lastQuiescence && lastQuiescence.quiesced === true) {
+        const pending = control.pendingTerminal;
+        if (!pending) return null;
+        return finalizeVerifiedTerminal(control, pending.status, pending.result);
+      }
+      if (!control.pendingProblemReported) {
+        control.pendingProblemReported = true;
+        report(ERROR_CODE.AGENT_CANCEL_NOT_QUIESCED, 'External Agent terminal is pending runtime quiescence', {
+          runId: control.runId, agentId: control.adapter.id,
+          residual: lastQuiescence && lastQuiescence.residual
+        });
+      }
+      await sleep(finalizerPollMs);
+    }
+    if (control.terminal) return null;
+    control.quarantined = true;
+    const residual = lastQuiescence && lastQuiescence.residual;
+    const failure = {
+      status: LIFECYCLE.FAILED,
+      ok: false,
+      errorCode: 'EXTERNAL_QUIESCENCE_TIMEOUT',
+      errors: ['EXTERNAL_QUIESCENCE_TIMEOUT'],
+      quiesced: false,
+      residual
+    };
+    report('EXTERNAL_QUIESCENCE_TIMEOUT', 'External Agent terminal could not be finalized because runtime quiescence was not confirmed', {
+      runId: control.runId, agentId: control.adapter.id, residual
+    });
+    // Terminal truth may settle FAILED, but mutation authority stays
+    // quarantined: no lock release and no concurrency-slot decrement.
+    return finishControl(control, LIFECYCLE.FAILED, sanitizeExternalResult(failure, {
+      agentId: control.adapter.id, runId: control.runId
+    }), { release: false });
+  }
+
+  function scheduleExternalFinalizer(control, status, result, { prefer = false } = {}) {
+    if (!control || control.terminal) return Promise.resolve(null);
+    if (!control.pendingTerminal || prefer) control.pendingTerminal = { status, result };
+    if (!control.finalizerPromise) {
+      control.finalizerPromise = runExternalFinalizer(control).finally(() => {
+        control.finalizerPromise = null;
+      });
+    }
+    return control.finalizerPromise;
+  }
+
+  async function finishFromAdapter(control, status, result) {
+    if (!control || control.terminal) return;
+    if (!isExternal(control.adapter)) {
+      return finalizeVerifiedTerminal(control, status, result);
+    }
+    if (typeof control.adapter.awaitQuiescence !== 'function') {
+      control.quarantined = true;
+      const failure = {
+        status: LIFECYCLE.FAILED,
+        ok: false,
+        errorCode: 'EXTERNAL_QUIESCENCE_CONTRACT_MISSING',
+        errors: ['EXTERNAL_QUIESCENCE_CONTRACT_MISSING'],
+        quiesced: false,
+        residual: 'adapter does not implement awaitQuiescence'
+      };
+      report('EXTERNAL_QUIESCENCE_CONTRACT_MISSING', 'External Agent cannot finalize without an awaitQuiescence contract', {
+        runId: control.runId, agentId: control.adapter.id
+      });
+      // Without a positive quiescence proof, retain the project lock and the
+      // adapter concurrency slot even though terminal truth settles FAILED.
+      return finishControl(control, LIFECYCLE.FAILED, failure, { release: false });
+    }
+    // The first adapter terminal owns the pending result. A user cancel may
+    // explicitly replace it before quiescence, but late adapter callbacks may
+    // never overwrite cancellation intent.
+    if (!control.pendingTerminal) control.pendingTerminal = { status, result };
+    return scheduleExternalFinalizer(control, control.pendingTerminal.status, control.pendingTerminal.result);
   }
 
   /**
@@ -327,7 +434,10 @@ function createAgentHub(opts = {}) {
       runId, lifecycleRunId, adapter, projectRoot: task.projectRoot || null,
       lockAcquired: false, released: false, terminal: false,
       cancelInProgress: false, pendingTerminal: null, executionStarted: false,
+      finalizerPromise: null, quarantined: false, lastQuiescence: null,
+      pendingProblemReported: false,
       counted: true, beforeState: null, readOnly: task.readOnly === true,
+      responseOnly: task.responseOnly === true,
       expectedFile: task.verificationExpectedFile || null,
       expectedContent: task.verificationExpectedContent == null ? null : String(task.verificationExpectedContent)
     };
@@ -462,6 +572,7 @@ function createAgentHub(opts = {}) {
         // A terminal Hub run is truthful even if cleanup failed, but the
         // project lock remains held until an operator/cleanup path confirms
         // quiescence.
+        if (!cancelled.quiesced) control.quarantined = true;
         finishControl(control, 'failed', detail, { release: cancelled.quiesced });
         return {
           error: ERROR_CODE.AGENT_RUN_IDENTITY_MISMATCH,
@@ -488,7 +599,7 @@ function createAgentHub(opts = {}) {
 
       // 启动成功：Lifecycle → running
       control.executionStarted = true;
-      lifecycleManager.transition(lifecycleRunId, LIFECYCLE.RUNNING);
+      if (!control.terminal) lifecycleManager.transition(lifecycleRunId, LIFECYCLE.RUNNING);
 
       // 6. 返回 runId（executionStarted=true：adapter 真实启动）
       return { runId, agentId, executionStarted: true };
@@ -589,6 +700,12 @@ function createAgentHub(opts = {}) {
       return nativeResult;
     }
 
+    const cancelTerminal = {
+      status: 'cancelled', errorCode: ERROR_CODE.AGENT_CANCELLED,
+      errors: ['用户已取消'], quiesced: true, residual: 0
+    };
+    if (control) control.pendingTerminal = { status: LIFECYCLE.CANCELLED, result: cancelTerminal };
+
     // P4: external adapter cancellation is a quiescence barrier, not a best-effort
     // notification. The Hub remains non-terminal and keeps the project lock
     // when cleanup cannot be proven.
@@ -605,7 +722,12 @@ function createAgentHub(opts = {}) {
       }
     }
     if (!cancelled.quiesced) {
-      if (control) control.cancelInProgress = false;
+      if (control) {
+        control.cancelInProgress = false;
+        void scheduleExternalFinalizer(control, LIFECYCLE.CANCELLED, {
+          ...cancelTerminal, quiesced: false, residual: cancelled.residual
+        }, { prefer: true });
+      }
       report(ERROR_CODE.AGENT_CANCEL_NOT_QUIESCED, 'External Agent cancellation did not reach quiescence', {
         runId, residual: cancelled.residual, detail: cancelled.detail
       });
@@ -619,10 +741,7 @@ function createAgentHub(opts = {}) {
       };
     }
     const result = control
-      ? (finishControl(control, 'cancelled', {
-          status: 'cancelled', errorCode: ERROR_CODE.AGENT_CANCELLED,
-          errors: ['用户已取消'], quiesced: true, residual: cancelled.residual
-        }), runBridge.getRunMapping(runId))
+      ? (finishControl(control, 'cancelled', { ...cancelTerminal, residual: cancelled.residual }), runBridge.getRunMapping(runId))
       : runBridge.cancelAgentRun(runId);
     if (control) control.cancelInProgress = false;
     return { ...(result || {}), ok: true, status: 'cancelled', quiesced: true, residual: cancelled.residual };
@@ -725,6 +844,7 @@ function createAgentHub(opts = {}) {
         version: adapter._verifiedVersion || (detected && detected.version) || null,
         path: (detected && detected.path) || null,
         executablePath: (detected && detected.path) || null,
+        windowIdentity: (detected && detected.windowIdentity) || null,
         mode: adapter.runtimeMode || '',
         activeRuntime: adapter._verifiedRuntime || (typeof adapter.getActiveRuntime === 'function' ? adapter.getActiveRuntime() : null),
         runtime: adapter._verifiedRuntime || (typeof adapter.getActiveRuntime === 'function' ? adapter.getActiveRuntime() : null) || adapter.transport || adapter.adapterType || null,
@@ -748,10 +868,16 @@ function createAgentHub(opts = {}) {
     getAvailable,
     getDiagnostics: () => ({
       activeRuns: [...runControls.values()].filter(c => !c.terminal).length,
+      pendingTerminalFinalizers: [...runControls.values()].filter(c => !!c.finalizerPromise).length,
+      quarantinedRuns: [...runControls.values()].filter(c => c.quarantined).length,
       controls: [...runControls.values()].map(c => ({
         runId: c.runId, agentId: c.adapter.id, terminal: c.terminal,
         cancelInProgress: c.cancelInProgress, lockHeld: c.lockAcquired,
-        executionStarted: c.executionStarted
+        executionStarted: c.executionStarted,
+        pendingTerminal: !!c.pendingTerminal,
+        finalizerActive: !!c.finalizerPromise,
+        quarantined: !!c.quarantined,
+        counted: !!c.counted
       }))
     })
   };

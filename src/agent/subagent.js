@@ -71,9 +71,18 @@ async function runSubAgent(deps, subDef, argsStr, parentRunCtx) {
       // and fall back to whatever the host injected.
       visionReader: (deps.visionReaderFor && deps.visionReaderFor(subDef)) || deps.visionReader || null
     });
-    return typeof deps.runExternalAgentHub === 'function'
-      ? deps.runExternalAgentHub(subDef, taskText, ctx)
-      : extAgents.runExternalAgent(subDef, taskText, ctx);
+    if (typeof deps.runExternalAgentHub === 'function') {
+      return deps.runExternalAgentHub(subDef, taskText, ctx);
+    }
+    if (deps.externalExecutionMode === 'legacy-fixture') {
+      return extAgents.runExternalAgent(subDef, taskText, ctx);
+    }
+    return JSON.stringify({
+      ok: false,
+      status: 'failed',
+      errorCode: 'EXTERNAL_AGENT_HUB_REQUIRED',
+      errors: ['EXTERNAL_AGENT_HUB_REQUIRED']
+    });
   }
 
   const store = deps.store;

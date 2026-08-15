@@ -76,23 +76,43 @@ function protocolInitializedFrom(agentId, a) {
   if (!a || typeof a !== 'object') return false;
   if (a.protocolVerified === true) return true;
   if (a.verification && a.verification.protocol === true) return true;
-  if (agentId === 'cline') {
-    const h = a.health || {};
-    return !!(h.sidecar && h.sidecar.ready) || !!(h.runtime && h.runtime.probe && h.runtime.coreConstructible);
-  }
   return false;
+}
+
+function transportProfileFrom(agentId, a = {}) {
+  const transport = String(a.transport || '').toLowerCase();
+  const runtime = String(a.runtime || a.activeRuntime || '').toLowerCase();
+  if (transport === 'desktop' || agentId === 'workbuddy') return 'desktop';
+  if (transport === 'http' || runtime.includes('http')) return 'http';
+  if (transport === 'acp' || runtime === 'acp') return 'acp';
+  if (runtime.includes('sdk') || agentId === 'cline') return 'sdk';
+  if (runtime.includes('server') || agentId === 'opencode') return 'server';
+  return 'cli';
+}
+
+function localDetectionFrom(agentId, a = {}) {
+  const profile = transportProfileFrom(agentId, a);
+  const detected = a.installed === true || a.detected === true || a.available === true;
+  const configured = a.configured !== false;
+  const version = a.version || (a.health && a.health.runtime && a.health.runtime.nodeVersion) || '';
+  if (profile === 'desktop') return detected && !!(a.windowIdentity && a.windowIdentity.hwnd && a.windowIdentity.pid);
+  if (profile === 'http' || profile === 'sdk' || profile === 'acp') return detected && configured;
+  return detected && !!version;
 }
 
 function buildVerificationFingerprint(agentId, availability) {
   const a = availability || {};
   const version = a.version || (a.health && a.health.runtime && a.health.runtime.nodeVersion) || '';
+  const windowIdentity = a.windowIdentity && a.windowIdentity.hwnd && a.windowIdentity.pid
+    ? `${a.windowIdentity.hwnd}:${a.windowIdentity.pid}`
+    : '';
   return createVerificationFingerprint({
     agentId,
     transport: a.transport || '',
     runtime: a.runtime || a.adapterRuntime || '',
     version,
     executableIdentity: a.executablePath || a.path || '',
-    configurationIdentity: `${a.configured === true}:${a.mode || ''}:${a.transport || ''}`
+    configurationIdentity: `${a.configured === true}:${a.mode || ''}:${a.transport || ''}:${windowIdentity}`
   });
 }
 
@@ -118,29 +138,37 @@ function describeAgentVerification(agentId, availability, registry = DEFAULT_REG
   const version = (a && (a.version || (a.health && a.health.runtime && a.health.runtime.nodeVersion))) || '';
   const fingerprint = buildVerificationFingerprint(agentId, a || {});
   reg.setFingerprint(agentId, fingerprint);
-  if (detected && version) {
-    reg.record(agentId, { type: 'local_detection', status: 'pass', version: String(version), source: 'runtime detect()', projectFingerprint: fingerprint, adapterRuntime: a && a.runtime || '' });
+  const transportProfile = transportProfileFrom(agentId, a || {});
+  const localDetected = localDetectionFrom(agentId, a || {});
+  if (localDetected) {
+    reg.record(agentId, { type: 'local_detection', status: 'pass', version: String(version), source: 'runtime detect()', projectFingerprint: fingerprint, adapterRuntime: a && a.runtime || '', transportProfile });
   } else if (detected) {
-    // 探测到进程/服务但拿不到版本号 —— 记 fail，保证不会被误当成 LOCAL_DETECTION
-    reg.record(agentId, { type: 'local_detection', status: 'fail', source: 'runtime detect()（无版本号）', projectFingerprint: fingerprint, reason: 'VERSION_UNKNOWN' });
+    reg.record(agentId, { type: 'local_detection', status: 'fail', source: 'runtime detect()（transport prerequisites incomplete）', projectFingerprint: fingerprint, transportProfile, reason: 'TRANSPORT_DETECTION_INCOMPLETE' });
   }
 
   const protocolOk = protocolInitializedFrom(agentId, a);
   if (protocolOk) {
-    reg.record(agentId, { type: 'protocol', status: 'pass', source: 'runtime initialize/session 握手', projectFingerprint: fingerprint, adapterRuntime: a && a.runtime || '' });
+    reg.record(agentId, { type: 'protocol', status: 'pass', source: 'runtime initialize/session 握手', projectFingerprint: fingerprint, adapterRuntime: a && a.runtime || '', transportProfile });
   }
 
   const level = reg.getLevel(agentId);
 
+  const evidence = reg.getEvidence(agentId);
+  const summary = typeof reg.getSummary === 'function' ? reg.getSummary(agentId) : {};
+  const latestReal = evidence.filter(e => e.type === 'agent_response' || e.type === 'agent_task').slice(-1)[0] || null;
+  const latestMeasured = [...evidence].reverse().find(e => !!e.callCountEvidence) || null;
+  const latestEvidence = evidence.slice(-1)[0] || null;
+  const responseVerified = summary.agentResponseVerified === true;
+  const projectTaskVerified = level === VERIFICATION_LEVEL.REAL_AGENT_TASK_VERIFIED;
   const authState = (a && a.auth && (a.auth.state || a.auth.mode)) || '';
   const dimensions = [
     { key: 'installed', label: '安装', value: detected ? DIM.YES : DIM.NOT_DETECTED },
     { key: 'auth', label: '认证', value: authState ? String(authState) : DIM.UNKNOWN },
-    { key: 'localDetection', label: '本机探测', value: (detected && version) ? DIM.VERIFIED : DIM.NOT_VERIFIED },
+    { key: 'localDetection', label: '本机探测', value: localDetected ? DIM.VERIFIED : DIM.NOT_VERIFIED },
     { key: 'protocolImpl', label: '协议实现', value: base.fixture ? DIM.FIXTURE : (base.implementation ? DIM.IMPL_ONLY : DIM.NOT_VERIFIED) },
-    { key: 'realProtocol', label: '真实本机协议', value: protocolOk ? DIM.VERIFIED : DIM.NOT_VERIFIED },
-    // §43 —— 真实模型任务始终由真实端到端任务证据决定；付费 provider 不因"配好了"就算验证
-    { key: 'realAgentTask', label: '真实模型任务', value: level === VERIFICATION_LEVEL.REAL_AGENT_TASK_VERIFIED ? DIM.VERIFIED : DIM.NOT_VERIFIED }
+    { key: 'realProtocol', label: '真实本机协议', value: (protocolOk || summary.protocolInitialized) ? DIM.VERIFIED : DIM.NOT_VERIFIED },
+    { key: 'realResponse', label: '真实响应', value: responseVerified ? DIM.VERIFIED : DIM.NOT_VERIFIED },
+    { key: 'realAgentTask', label: '项目任务', value: projectTaskVerified ? DIM.VERIFIED : (agentId === 'workbuddy' && responseVerified ? 'Workspace binding unavailable' : DIM.NOT_VERIFIED) }
   ];
 
   return {
@@ -148,7 +176,7 @@ function describeAgentVerification(agentId, availability, registry = DEFAULT_REG
     level,
     levelLabel: formatLevel(level),
     dimensions,
-    evidence: reg.getEvidence(agentId),
+    evidence,
     installed: detected,
     configured: !!(a && a.configured),
     availability: a && a.availability || 'UNKNOWN',
@@ -157,9 +185,15 @@ function describeAgentVerification(agentId, availability, registry = DEFAULT_REG
     transport: a && a.transport || '',
     runtime: a && a.runtime || '',
     version: version || null,
-    lastVerified: (reg.getEvidence(agentId).slice(-1)[0] || {}).timestamp || null,
-    realTaskVerified: level === VERIFICATION_LEVEL.REAL_AGENT_TASK_VERIFIED,
-    lastFailure: [...reg.getEvidence(agentId)].reverse().find(e => e.status === 'fail') || null
+    lastVerified: (evidence.slice(-1)[0] || {}).timestamp || null,
+    realResponseVerified: responseVerified,
+    realTaskVerified: projectTaskVerified,
+    projectTaskStatus: projectTaskVerified ? 'VERIFIED' : (agentId === 'workbuddy' && responseVerified ? 'WORKSPACE_BINDING_UNAVAILABLE' : 'NOT_VERIFIED'),
+    callCountEvidence: latestMeasured && latestMeasured.callCountEvidence || '',
+    externalModelCalls: latestMeasured ? latestMeasured.externalModelCalls : null,
+    paidCalls: latestMeasured ? latestMeasured.paidCalls : null,
+    evidenceSource: (latestReal || latestEvidence) && (latestReal || latestEvidence).source || '',
+    lastFailure: [...evidence].reverse().find(e => e.status === 'fail') || null
   };
 }
 
@@ -184,5 +218,8 @@ module.exports = {
   DEFAULT_REGISTRY,
   buildVerificationFingerprint,
   describeAgentVerification,
-  describeAll
+  describeAll,
+  protocolInitializedFrom,
+  transportProfileFrom,
+  localDetectionFrom
 };

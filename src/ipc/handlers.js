@@ -924,6 +924,7 @@ async function runChatTurn(conversationId, agentId, userMessage, opts = {}) {
     visionReaderFor,
     runSubAgent: (subDef, args, ctx) => runSubAgent(deps, subDef, args, ctx),
     runExternalAgentHub: runExternalViaHub,
+    externalExecutionMode: 'hub-required',
     sendChatTask, requestPermission, computerManager: computer.manager, emit,
     chatDepth: opts.chatDepth || 0,
     maxChatDelegationDepth: MAX_CHAT_DELEGATION_DEPTH,
@@ -2269,6 +2270,18 @@ function register(window) {
       const adapter = new TestAgentAdapter(config);
       agentHub.register(adapter);
       return { ok: true, id: adapter.id };
+    });
+    ipcMain.handle('hub:testSetAdapterQuiesced', (e, agentId, value) => {
+      const adapter = agentRegistry.get(agentId);
+      if (!adapter || typeof adapter.setTestQuiesced !== 'function') return { ok: false, error: 'test adapter not found' };
+      return { ok: true, quiesced: adapter.setTestQuiesced(value) };
+    });
+    ipcMain.handle('hub:testDiagnostics', () => ({
+      hub: agentHub.getDiagnostics(),
+      projectLock: projectLock.snapshot()
+    }));
+    ipcMain.handle('hub:testRecordVerificationEvidence', (e, agentId, evidence = {}) => {
+      return verificationRegistry.record(agentId, evidence);
     });
 
     // v2.8.0 — ACP E2E hook：注册一个**真实的** AcpAgentAdapter，其 command/args

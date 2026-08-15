@@ -11,10 +11,10 @@
  * 单一真相源，verificationLevel.js 重导出）。
  *
  * 声明约束（isClaimAllowed）：
- *   §41 — 未找到可执行文件 → 最高只能声明 PACKAGED_VERIFIED
- *   §42 — 仅 --version 成功（无协议交互）→ 最高只能声明 LOCAL_DETECTION_VERIFIED
+ *   §41 — 本地检测证据必须符合实际 transport profile
+ *   §42 — 检测成功（无协议交互）→ 最高只能声明 LOCAL_DETECTION_VERIFIED
  *   §42 — 无真实 initialize/session/prompt → 不能声明 REAL_PROTOCOL_VERIFIED
- *   §43 — 付费 provider → 强制 NOT_VERIFIED
+ *   §43 — paid/subscription 是调用政策，不是永久验证上限
  */
 
 const { VERIFICATION_LEVEL } = require('../hub/types');
@@ -66,12 +66,11 @@ function levelIndex(level) {
  *   2. 负向约束（cap）— 是否有证据将可声明上限压到此等级之下。
  *
  * evidence 摘要字段（由 verificationRegistry.summarizeEvidence 产出）：
- *   - paidProvider        — 是否为付费 provider（spec §43）
+ *   - paidProvider        — 是否为付费 provider（仅供政策/展示，不限制证据）
  *   - hasImplementation   — 是否有实现级证据
  *   - hasFixture          — 是否有 fixture 级证据
  *   - hasPackaged         — 是否有打包级证据
- *   - executableFound     — 是否找到可执行文件（spec §41）
- *   - versionSucceeded    — --version 是否成功（spec §42）
+ *   - localDetectionVerified — transport-aware 本地/端点/窗口检测是否满足
  *   - protocolInitialized — 是否有真实 initialize/session/prompt（spec §42）
  *   - agentTaskCompleted  — 真实 Agent 任务是否端到端完成
  *
@@ -84,11 +83,6 @@ function isClaimAllowed(level, evidence) {
   if (idx < 0) return false; // 非法等级
 
   const ev = evidence || {};
-
-  // spec §43：付费 provider → 强制 NOT_VERIFIED，不允许声明任何更高等级
-  if (ev.paidProvider) {
-    return idx === 0;
-  }
 
   // NOT_VERIFIED 不需要任何正向证据
   if (idx === 0) return true;
@@ -106,13 +100,13 @@ function isClaimAllowed(level, evidence) {
       achieved = !!ev.hasPackaged;
       break;
     case VERIFICATION_LEVEL.LOCAL_DETECTION_VERIFIED:
-      achieved = !!ev.executableFound && !!ev.versionSucceeded;
+      achieved = !!ev.localDetectionVerified || (!!ev.executableFound && !!ev.versionSucceeded);
       break;
     case VERIFICATION_LEVEL.REAL_PROTOCOL_VERIFIED:
       achieved = !!ev.protocolInitialized;
       break;
     case VERIFICATION_LEVEL.REAL_AGENT_TASK_VERIFIED:
-      achieved = !!ev.agentTaskCompleted;
+      achieved = !!ev.agentTaskCompleted && !!ev.agentTaskEffectObserved;
       break;
     default:
       achieved = false;
@@ -127,13 +121,10 @@ function isClaimAllowed(level, evidence) {
     capIdx = Math.min(capIdx, levelIndex(VERIFICATION_LEVEL.LOCAL_DETECTION_VERIFIED));
   }
 
-  // spec §42：--version 未成功 → 不能声明 LOCAL_DETECTION_VERIFIED 或更高
-  if (!ev.versionSucceeded) {
-    capIdx = Math.min(capIdx, levelIndex(VERIFICATION_LEVEL.PACKAGED_VERIFIED));
-  }
-
-  // spec §41：未找到可执行文件 → 最高只能声明 PACKAGED_VERIFIED
-  if (!ev.executableFound) {
+  // Transport-aware detection replaces the old global executable/version
+  // assumption. CLI profiles still establish this bit from both probes;
+  // HTTP/SDK/ACP/desktop profiles establish it from their own prerequisites.
+  if (!ev.localDetectionVerified && !(ev.executableFound && ev.versionSucceeded)) {
     capIdx = Math.min(capIdx, levelIndex(VERIFICATION_LEVEL.PACKAGED_VERIFIED));
   }
 

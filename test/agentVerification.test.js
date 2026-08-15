@@ -49,15 +49,22 @@ test('探测到但拿不到版本号 → 不得声明本地检测级（宁可少
   assert.strictEqual(dim(desc, 'localDetection'), '未验证');
 });
 
-test('§43 Cline sidecar 真实握手 + 版本 → 真实协议级', () => {
+test('§43 Cline health/constructibility 不可替代显式协议证据', () => {
   const desc = describeAgentVerification('cline', {
     id: 'cline', available: true, version: '1.0.0',
     health: { status: 'healthy', sidecar: { ready: true }, runtime: { nodeVersion: 'v22.0.0', probe: true, coreConstructible: true } }
   });
+  assert.strictEqual(desc.level, VERIFICATION_LEVEL.LOCAL_DETECTION_VERIFIED);
+  assert.strictEqual(dim(desc, 'realProtocol'), '未验证');
+  assert.strictEqual(dim(desc, 'realAgentTask'), '未验证');
+});
+
+test('显式 protocolVerified 才可升级真实协议级', () => {
+  const desc = describeAgentVerification('cline', {
+    id: 'cline', available: true, configured: true, version: '1.0.0', runtime: 'sdk', protocolVerified: true
+  });
   assert.strictEqual(desc.level, VERIFICATION_LEVEL.REAL_PROTOCOL_VERIFIED);
   assert.strictEqual(dim(desc, 'realProtocol'), '已验证');
-  // 付费 provider 的端到端任务始终不算验证（§43）
-  assert.strictEqual(dim(desc, 'realAgentTask'), '未验证');
 });
 
 test('§40 维度取值来自固定枚举，不出现自由文案', () => {

@@ -1,5 +1,26 @@
 # Test Report — Agent Dev Platform (v2.9.9)
 
+## v2.9.9 P4 External Agent Production Verification — FINAL CLOSURE FROZEN
+
+Final closure evidence (2026-08-15, Asia/Shanghai):
+
+```text
+P4 closure: 13/13 PASS
+External production: 229/229 PASS; repeat 10/10 PASS
+External soak: repeat 20/20 PASS; false completion 20/20 and late events 1000/1000 per iteration
+Late quiescence / terminal race / project-lock quiescence / WorkBuddy response / ambiguous window: 20/20 PASS
+P4 GUI closure: 33/33 PASS; full Electron E2E: 192/192 PASS
+Full unit regression: 1818 tests / 1817 pass / 0 fail / 1 documented real-verification opt-in skip
+Architecture: DEFAULT_DENY; unsafe duplicate paths 0; production Hub bypass 0
+Safe external task dispatches: 0
+Default release real external task dispatches: 0
+Default release paid-provider calls: 0
+Real external model/paid counts: UNKNOWN when telemetry is unavailable
+Final process/server/session/lock/pending-finalizer/temp/clipboard/helper residue: 0
+```
+
+Installed != Available; Available != Verified; Health != Verification; Protocol Verified != Response Verified; Response Verified != Project Task Verified. WorkBuddy response proof does not prove project mutation. Claude external-login `UNKNOWN` remains unknown; current explicit consent may test usability without reading credentials. P4 **FROZEN** means the platform contracts are machine-verified and frozen, not that every external Agent on this computer completed a real task. P5 remains NOT STARTED.
+
 ## v2.9.9 P4 External Agent Production Verification — BUILD
 
 Final release evidence (2026-08-15, Asia/Shanghai):

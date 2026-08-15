@@ -9,6 +9,7 @@ const path = require('path');
 
 const root = path.join(__dirname, '..');
 const suites = [
+  ['externalFinalClosure', 'P4 final closure adversarial matrix'],
   ['externalProductionVerification', 'P4 deterministic + child/HTTP/desktop'],
   ['acpAgentAdapter', 'ACP JSON-RPC fixture'],
   ['clineReliability', 'Cline terminal/cancel fixture'],
@@ -49,6 +50,14 @@ for (const [filter, label] of suites) {
 
 const all = output.join('\n');
 const requiredTokens = [
+  'P4_FALSE_COMPLETION_TERMINAL=PASS',
+  'EXTERNAL_FALSE_COMPLETION_TERMINAL_COUNT=0',
+  'P4_PENDING_TERMINAL_FINALIZER=PASS',
+  'PENDING_TERMINAL_STUCK=0',
+  'P4_PRODUCTION_HUB_ONLY=PASS',
+  'PRODUCTION_EXTERNAL_HUB_BYPASS=0',
+  'P4_REAL_VERIFY_CONSENT=PASS',
+  'REAL_VERIFY_ENV_CONSENT_BYPASS=0',
   'EXTERNAL_RUN_IDENTITY_MISMATCH=0',
   'CODEX_RUN_IDENTITY=PASS',
   'WORKBUDDY_RUN_IDENTITY=PASS',
@@ -94,3 +103,7 @@ console.log('DESKTOP_FIXTURE=1/1 PASS');
 console.log('SAFE_VERIFICATION_MODEL_CALLS=0');
 console.log('PAID_PROVIDER_CALLS=0');
 console.log('REAL_EXTERNAL_MODEL_CALLS=0');
+console.log('REAL_EXTERNAL_TASK_DISPATCHES=0');
+console.log('PLATFORM_PAID_PROVIDER_CALLS=0');
+console.log('DEFAULT_RELEASE_REAL_EXTERNAL_TASK_DISPATCHES=0');
+console.log('DEFAULT_RELEASE_PAID_PROVIDER_CALLS=0');

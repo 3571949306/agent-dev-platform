@@ -1741,11 +1741,19 @@ async function loadHubCards(body) {
         ).join('')}</div>`
       : '';
     const external = m.source === 'external';
+    const callCounts = ver && ver.callCountEvidence === 'UNOBSERVABLE_EXTERNAL_RUNTIME'
+      ? 'External Model Calls: UNKNOWN · Paid Calls: UNKNOWN'
+      : ver && ver.callCountEvidence === 'EXACT'
+        ? `External Model Calls: ${Number(ver.externalModelCalls || 0)} · Paid Calls: ${Number(ver.paidCalls || 0)}`
+        : 'External Model Calls: NOT MEASURED · Paid Calls: NOT MEASURED';
     const verificationFacts = ver ? `<div class="small" style="margin-top:8px;line-height:1.55">
       <div><b>Installed:</b> ${ver.installed ? 'Yes' : 'No'} · <b>Configured:</b> ${ver.configured ? 'Yes' : 'No'}</div>
       <div><b>Availability:</b> ${esc(ver.availability || 'UNKNOWN')} · <b>Health:</b> ${esc(ver.health || 'unknown')}</div>
       <div><b>Transport:</b> ${esc(ver.transport || a.transportLabel || 'unknown')} · <b>Runtime:</b> ${esc(ver.runtime || a.runtime || 'unknown')}</div>
-      <div><b>Last Verified:</b> ${esc(ver.lastVerified || 'Never')} · <b>Real Task Verified:</b> ${ver.realTaskVerified ? 'Yes' : 'No'}</div>
+      <div><b>Last Verified:</b> ${esc(ver.lastVerified || 'Never')}</div>
+      <div><b>Response:</b> ${ver.realResponseVerified ? 'Verified' : 'Not Verified'} · <b>Project Task:</b> ${esc(ver.projectTaskStatus || (ver.realTaskVerified ? 'VERIFIED' : 'NOT_VERIFIED'))}</div>
+      <div><b>Evidence Source:</b> ${esc(ver.evidenceSource || 'None')}</div>
+      <div><b>Call Counts:</b> ${esc(callCounts)}</div>
       ${ver.lastFailure ? `<div class="err"><b>Last Failure:</b> ${esc(ver.lastFailure.reason || ver.lastFailure.status || 'unknown')}</div>` : ''}
     </div>` : '';
     return `<div class="acard" data-hub-id="${esc(m.id)}">
@@ -1781,7 +1789,7 @@ async function loadHubCards(body) {
     }
   });
   cardsEl.querySelectorAll('[data-hub-real]').forEach(b => b.onclick = async () => {
-    const confirmed = window.confirm('将向真实外部智能体发送一个最小验证任务。\n这可能消耗该智能体的订阅/API 使用额度。\n验证使用临时项目，不会修改你的开发项目。');
+    const confirmed = window.confirm('仅授权本次操作：将向真实外部智能体发送一个隔离、限时、最多一次的验证请求。\n这可能消耗该智能体的订阅/API 使用额度。\n验证使用临时项目，不会修改你的开发项目；下次真实验证仍需重新确认。');
     if (!confirmed) return;
     b.disabled = true;
     const orig = b.textContent;
@@ -1789,7 +1797,10 @@ async function loadHubCards(body) {
     try {
       const result = await api.hubVerifyReal(b.dataset.hubReal, true);
       await loadHubCards(body);
-      toast(result.ok ? 'Real Verification 通过' : `Real Verification 失败：${result.errorCode || result.error || 'unknown'}`, result.ok ? 'ok' : 'error');
+      const countTruth = result.taskDispatches > 0 && result.externalModelCalls == null
+        ? '；外部模型/付费调用数不可观测（UNKNOWN）'
+        : '';
+      toast(result.ok ? `Real Verification 通过${countTruth}` : `Real Verification 失败：${result.errorCode || result.error || 'unknown'}${countTruth}`, result.ok ? 'ok' : 'error');
     } catch (e) {
       toast('Real Verification 失败：' + e.message, 'error');
     } finally {

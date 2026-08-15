@@ -294,4 +294,6 @@
 
 `hub:verification` remains the read-only profile/evidence channel. `hub:verify-safe` and `hub:verify-real` are distinct commands: the renderer cannot upgrade Safe evidence into a real-task claim, and missing real-task consent is rejected again in the main process with zero provider calls. Returned evidence is sanitized and contains no authorization, cookie, token, key, or raw environment value.
 
-Installed != Available != Verified；Protocol Verified != Real Task Verified。GUI separately renders availability, health, installed/configured, transport/runtime, verification level, last verification time, and evidence source.
+Installed != Available；Available != Verified；Health != Verification；Protocol Verified != Response Verified；Response Verified != Project Task Verified。GUI separately renders availability, health, installed/configured, transport/runtime, protocol, response, project task, last verification time, evidence source, and call counts.
+
+`hub:verify-real` requires `explicitConsent: true` on the current IPC request even when `ADP_P4_ALLOW_REAL_AGENT_TASKS=1` exists in the process environment. Response-only results may record `agent_response` evidence but never `agent_task`/writer evidence. When the external runtime does not expose usage telemetry, `externalModelCalls` and `paidCalls` are `null` and the renderer shows `UNKNOWN`; exact zero is reserved for paths that dispatched no external task.

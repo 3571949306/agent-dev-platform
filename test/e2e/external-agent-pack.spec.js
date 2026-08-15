@@ -226,7 +226,7 @@ test('37) Cline SDK：注入 fake SDK → start → event → completed', async 
 });
 
 // ── Case 38 — OpenCode Server ───────────────────────────────────────────────
-test('38) OpenCode Server：fake server → session → task → event → diff → completed', async () => {
+test('38) OpenCode Server：fake server → session → response event → protocol completed', async () => {
   pageErrors = [];
   await page.evaluate(() => { window._hubEvents = []; });
 
@@ -235,12 +235,14 @@ test('38) OpenCode Server：fake server → session → task → event → diff 
   expect(injected.ok, 'fake server 注入应成功').toBe(true);
   expect(injected.baseUrl, '应有 baseUrl').toBeTruthy();
 
-  // 2. 启动 OpenCode 任务（走真实 HTTP Client → fake server）
+  // 2. This fixture proves the HTTP protocol/event path. Its fake diff does
+  // not mutate the project, so declare response-only truth explicitly.
   const startResult = await invoke('hub:start', 'opencode', {
-    goal: '修复 math.js 的 add 函数',
+    goal: '读取 math.js 并返回协议响应',
     projectRoot: fixtureRoot,
-    required: ['coding', 'filesystem'],
-    readOnly: false
+    required: [],
+    readOnly: true,
+    responseOnly: true
   });
   expect(startResult.runId, '应返回 runId').toBeTruthy();
 
@@ -607,7 +609,10 @@ test('48) Cline Run Start streams an official event and completes', async () => 
   const connectionId = await getFakeConnId();
   await configureCline({ connectionId, model: 'model-B' });
   await page.evaluate(() => { window._hubEvents = []; });
-  const started = await invoke('hub:start', 'cline', { goal: 'fixture run', projectRoot: fixtureRoot, connectionId, model: 'model-B' });
+  const started = await invoke('hub:start', 'cline', {
+    goal: 'fixture response run', projectRoot: fixtureRoot, connectionId, model: 'model-B',
+    required: [], readOnly: true, responseOnly: true
+  });
   expect(started.runId).toBeTruthy();
   const terminal = await waitForTerminal(started.runId);
   expect(terminal.status).toBe('completed');

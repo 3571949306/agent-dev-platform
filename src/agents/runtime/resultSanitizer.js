@@ -13,7 +13,7 @@
  */
 
 const SECRET_KEY_RE = /(api[_-]?key|authorization|bearer|token|oauth|session|cookie|password|secret|private[_-]?key)/i;
-const SECRET_VALUE_RE = /(Bearer\s+[A-Za-z0-9._~+\/-]+|Basic\s+[A-Za-z0-9+/=]+|sk-[A-Za-z0-9_-]{6,}|xox[baprs]-[A-Za-z0-9-]+)/g;
+const SECRET_VALUE_RE = /(Bearer\s+[A-Za-z0-9._~+\/-]+|Basic\s+[A-Za-z0-9+/=]+|Cookie=[^;\s]+|sk-[A-Za-z0-9_-]{6,}|xox[baprs]-[A-Za-z0-9-]+|ADP_P4_(?:SECRET|TOKEN|COOKIE)_[A-Z0-9]+)/gi;
 const REDACTED = '[REDACTED]';
 const DEFAULT_RAW_MAX_LEN = 2000;
 
@@ -111,7 +111,7 @@ function sanitizeExternalResult(result, identity = {}) {
     'sessionId', 'runtime', 'stopReason', 'exitCode', 'httpStatus',
     'quiesced', 'residual', 'effectObserved', 'verificationStatus',
     'reportedChangedFiles', 'observedChangedFiles', 'beforeFingerprint',
-    'afterFingerprint', 'errorCode', 'protocolVersion', 'window',
+    'afterFingerprint', 'errorCode', 'verificationError', 'protocolVersion', 'window',
     'inputVia', 'readVia', 'polls', 'elapsedMs', 'visionCalls',
     'visionModel', 'confidence'
   ];

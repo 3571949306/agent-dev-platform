@@ -17,6 +17,12 @@ const ACTION_TYPES = [
 // 终结性 Action（执行后需评估完成策略）
 const TERMINAL_ACTIONS = ['complete'];
 
+// v2.9.9 体验对标 Phase 2 — 只读 Action：允许一轮并发执行多个（不产生副作用）。
+// 写类 / 命令类 / delegate 仍强制单轮单个，避免并发写/并发跑测试的状态竞争。
+const READ_ONLY_ACTIONS = [
+  'read_file', 'read_files', 'list_directory', 'search', 'find_text', 'git_status', 'git_diff'
+];
+
 /**
  * 校验 Action 结构。
  * @param {any} raw 模型返回的原始对象
@@ -96,4 +102,4 @@ function parseAndValidate(text) {
   return { ok: true, action: v.action };
 }
 
-module.exports = { ACTION_TYPES, TERMINAL_ACTIONS, validateAction, parseActionJson, parseAndValidate };
+module.exports = { ACTION_TYPES, TERMINAL_ACTIONS, READ_ONLY_ACTIONS, validateAction, parseActionJson, parseAndValidate };

@@ -21,7 +21,7 @@
 
 const states = require('./states');
 const { EVENTS, timelineEntry, safeEmit } = require('./runtimeEvents');
-const { parseAndValidate } = require('./actionSchema');
+const { parseAndValidate, READ_ONLY_ACTIONS } = require('./actionSchema');
 const { executeAction, isMutatingAction, isTestAction } = require('./actionExecutor');
 const { evaluateActionResult, testStatusFromResult } = require('./resultEvaluator');
 const { checkLimits } = require('./retryPolicy');
@@ -40,6 +40,14 @@ function clearCompletionPolicyProblems(blackboard) {
 }
 const { composeSystemPromptWithHookContext } = require('./prompts/mainCodingAgent');
 const { dispatchRuntimeHook } = require('../../hooks/runtimeDispatch');
+const mt = require('./multiturn');
+
+/** 多轮历史结果摘要（tool_result content）。 */
+function mtResultText(r) {
+  if (!r) return '';
+  if (!r.ok && r.error) return `失败[${r.error.code || ''}] ${r.error.message || ''}`;
+  return r.stdoutSummary || r.stderrSummary || r.summary || (r.ok ? '成功' : '失败');
+}
 
 // v2.9.8 Final Closure（A1）— 区分 user cancellation 与 run timeout abort：
 // mainAgentRuntime 的 timeout timer 以 ac.abort({ type: 'timeout' }) 触发，
@@ -81,6 +89,10 @@ async function runAgentLoop(deps) {
 
   const counters = { iteration: 0, toolCalls: 0, repairRounds: 0, invalidActions: 0, runtimeMs: 0 };
   const toolResults = []; // 历史工具结果
+  // v2.9.9 Phase 5：真实多轮历史（opt-in，默认关闭以保证回归）。仅 tools 路径 provider 消费。
+  const useMultiturn = !!ctx.multiturn;
+  const history = [];
+  let taskDescription = '';
   let lastTestResult = null;
   let checkpointCreated = false;
   let terminalReached = false;
@@ -147,8 +159,13 @@ async function runAgentLoop(deps) {
         currentDiff: '',
         projectSummary,
         iteration: counters.iteration,
-        repairRounds: counters.repairRounds
+        repairRounds: counters.repairRounds,
+        // v2.9.9 Phase 4：token 预算（可经 ctx/agent 配置覆盖），估算值以 debug 日志暴露
+        maxContextTokens: (ctx.agent && ctx.agent.max_context_tokens) || ctx.maxContextTokens || undefined,
+        onTokens: (t, max) => { if (process.env.ADP_DEBUG_CONTEXT) console.error(`[context] tokens≈${t}/${max}`); }
       });
+      // Phase 5：首轮 context（目标+计划）作为多轮历史的首条 user 任务描述
+      if (useMultiturn && counters.iteration === 1) taskDescription = contextText;
       if (compacted.summary) {
         // 压缩摘要作为额外事实
       }
@@ -171,7 +188,9 @@ async function runAgentLoop(deps) {
           system: composeSystemPromptWithHookContext(systemPrompt, beforeModel.context),
           context: contextText,
           iteration: counters.iteration,
-          abortSignal: ctx.abortSignal
+          abortSignal: ctx.abortSignal,
+          // Phase 5：真实多轮历史（仅 tools 路径 provider 消费；文本路径忽略）
+          history: useMultiturn ? mt.toProviderMessages(history, taskDescription) : undefined
         });
         await dispatchRuntimeHook(ctx, 'after_model', {
           iteration: counters.iteration,
@@ -212,6 +231,34 @@ async function runAgentLoop(deps) {
         action = pv.action;
       }
       counters.invalidActions = 0; // 成功解析，重置
+
+      // v2.9.9 体验对标 Phase 2：一轮多个只读 action → Promise.all 并发执行。
+      // 任一并发调用抛异常被捕获为结构化错误（不丢失其它成功结果）。
+      // 写类/命令类/delegate 不会进入此分支（adapter 已保证全只读），仍走下方单 action 路径。
+      if (decision && Array.isArray(decision.actions) && decision.actions.length > 1 &&
+          decision.actions.every(a => READ_ONLY_ACTIONS.includes(a.type))) {
+        const acts = decision.actions;
+        for (const a of acts) safeEmit(emit, EVENTS.ACTION, { runId, action: a, thought: a.thought });
+        setState('READING_CONTEXT');
+        safeEmit(emit, EVENTS.TIMELINE, { runId, entry: timelineEntry('read', `并发执行 ${acts.length} 个只读操作`) });
+        const results = await Promise.all(acts.map(a =>
+          executeAction(ctx, a, getTool).catch(e => ({ ok: false, tool: a.type, action: a, error: { code: 'EXEC_ERROR', message: e.message, retryable: true } }))
+        ));
+        counters.toolCalls += acts.length;
+        acts.forEach((a, i) => {
+          const r = results[i];
+          if (typeof deps.onToolResult === 'function') { try { deps.onToolResult(a, r); } catch { /* non-fatal */ } }
+          safeEmit(emit, EVENTS.TOOL_RESULT, { runId, tool: r.tool, ok: r.ok, summary: r.stdoutSummary || r.stderrSummary || (r.ok ? '成功' : '失败'), error: r.error && { code: r.error.code, message: r.error.message } });
+          toolResults.push({ action: a, ...r, summary: r.stdoutSummary || r.stderrSummary || r.summary });
+        });
+        // Phase 5：记录 assistant tool_use + 配对 tool_result
+        if (useMultiturn) {
+          const tcs = acts.map((a, i) => ({ id: mt.makeToolCallId(runId, counters.iteration, i), name: a.type, arguments: JSON.stringify(a.args || {}) }));
+          mt.pushAssistant(history, { text: acts[0].thought, toolCalls: tcs });
+          acts.forEach((a, i) => mt.pushToolResult(history, tcs[i].id, mtResultText(results[i])));
+        }
+        continue;
+      }
 
       safeEmit(emit, EVENTS.ACTION, { runId, action, thought: action.thought });
       if (action.thought) safeEmit(emit, EVENTS.ASSISTANT_TEXT, { runId, text: action.thought });
@@ -329,6 +376,12 @@ async function runAgentLoop(deps) {
       // v2.9.0 Real Runtime Closure（R6）：delegate 的 Child Result 摘要（result.summary）
       // 必须保留进 toolResults，才能进入下一轮 model context；不得被 undefined 覆盖。
       toolResults.push({ action, ...result, summary: result.stdoutSummary || result.stderrSummary || result.summary });
+      // Phase 5：记录单 action 的 assistant tool_use + 配对 tool_result
+      if (useMultiturn) {
+        const id = mt.makeToolCallId(runId, counters.iteration, 0);
+        mt.pushAssistant(history, { text: action.thought, toolCalls: [{ id, name: action.type, arguments: JSON.stringify(action.args || {}) }] });
+        mt.pushToolResult(history, id, mtResultText(result));
+      }
 
       // 致命错误（权限拒绝 / 沙箱逃逸）
       if (ev.fatal) {

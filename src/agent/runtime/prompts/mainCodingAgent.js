@@ -34,6 +34,11 @@ const SYSTEM_PROMPT = `你是项目 Main Coding Agent。
 }
 \`\`\`
 
+# 并行只读（可选优化）
+
+当需要同时读取/搜索多个互不依赖的内容时，你可以在一轮里返回多个只读 Action（read_file / read_files / list_directory / search / find_text / git_status / git_diff），平台会并发执行以减少往返。
+注意：写类 Action（patch_file / write_file / create_file / delete_file / run_command / run_tests / delegate）每轮只能返回一个，不得与其它 Action 并发。
+
 # Action 类型说明
 
 - read_file: { "path": "src/foo.js" } 读取单个文件

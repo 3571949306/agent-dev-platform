@@ -21,7 +21,13 @@ const os = require('os');
 const path = require('path');
 
 const { execGit } = require('../src/agent/runtime/gitHelper');
-const { createWorktreeManager, createParallelWorktreeCoordinator, STATUS, FAIL_CODES } = require('../src/services/worktreeManager');
+const { createProjectMutationLock } = require('../src/security/projectMutationLock');
+const { createWorktreeManager, createParallelWorktreeCoordinator, STATUS, FAIL_CODES, GIT_STATE } = require('../src/services/worktreeManager');
+
+// P5-A.1 §15：Coordinator 必须显式注入共享 ProjectMutationLock（测试自建 test lock 注入）。
+function makeCoord(opts = {}) {
+  return createParallelWorktreeCoordinator({ mutationLock: createProjectMutationLock(), ...opts });
+}
 
 /** 创建真实临时 Git repo（含 baseline commit）。 */
 async function makeTempRepo() {
@@ -75,7 +81,7 @@ test('B. 两个 Worktree 路径不同', async () => {
 test('C. 两个 Worker 同时修改 same.txt', async () => {
   const repo = await makeTempRepo();
   try {
-    const coord = createParallelWorktreeCoordinator();
+    const coord = makeCoord();
     const results = await coord.runPair({
       projectRoot: repo,
       tasks: [
@@ -94,7 +100,7 @@ test('C. 两个 Worker 同时修改 same.txt', async () => {
 test('D. 两个结果彼此隔离', async () => {
   const repo = await makeTempRepo();
   try {
-    const coord = createParallelWorktreeCoordinator();
+    const coord = makeCoord();
     const results = await coord.runPair({
       projectRoot: repo,
       tasks: [
@@ -113,7 +119,7 @@ test('D. 两个结果彼此隔离', async () => {
 test('E. Base project 未被修改', async () => {
   const repo = await makeTempRepo();
   try {
-    const coord = createParallelWorktreeCoordinator();
+    const coord = makeCoord();
     await coord.runPair({
       projectRoot: repo,
       tasks: [
@@ -147,7 +153,7 @@ test('F. changedFiles 来自真实 git diff（不信任 Agent 自报）', async 
 test('G. Cancel A 不影响 B', async () => {
   const repo = await makeTempRepo();
   try {
-    const coord = createParallelWorktreeCoordinator();
+    const coord = makeCoord();
     const results = await coord.runPair({
       projectRoot: repo,
       tasks: [
@@ -170,7 +176,7 @@ test('G. Cancel A 不影响 B', async () => {
 test('H. Cleanup A 不删除 B', async () => {
   const repo = await makeTempRepo();
   try {
-    const coord = createParallelWorktreeCoordinator();
+    const coord = makeCoord();
     const results = await coord.runPair({
       projectRoot: repo,
       tasks: [
@@ -234,7 +240,7 @@ test('K. 重复 branch / worktree ID fail closed', async () => {
 test('L. 最终 git worktree list 无测试残留', async () => {
   const repo = await makeTempRepo();
   try {
-    const coord = createParallelWorktreeCoordinator();
+    const coord = makeCoord();
     const results = await coord.runPair({
       projectRoot: repo,
       tasks: [
@@ -255,7 +261,7 @@ test('主项目保护：worker 只拿到 worktreeRoot，看不到原 projectRoot
   const repo = await makeTempRepo();
   try {
     const { canonicalizeRoot } = require('../src/security/pathSecurity/canonicalPath');
-    const coord = createParallelWorktreeCoordinator();
+    const coord = makeCoord();
     let seenProjectRoot = null;
     let seenWorktreeRoot = null;
     await coord.runPair({
@@ -311,7 +317,7 @@ test('Real Git Worktree production isolation (>=20 checks)', async () => {
   const check = (name, cond) => { if (cond) passed.push(name); else fail.push(name); };
 
   try {
-    const coord = createParallelWorktreeCoordinator();
+    const coord = makeCoord();
     const baseReadme = fs.readFileSync(path.join(repo, 'README.md'), 'utf8');
 
     check('git-init', fs.existsSync(path.join(repo, '.git')));
@@ -399,4 +405,253 @@ test('Real Git Worktree production isolation (>=20 checks)', async () => {
   } finally {
     rmTree(repo);
   }
+});
+
+// ===========================================================================
+// P5-A.1 §22 NEW ADVERSARIAL TEST SUITE
+// ===========================================================================
+
+const { PermissionEngine } = require('../src/security/permissions');
+const { canonicalizeRoot } = require('../src/security/pathSecurity/canonicalPath');
+
+function deferred() { let res; const promise = new Promise(r => { res = r; }); return { promise, resolve: res }; }
+
+test('§22-A Permission project grant 不跨项目 / setProject 清残留 / global 存活', () => {
+  // 用默认非 allow 的 scope（filesystem.delete 默认 ask）使继承可观测
+  const eng = new PermissionEngine({ projectId: 'A' });
+  eng.grant('filesystem.delete', 'project', { persist: false });
+  assert.strictEqual(eng.evaluateLocal('filesystem.delete', { projectId: 'A' }), 'allow');
+  assert.notStrictEqual(eng.evaluateLocal('filesystem.delete', { projectId: 'B' }), 'allow');
+  assert.notStrictEqual(eng.evaluateLocal('filesystem.delete', {}), 'allow');
+  // setProject 切换：B 无 grant，不得继承 A（回落到默认 ask）
+  eng.setProject('B');
+  assert.strictEqual(eng.evaluateLocal('filesystem.delete', { projectId: 'B' }), 'ask');
+  // global always 存活切换；project grant 不存活
+  const e2 = new PermissionEngine({ projectId: 'A' });
+  e2.grant('network', 'always', { persist: false });
+  e2.grant('filesystem.delete', 'project', { persist: false });
+  e2.grant('git.write', 'deny', { persist: false });
+  e2.setProject('B');
+  assert.strictEqual(e2.evaluateLocal('network', { projectId: 'B' }), 'allow');
+  assert.strictEqual(e2.evaluateLocal('git.write', { projectId: 'B' }), 'deny');
+  assert.notStrictEqual(e2.evaluateLocal('filesystem.delete', { projectId: 'B' }), 'allow');
+});
+
+test('§22-B repo 子目录 identity：record.projectRoot == 真实 repo 根，owned 不在 repo 内', async () => {
+  const repo = await makeTempRepo();
+  try {
+    fs.mkdirSync(path.join(repo, 'src', 'nested'), { recursive: true });
+    const m = createWorktreeManager();
+    const rec = await m.create({ projectRoot: path.join(repo, 'src', 'nested'), runId: 'sub' });
+    const canonRepo = canonicalizeRoot(repo);
+    assert.strictEqual(rec.projectRoot, canonRepo, 'identity must be true repo root');
+    assert.ok(!rec.ownedRoot.startsWith(canonRepo + path.sep), 'ownedRoot outside true repo');
+    await m.remove(rec.worktreeId, { force: true });
+  } finally { rmTree(repo); }
+});
+
+test('§22-C projectId spoof 不能绕过 max=2', async () => {
+  const repo = await makeTempRepo();
+  try {
+    const m = createWorktreeManager();
+    await m.create({ projectRoot: repo, runId: 'r1', projectId: 'A' });
+    await m.create({ projectRoot: repo, runId: 'r2', projectId: 'B' });
+    await assert.rejects(() => m.create({ projectRoot: repo, runId: 'r3', projectId: 'C' }), /MAX_WORKTREES_EXCEEDED/);
+  } finally { rmTree(repo); }
+});
+
+test('§22-D 并发 create 3 个 max=2（20 轮）', async () => {
+  const repo = await makeTempRepo();
+  try {
+    const m = createWorktreeManager();
+    for (let i = 0; i < 20; i++) {
+      const results = await Promise.allSettled([
+        m.create({ projectRoot: repo, runId: `cA${i}` }),
+        m.create({ projectRoot: repo, runId: `cB${i}` }),
+        m.create({ projectRoot: repo, runId: `cC${i}` })
+      ]);
+      const ok = results.filter(r => r.status === 'fulfilled').length;
+      const rej = results.filter(r => r.status === 'rejected');
+      assert.strictEqual(ok, 2, `iter ${i}: exactly 2 success`);
+      assert.strictEqual(rej.length, 1);
+      assert.match(rej[0].reason.message, /MAX_WORKTREES_EXCEEDED/);
+      for (const r of results) if (r.status === 'fulfilled') await m.remove(r.value.worktreeId, { force: true });
+    }
+    assert.strictEqual(m._reservations.size, 0, 'no reservation leak');
+  } finally { rmTree(repo); }
+});
+
+test('§22-E force remove 失败不得报告 removed=true（metadata 保留）', async () => {
+  const repo = await makeTempRepo();
+  try {
+    const m = createWorktreeManager();
+    const rec = await m.create({ projectRoot: repo, runId: 'lockme' });
+    await execGit(repo, ['worktree', 'lock', rec.worktreeRoot]);
+    await assert.rejects(() => m.remove(rec.worktreeId, { force: true }), /WORKTREE_REMOVE_FAILED/);
+    assert.ok(m.status(rec.worktreeId), 'metadata retained after failed remove');
+    await execGit(repo, ['worktree', 'unlock', rec.worktreeRoot]);
+    await m.remove(rec.worktreeId, { force: true });
+  } finally { rmTree(repo); }
+});
+
+test('§22-F git status 失败 ≠ clean（三态 ERROR）', async () => {
+  const bad = fs.mkdtempSync(path.join(os.tmpdir(), 'adp-bad-'));
+  try {
+    const m = createWorktreeManager();
+    assert.strictEqual(await m.statusState(bad), GIT_STATE.ERROR);
+    await assert.rejects(() => m.isDirty(bad), /GIT_STATUS_ERROR/);
+  } finally { rmTree(bad); }
+});
+
+test('§22-G canonicalization 失败 → cleanup 拒绝（零 mutation）', async () => {
+  const repo = await makeTempRepo();
+  try {
+    const m = createWorktreeManager();
+    const rec = await m.create({ projectRoot: repo, runId: 'gone' });
+    rmTree(rec.worktreeRoot); // 目录消失 → 身份未知 → fail closed（ownership deny 或 status ERROR），零 mutation
+    await assert.rejects(() => m.remove(rec.worktreeId, { force: true }), /WORKTREE_OUTSIDE_OWNED_ROOT|WORKTREE_REMOVE_FAILED|GIT_STATUS_ERROR/);
+    assert.ok(m.status(rec.worktreeId), 'metadata retained; no cleanup executed');
+  } finally { rmTree(repo); }
+});
+
+test('§22-H 完整 diff truth（staged/unstaged/untracked/deleted/renamed/binary/committed）+ 真实 index 不变', async () => {
+  const repo = await makeTempRepo();
+  try {
+    // 先在 base repo 提交 setup，使 baseCommit 包含这些文件（删除/改名才可观测）
+    fs.writeFileSync(path.join(repo, 'track.txt'), 'v1\n');
+    fs.writeFileSync(path.join(repo, 'del.txt'), 'x\n');
+    fs.writeFileSync(path.join(repo, 'ren.txt'), 'r\n');
+    fs.writeFileSync(path.join(repo, 'bin.dat'), Buffer.from([0, 1, 2, 250, 251]));
+    await execGit(repo, ['add', 'track.txt', 'del.txt', 'ren.txt', 'bin.dat']);
+    await execGit(repo, ['commit', '-m', 'setup']);
+    const m = createWorktreeManager();
+    const rec = await m.create({ projectRoot: repo, runId: 'full' });
+    const wt = rec.worktreeRoot;
+    // unstaged
+    fs.appendFileSync(path.join(wt, 'track.txt'), 'v2\n');
+    // staged
+    fs.writeFileSync(path.join(wt, 'staged.txt'), 's\n');
+    await execGit(wt, ['add', 'staged.txt']);
+    // untracked
+    fs.writeFileSync(path.join(wt, 'untracked.txt'), 'u\n');
+    // deleted
+    fs.rmSync(path.join(wt, 'del.txt'));
+    // renamed
+    fs.renameSync(path.join(wt, 'ren.txt'), path.join(wt, 'ren2.txt'));
+    // binary modified
+    fs.writeFileSync(path.join(wt, 'bin.dat'), Buffer.from([0, 1, 2, 250, 251, 9, 9]));
+    const beforeStatus = (await execGit(wt, ['status', '--porcelain=v1', '-z'])).out;
+    const diff = await m.getDiff(rec.worktreeId);
+    const afterStatus = (await execGit(wt, ['status', '--porcelain=v1', '-z'])).out;
+    assert.strictEqual(afterStatus, beforeStatus, 'real index/status unchanged by getDiff');
+    const cf = diff.changedFiles;
+    for (const f of ['track.txt', 'staged.txt', 'untracked.txt', 'del.txt', 'ren2.txt', 'bin.dat']) {
+      assert.ok(cf.includes(f), `changedFiles includes ${f} (got: ${cf.join(',')})`);
+    }
+    assert.ok(diff.diff.includes('v2'), 'unstaged content in diff');
+    await m.remove(rec.worktreeId, { force: true });
+  } finally { rmTree(repo); }
+});
+
+test('§22-I dirty base：A/B 同一 snapshot，worker 见脏内容，用户 HEAD/index/status 不变', async () => {
+  const repo = await makeTempRepo();
+  try {
+    fs.appendFileSync(path.join(repo, 'README.md'), 'user-dirty\n');
+    fs.writeFileSync(path.join(repo, 'new-config.js'), 'cfg\n');
+    const headBefore = (await execGit(repo, ['rev-parse', 'HEAD'])).out.trim();
+    const statusBefore = (await execGit(repo, ['status', '--porcelain=v1', '-z'])).out;
+    const coord = makeCoord();
+    const results = await coord.runPair({
+      projectRoot: repo,
+      tasks: [
+        { runId: 'dA', worker: async ({ worktreeRoot }) => fs.readFileSync(path.join(worktreeRoot, 'README.md'), 'utf8') },
+        { runId: 'dB', worker: async ({ worktreeRoot }) => fs.readFileSync(path.join(worktreeRoot, 'README.md'), 'utf8') }
+      ]
+    });
+    const ra = results.find(r => r.runId === 'dA');
+    const rb = results.find(r => r.runId === 'dB');
+    assert.strictEqual(ra.baseCommit, rb.baseCommit, 'A/B same immutable base');
+    assert.notStrictEqual(ra.baseCommit, headBefore, 'dirty base != HEAD');
+    assert.ok(ra.result.includes('user-dirty'), 'worker sees tracked dirty content');
+    assert.ok(fs.existsSync(path.join(ra.worktreeRoot, 'new-config.js')), 'worker sees untracked');
+    const headAfter = (await execGit(repo, ['rev-parse', 'HEAD'])).out.trim();
+    const statusAfter = (await execGit(repo, ['status', '--porcelain=v1', '-z'])).out;
+    assert.strictEqual(headAfter, headBefore, 'user HEAD unchanged');
+    assert.strictEqual(statusAfter, statusBefore, 'user status unchanged');
+    // ephemeral ref 无残留
+    const refs = await execGit(repo, ['for-each-ref', 'refs/adp-checkpoints/p5wt-']);
+    assert.strictEqual(refs.out.trim(), '', 'no ephemeral snapshot ref residue');
+    await coord.cleanup(ra.worktreeId, { force: true });
+    await coord.cleanup(rb.worktreeId, { force: true });
+  } finally { rmTree(repo); }
+});
+
+test('§22-J worker context 攻击：authority 不透传', async () => {
+  const repo = await makeTempRepo();
+  try {
+    const coord = makeCoord();
+    const dangerous = { fn: () => 1 };
+    let seen = null;
+    const results = await coord.runPair({
+      projectRoot: repo,
+      tasks: [{
+        runId: 'atk',
+        context: { projectRoot: repo, baseProjectRoot: repo, pathSecurity: dangerous, permissionEngine: dangerous, store: dangerous, getTool: dangerous, runManager: dangerous, projectMutationLock: dangerous, taskLabel: 'ok' },
+        worker: async (input) => { seen = input; return true; }
+      }]
+    });
+    assert.strictEqual(seen.projectRoot, seen.worktreeRoot);
+    assert.strictEqual(seen.metadata.taskLabel, 'ok');
+    assert.strictEqual(seen.metadata.pathSecurity, undefined);
+    assert.strictEqual(seen.metadata.permissionEngine, undefined);
+    assert.strictEqual(seen.metadata.store, undefined);
+    assert.strictEqual(seen.context, undefined, 'raw context not passed');
+    await coord.cleanup(results[0].worktreeId, { force: true }).catch(() => {});
+  } finally { rmTree(repo); }
+});
+
+test('§22-K BUSY worktree remove 被拒', async () => {
+  const repo = await makeTempRepo();
+  try {
+    const m = createWorktreeManager();
+    const rec = await m.create({ projectRoot: repo, runId: 'busy' });
+    m._setStatus(rec.worktreeId, STATUS.BUSY);
+    await assert.rejects(() => m.remove(rec.worktreeId, { force: true }), /WORKTREE_BUSY/);
+    m._setStatus(rec.worktreeId, STATUS.COMPLETED);
+    await m.remove(rec.worktreeId, { force: true });
+  } finally { rmTree(repo); }
+});
+
+test('§22-L 非协作 cancel：有界返回 + 不提前释放/清理（20 轮）', async () => {
+  const repo = await makeTempRepo();
+  try {
+    for (let i = 0; i < 20; i++) {
+      const coord = makeCoord({ cancelQuiescenceTimeoutMs: 150 });
+      const d = deferred();
+      const runP = coord.runPair({ projectRoot: repo, tasks: [{ runId: `nc${i}`, worker: () => d.promise }] });
+      runP.catch(() => {});
+      // 轮询等待 worktree 创建并 BUSY（create 为异步）
+      let wt = null;
+      for (let w = 0; w < 100 && !wt; w++) { wt = coord.list().find(r => r.runId === `nc${i}`) || null; if (!wt) await new Promise(r => setTimeout(r, 20)); }
+      assert.ok(wt, 'worktree created');
+      const t0 = Date.now();
+      const out = await coord.cancel(wt.worktreeId);
+      const dt = Date.now() - t0;
+      assert.ok(dt < 1500, `bounded return (${dt}ms)`);
+      assert.strictEqual(out.quiesced, false, 'non-cooperative not quiesced');
+      assert.ok(coord.status(wt.worktreeId), 'worktree retained');
+      d.resolve('late');
+      await new Promise(r => setTimeout(r, 50));
+      // worker terminal 后 lock 释放（可重新 acquire 同 root）
+      const lock = createProjectMutationLock();
+      const re = lock.acquireWrite(coord.status(wt.worktreeId).worktreeRoot, 'recheck', 'x');
+      assert.ok(re.ok, 'lock released after late quiescence');
+      lock.release('recheck');
+      await coord.cleanup(wt.worktreeId, { force: true }).catch(() => {});
+    }
+  } finally { rmTree(repo); }
+});
+
+test('§15 Coordinator 缺 shared lock → SHARED_MUTATION_LOCK_REQUIRED', () => {
+  assert.throws(() => createParallelWorktreeCoordinator({}), /SHARED_MUTATION_LOCK_REQUIRED/);
 });

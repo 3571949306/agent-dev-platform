@@ -98,10 +98,21 @@ class PermissionEngine {
   }
 
   setTask(taskId) { this.taskId = taskId; }
+  /**
+   * P5-A.1 §3：切换 project 时必须清除旧 project-scoped grants，
+   * 保留真正 global 的 always/deny（及 in-memory task/once），再加载新项目持久化 grants。
+   * 不得把旧数据留在 Map 中造成跨项目残留。
+   */
   setProject(projectId) {
     const changed = this.projectId !== projectId;
     this.projectId = projectId;
-    if (changed && this.store) this.loadPersisted();
+    if (changed) {
+      for (const [scope, range] of Array.from(this.grants.entries())) {
+        if (range === 'project') this.grants.delete(scope);
+      }
+      this.projectGrants.clear();
+      if (this.store) this.loadPersisted();
+    }
   }
 
   /** Verdict from this engine alone, ignoring any parent. */
@@ -113,9 +124,13 @@ class PermissionEngine {
     const grant = this.grants.get(scope);
     if (grant === 'deny') return 'deny';
     if (grant === 'always') return 'allow';
-    if (grant === 'project' && (ctx.projectId === this.projectId || ctx.projectId)) {
-      // project-level grant applies to whole project session
-      if (this.projectGrants.get(scope) === 'project') return 'allow';
+    if (grant === 'project') {
+      // P5-A.1 §3：project grant 只允许严格应用于创建/绑定该 engine 的真实 projectId。
+      // 缺失或不同 projectId 一律 fail closed（ask），绝不跨项目继承。
+      if (ctx.projectId && this.projectId && ctx.projectId === this.projectId && this.projectGrants.get(scope) === 'project') {
+        return 'allow';
+      }
+      return 'ask';
     }
     if (grant === 'task' && ctx.taskId && ctx.taskId === this.taskId) return 'allow';
     if (grant === 'once') {

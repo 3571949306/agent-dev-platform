@@ -87,6 +87,10 @@ const EXECUTION_PATH_POLICY = Object.freeze({
       'src/tools/git.js',
       'src/tools/checkpoint.js',
       'src/agent/runtime/gitHelper.js',
+      // v2.9.9 体验对标 Phase 3 — read-only ripgrep search transport.
+      // spawn('rg', argv) 数组传参（绝不拼 shell，防命令注入），root 经
+      // pathguard.guard 校验，超时 kill，无 rg 时回退 JS walker。仅只读检索。
+      'src/tools/search.js',
       // Owned MCP / Computer / external-Agent transports.
       'src/services/mcp.js',
       // P3 — the ONLY Computer child-process transport (hardened PowerShell

@@ -141,7 +141,9 @@ function createAnthropic(conn) {
     const body = {
       model,
       max_tokens: maxTokens ?? 4096,
-      system: system || undefined,
+      // v2.9.9 Phase 5 — Prompt Caching：system 为相对稳定内容块，加 ephemeral cache_control
+      // 以减少长 session 重复计费与延迟（Anthropic Messages API 原生支持数组 system）。
+      system: system ? [{ type: 'text', text: system, cache_control: { type: 'ephemeral' } }] : undefined,
       messages: toAnthropicMessages(messages),
       temperature: temperature ?? 0.7,
       stream: true

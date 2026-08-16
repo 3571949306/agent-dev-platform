@@ -281,3 +281,12 @@ coding-agent/
 ```
 
 `reset.js` 提供 `copyFixture()`（复制到临时目录）、`resetToBroken()`（恢复 bug 基线）、`cleanup()`（清理）。
+
+## 模型交互协议（v2.9.9 体验对标）
+
+- **原生 Tool Calling**：支持 tools 的 provider（anthropic / openai-chat / openai-responses）会收到 16 个 action 的 tool 定义，`tool_use`/`tool_calls` 优先解析为结构化 Action；不支持的 provider（Ollama/自定义兼容）自动回退纯文本 JSON 路径。
+- **并行只读**：一轮可并发执行多个只读 Action（read/search/list/git_status/git_diff），写类仍单轮单个。
+- **ripgrep**：search_text/search_files/search_symbols 优先用 `rg`（argv 数组传参、防注入），无 `rg` 无缝回退 JS walker。
+- **Token 预算**：`buildContext` 按近似 token（ASCII/4 + 非ASCII/1.5）在 `maxContextTokens`（默认 24000，可经 `agent.max_context_tokens` 覆盖）内按优先级裁剪。
+- **max_tokens**：Main Agent 默认 `8192`（大 patch 不易截断），可经 `agent.max_tokens` 覆盖；不同 provider/模型上限不同时的越界报错复用现有错误处理路径。
+- **多轮历史 + Prompt Caching**：tools 路径维护真实 `assistant(tool_use) → user(tool_result)` 多轮历史（tool_use/tool_result 严格配对，压缩不破坏配对）；Anthropic system 块加 `cache_control: ephemeral` 降本提速。纯文本路径保持单条 context 拼接（两条路径并存，`supportsTools` 区分）。

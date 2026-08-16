@@ -13,6 +13,18 @@
 const MAX_TOOL_RESULTS = 12;       // 保留最近 N 条完整工具结果
 const MAX_CHANGED_FILES = 15;
 const MAX_PROJECT_SUMMARY_FILES = 40;
+const DEFAULT_MAX_CONTEXT_TOKENS = 24000;
+
+/**
+ * v2.9.9 体验对标 Phase 4 — 轻量近似 token 计数（不引入 tokenizer 依赖）。
+ * ASCII 按 4 字符/token，非 ASCII（中文等）按 1.5 字符/token，两者相加取上界。
+ */
+function approxTokens(s) {
+  if (!s) return 0;
+  let ascii = 0, other = 0;
+  for (let i = 0; i < s.length; i++) { if (s.charCodeAt(i) <= 127) ascii++; else other++; }
+  return Math.ceil(ascii / 4 + other / 1.5);
+}
 
 /**
  * 构建 model context。
@@ -27,56 +39,46 @@ const MAX_PROJECT_SUMMARY_FILES = 40;
  * @returns {string} 给模型的 context 文本
  */
 function buildContext(ctx) {
-  const parts = [];
-  parts.push('# 任务');
-  parts.push(`用户目标：${ctx.goal || '(未指定)'}`);
+  const maxTokens = ctx.maxContextTokens || DEFAULT_MAX_CONTEXT_TOKENS;
+  // —— 必须完整保留：目标 / 计划 / 当前任务 ——
+  const must = [];
+  must.push('# 任务');
+  must.push(`用户目标：${ctx.goal || '(未指定)'}`);
+  if (ctx.plan) { must.push('\n# 执行计划'); must.push(planToText(ctx.plan)); }
+  if (ctx.currentTask) { must.push('\n# 当前任务'); must.push(`- ${ctx.currentTask.title}（${ctx.currentTask.status}）`); }
 
-  if (ctx.plan) {
-    parts.push('\n# 执行计划');
-    parts.push(planToText(ctx.plan));
-  }
+  // —— 可动态裁剪：最近工具结果（从最老开始丢）——
+  let toolTexts = (ctx.toolResults || []).slice(-MAX_TOOL_RESULTS).map(toolResultToText);
 
-  if (ctx.blackboard) {
-    const { summarize } = require('./blackboard');
-    const bs = summarize(ctx.blackboard);
-    if (bs) {
-      parts.push('\n# Blackboard（共享状态）');
-      parts.push(bs);
-    }
-  }
+  // —— 可压缩：项目概览 / blackboard ——
+  let bbText = '';
+  if (ctx.blackboard) { const { summarize } = require('./blackboard'); bbText = summarize(ctx.blackboard) || ''; }
+  let projText = ctx.projectSummary || '';
 
-  if (ctx.currentTask) {
-    parts.push('\n# 当前任务');
-    parts.push(`- ${ctx.currentTask.title}（${ctx.currentTask.status}）`);
-  }
+  const tail = [];
+  if (ctx.changedFiles && ctx.changedFiles.length) { tail.push('\n# 已修改文件'); tail.push(ctx.changedFiles.slice(-MAX_CHANGED_FILES).join(', ')); }
+  if (ctx.currentDiff) { tail.push('\n# 当前未提交 Diff（摘要）'); tail.push(truncate(ctx.currentDiff, 4000)); }
+  tail.push('\n# 进度'); tail.push(`迭代: ${ctx.iteration || 0}，修复轮: ${ctx.repairRounds || 0}`);
 
-  if (ctx.toolResults && ctx.toolResults.length) {
-    parts.push('\n# 最近工具结果');
-    const recent = ctx.toolResults.slice(-MAX_TOOL_RESULTS);
-    for (const r of recent) {
-      parts.push(toolResultToText(r));
-    }
-  }
+  const assemble = () => {
+    const parts = must.slice();
+    if (bbText) { parts.push('\n# Blackboard（共享状态）'); parts.push(bbText); }
+    if (toolTexts.length) { parts.push('\n# 最近工具结果'); parts.push(...toolTexts); }
+    if (projText) { parts.push('\n# 项目概览'); parts.push(projText); }
+    parts.push(...tail);
+    return parts.join('\n');
+  };
 
-  if (ctx.changedFiles && ctx.changedFiles.length) {
-    parts.push('\n# 已修改文件');
-    parts.push(ctx.changedFiles.slice(-MAX_CHANGED_FILES).join(', '));
-  }
+  // Phase 4：token 预算第二道防线。优先级：目标/计划 > 工具结果 > 项目概览 > blackboard。
+  let text = assemble();
+  let tokens = approxTokens(text);
+  while (tokens > maxTokens && toolTexts.length > 1) { toolTexts = toolTexts.slice(1); text = assemble(); tokens = approxTokens(text); }
+  if (tokens > maxTokens && projText) { projText = ''; text = assemble(); tokens = approxTokens(text); }
+  if (tokens > maxTokens && bbText) { bbText = ''; text = assemble(); tokens = approxTokens(text); }
 
-  if (ctx.currentDiff) {
-    parts.push('\n# 当前未提交 Diff（摘要）');
-    parts.push(truncate(ctx.currentDiff, 4000));
-  }
-
-  if (ctx.projectSummary) {
-    parts.push('\n# 项目概览');
-    parts.push(ctx.projectSummary);
-  }
-
-  parts.push('\n# 进度');
-  parts.push(`迭代: ${ctx.iteration || 0}，修复轮: ${ctx.repairRounds || 0}`);
-
-  return parts.join('\n');
+  // 暴露估算 token 数（debug 观测是否经常触顶）
+  if (typeof ctx.onTokens === 'function') { try { ctx.onTokens(tokens, maxTokens); } catch { /* 观测不影响主链路 */ } }
+  return text;
 }
 
 function planToText(plan) {
@@ -159,6 +161,6 @@ function truncate(s, max) {
 }
 
 module.exports = {
-  buildContext, compact, runSummary, projectSummary,
-  MAX_TOOL_RESULTS
+  buildContext, compact, runSummary, projectSummary, approxTokens,
+  MAX_TOOL_RESULTS, DEFAULT_MAX_CONTEXT_TOKENS
 };

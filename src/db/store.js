@@ -633,16 +633,31 @@ const permissionGrants = {
   },
   remove(id) { db().prepare('DELETE FROM permission_grants WHERE id=?').run(id); bumpPermissionRevision(); return true; },
   clear() { db().prepare('DELETE FROM permission_grants').run(); bumpPermissionRevision(); return true; },
-  // v2.9.9 CU2-A：Settings 将 scope 设为 ASK 时必须真正删除对应 saved grant。
-  removeScope(scope, projectId) {
+  // v2.9.9 CU2-A.1 §6：removeScope 去歧义——只删除该 project 的 project 行，绝不顺带删 global。
+  // （deprecated：新代码请用 removeProjectPolicy / removeGlobalPolicy。）
+  removeScope(scope, projectId) { return this.removeProjectPolicy(scope, projectId); },
+  removeProjectPolicy(scope, projectId) {
     const pid = projectId || null;
-    const rows = db().prepare('SELECT id FROM permission_grants WHERE scope=? AND (project_id IS ? OR project_id=?)').all(scope, pid, pid);
+    const rows = db().prepare('SELECT id FROM permission_grants WHERE scope=? AND project_id IS ?').all(scope, pid);
     for (const r of rows) db().prepare('DELETE FROM permission_grants WHERE id=?').run(r.id);
-    // 全局行与项目行同时存在时一并清理（不依赖 ORDER BY 覆盖）
-    const globalRows = db().prepare('SELECT id FROM permission_grants WHERE scope=? AND project_id IS NULL').all(scope);
-    for (const r of globalRows) db().prepare('DELETE FROM permission_grants WHERE id=?').run(r.id);
     bumpPermissionRevision();
-    return rows.length + globalRows.length;
+    return rows.length;
+  },
+  removeGlobalPolicy(scope) {
+    const rows = db().prepare('SELECT id FROM permission_grants WHERE scope=? AND project_id IS NULL').all(scope);
+    for (const r of rows) db().prepare('DELETE FROM permission_grants WHERE id=?').run(r.id);
+    bumpPermissionRevision();
+    return rows.length;
+  },
+  replaceGlobalPolicy(scope, range) {
+    this.removeGlobalPolicy(scope);
+    if (range === 'always' || range === 'deny') return this.save({ scope, range, projectId: null });
+    return null; // ask → 无 global grant
+  },
+  replaceProjectPolicy(scope, projectId, range) {
+    this.removeProjectPolicy(scope, projectId);
+    if (range === 'project') return this.save({ scope, range: 'project', projectId });
+    return null; // ask → 无 project grant
   },
   // 用单一持久策略替换某 scope（先删旧行再写新行；ASK 等价于删除）。
   replacePolicy(scope, range, projectId) {

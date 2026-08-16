@@ -84,19 +84,28 @@ class PermissionEngine {
     if (this.store) this.loadPersisted();
   }
 
-  /** Re-hydrate project/always/deny grants saved in SQLite. */
+  /**
+   * Re-hydrate persisted grants with a DETERMINISTIC precedence (§7)：
+   *   GLOBAL DENY > GLOBAL ALWAYS > matching PROJECT > DEFAULT。
+   * 不依赖 SQL row order / created_at / Map 最后覆盖。
+   */
   loadPersisted() {
     if (!this.store || !this.store.permissionGrants) return;
     let rows = [];
     try { rows = this.store.permissionGrants.list(this.projectId); } catch { return; }
+    // 按 scope 聚合后按 precedence 决定，避免历史冲突行的顺序依赖。
+    const byScope = new Map();
     for (const g of rows) {
-      if (g.range === 'project') {
-        if (g.project_id && this.projectId && g.project_id !== this.projectId) continue;
-        this.grants.set(g.scope, 'project');
-        this.projectGrants.set(g.scope, 'project');
-      } else if (g.range === 'always' || g.range === 'deny') {
-        this.grants.set(g.scope, g.range);
-      }
+      if (!byScope.has(g.scope)) byScope.set(g.scope, { deny: false, always: false, project: false });
+      const agg = byScope.get(g.scope);
+      if (g.range === 'deny' && !g.project_id) agg.deny = true;
+      else if (g.range === 'always' && !g.project_id) agg.always = true;
+      else if (g.range === 'project' && g.project_id && this.projectId && g.project_id === this.projectId) agg.project = true;
+    }
+    for (const [scope, agg] of byScope.entries()) {
+      if (agg.deny) { this.grants.set(scope, 'deny'); continue; }
+      if (agg.always) { this.grants.set(scope, 'always'); continue; }
+      if (agg.project) { this.grants.set(scope, 'project'); this.projectGrants.set(scope, 'project'); }
     }
   }
 
@@ -193,18 +202,26 @@ class PermissionEngine {
    * @param opts.persist  set false for grants that must stay in memory (sub-agent
    *                      session grants must never end up in the user's saved policy).
    */
+  /**
+   * @returns {{applied:boolean, persisted:boolean}} persisted 反映持久层是否真正写入。
+   * v2.9.9 CU2-A.1 §5：始终允许但 SQLite 失败时 persisted=false，调用方不得宣称“已保存”。
+   */
   grant(scope, range, opts = {}) {
-    if (!SCOPES.includes(scope)) return;
+    if (!SCOPES.includes(scope)) return { applied: false, persisted: false };
     if (range === 'once') this.grants.set(scope, 'once');
     else if (range === 'task') this.grants.set(scope, 'task');
     else if (range === 'project') { this.grants.set(scope, 'project'); this.projectGrants.set(scope, 'project'); }
     else if (range === 'always') this.grants.set(scope, 'always');
     else if (range === 'deny') this.grants.set(scope, 'deny');
+    else return { applied: false, persisted: false };
     // persist the decisions the user expects to outlive the session
     const persist = opts.persist !== false;
+    let persisted = true; // once/task 无需持久层 → 视为 persisted
     if (persist && this.store && this.store.permissionGrants && (range === 'project' || range === 'always' || range === 'deny')) {
-      try { this.store.permissionGrants.save({ scope, range, projectId: this.projectId }); } catch { /* non-fatal */ }
+      try { this.store.permissionGrants.save({ scope, range, projectId: this.projectId }); persisted = true; }
+      catch { persisted = false; } // 失败不静默：回报 persisted=false
     }
+    return { applied: true, persisted };
   }
 
   /** In-memory grant for a delegated session; never written to SQLite. */

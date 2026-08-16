@@ -229,7 +229,35 @@ const CLAUDE_CODE = {
   maxConcurrency: 2
 };
 
-const BUILTIN_AGENT_MANIFESTS = [NATIVE_MAIN, CODEX, WORKBUDDY, CLINE, OPENCODE, OPENHANDS, CLAUDE_CODE];
+/**
+ * v2.9.9 Computer Use 2.0-A.1 — 原生 Computer Agent：平台内置一等 Agent。
+ * 只负责 Windows GUI 操作（UIA/视觉/输入），不授予 coding/filesystem/terminal/git 权限。
+ * 由 NativeComputerAgentAdapter 包装 ComputerAgentRuntime（现有 ComputerManager 的适配层）。
+ */
+const NATIVE_COMPUTER = {
+  id: 'native-computer',
+  displayName: '电脑操作智能体',
+  source: 'native',
+  transport: 'native',
+  capabilities: {
+    computer: true,
+    vision: true,
+    planning: true,
+    longRunning: true,
+    streaming: true,
+    coding: false,
+    filesystem: false,
+    terminal: false,
+    git: false,
+    sandbox: false
+  },
+  availability: true,
+  version: '2.9.9',
+  path: null,
+  maxConcurrency: 1
+};
+
+const BUILTIN_AGENT_MANIFESTS = [NATIVE_MAIN, CODEX, WORKBUDDY, CLINE, OPENCODE, OPENHANDS, CLAUDE_CODE, NATIVE_COMPUTER];
 
 module.exports = {
   BUILTIN_AGENT_MANIFESTS,
@@ -239,5 +267,6 @@ module.exports = {
   CLINE,
   OPENCODE,
   OPENHANDS,
-  CLAUDE_CODE
+  CLAUDE_CODE,
+  NATIVE_COMPUTER
 };

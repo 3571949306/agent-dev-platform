@@ -19,6 +19,14 @@
  */
 
 const VALID_RANGES = ['once', 'task', 'project', 'always', 'deny'];
+// v2.9.9 CU2-A.1 §4：decision+range 合法组合矩阵。
+const ALLOW_RANGES = ['once', 'task', 'project', 'always'];
+const DENY_RANGES = ['once', 'deny'];
+function decisionRangeValid(decision, range) {
+  if (decision === 'allow') return ALLOW_RANGES.includes(range);
+  if (decision === 'deny') return DENY_RANGES.includes(range);
+  return false;
+}
 
 /** canonical task permission identity：taskId || runId。 */
 function taskPermissionIdOf(context = {}) {
@@ -50,33 +58,40 @@ async function authorize({ engine, scope, context = {}, requestPermission, reque
   }
   let d = null;
   try { d = await requestPermission({ scope, ...requestMeta }); } catch { d = null; }
-  if (!d || d.decision !== 'allow') {
-    // 用户拒绝：若带 always/deny range 则持久化 deny
-    const range = d && d.range;
-    if (engine && (range === 'always' || range === 'deny')) {
-      try { engine.grant(scope, 'deny'); } catch { /* non-fatal */ }
+  const decision = d && d.decision;
+  const range = (d && d.range) || (decision === 'allow' ? 'once' : 'once');
+
+  // §4 矩阵校验：未知/非法 combination → PERMISSION_DECISION_RANGE_INVALID，exec=0。
+  if (decision !== 'allow' && decision !== 'deny') {
+    return { allowed: false, decision: decision || 'deny', range: d && d.range || null, source: 'user', code: 'PERMISSION_DECISION_RANGE_INVALID', persisted: false };
+  }
+  if (!decisionRangeValid(decision, d && d.range)) {
+    // 特别：allow+deny / deny+task|project|always 均非法 → 不保存、不执行。
+    return { allowed: false, decision, range: d && d.range || null, source: 'user', code: 'PERMISSION_DECISION_RANGE_INVALID', persisted: false };
+  }
+
+  if (decision === 'deny') {
+    // deny+once：仅本次拒绝，不持久化；deny+deny：持久化全局拒绝。
+    let persisted = false;
+    if (range === 'deny' && engine) {
+      const r = engine.grant(scope, 'deny');
+      persisted = !!(r && r.persisted);
     }
-    return { allowed: false, decision: (d && d.decision) || 'deny', range: range || null, source: 'user' };
+    return { allowed: false, decision: 'deny', range, source: 'user', persisted };
   }
 
-  // 用户允许：消费 range
-  const range = d.range || 'once';
-  if (!VALID_RANGES.includes(range)) {
-    // 后端必须 validate enum；未知 range fail-closed，exec=0
-    return { allowed: false, decision: 'allow', range, source: 'user', code: 'PERMISSION_RANGE_INVALID' };
-  }
-  applyRange(engine, scope, range, { taskPermissionId, projectId });
-  return { allowed: true, decision: 'allow', range, source: 'user' };
+  // allow：消费 range；persisted 反映持久层真相（§5）。
+  const applied = applyRange(engine, scope, range, { taskPermissionId, projectId });
+  return { allowed: true, decision: 'allow', range, source: 'user', persisted: applied.persisted };
 }
 
-/** 把用户选择的 range 应用为运行时/持久授权。 */
+/** 把用户选择的 range 应用为运行时/持久授权。返回 {persisted}。 */
 function applyRange(engine, scope, range, ids) {
-  if (!engine) return;
-  if (range === 'once') return; // 当前 operation 自身即 once，无持久权限
-  if (range === 'task') { engine.grantTask(scope, ids.taskPermissionId); return; }
-  if (range === 'project') { try { engine.grant(scope, 'project'); } catch { /* non-fatal */ } return; }
-  if (range === 'always') { try { engine.grant(scope, 'always'); } catch { /* non-fatal */ } return; }
-  if (range === 'deny') { try { engine.grant(scope, 'deny'); } catch { /* non-fatal */ } return; }
+  if (!engine) return { persisted: false };
+  if (range === 'once') return { persisted: true }; // 当前 operation 自身即 once，无需持久
+  if (range === 'task') { engine.grantTask(scope, ids.taskPermissionId); return { persisted: true }; }
+  const r = engine.grant(scope, range); // project/always/deny → 持久层
+  return { persisted: !!(r && r.persisted) };
 }
 
-module.exports = { authorize, applyRange, taskPermissionIdOf, VALID_RANGES };
+module.exports = { authorize, applyRange, taskPermissionIdOf, VALID_RANGES, ALLOW_RANGES, DENY_RANGES, decisionRangeValid };

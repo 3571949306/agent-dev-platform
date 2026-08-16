@@ -74,18 +74,20 @@ test('未知 range → PERMISSION_RANGE_INVALID，exec=0', async () => {
   const eng = new PermissionEngine({ projectId: 'p1' });
   const r = await authorize({ engine: eng, scope: 'computer', context: { runId: 'r' }, requestPermission: async () => ({ decision: 'allow', range: 'forever' }) });
   assert.strictEqual(r.allowed, false);
-  assert.strictEqual(r.code, 'PERMISSION_RANGE_INVALID');
+  assert.ok(/PERMISSION_(DECISION_)?RANGE_INVALID/.test(r.code), `未知 range 应非法 (got ${r.code})`);
 });
 
 test('store CRUD：replacePolicy/removeScope/effectivePolicy', async () => {
   const dir = tmpStore();
   try {
-    store.permissionGrants.replacePolicy('computer', 'always', null);
+    // CU2-A.1 §6：global / project 分离 API
+    store.permissionGrants.replaceGlobalPolicy('computer', 'always');
     assert.strictEqual(store.permissionGrants.effectivePolicy('computer', 'p1'), 'always');
-    // replace 语义：用 project 替换（移除旧 global 行），生效 project
-    store.permissionGrants.replacePolicy('computer', 'project', 'p1');
+    store.permissionGrants.replaceProjectPolicy('computer', 'p1', 'project');
+    assert.strictEqual(store.permissionGrants.effectivePolicy('computer', 'p1'), 'always', 'global 优先于 project');
+    store.permissionGrants.removeGlobalPolicy('computer');
     assert.strictEqual(store.permissionGrants.effectivePolicy('computer', 'p1'), 'project');
-    store.permissionGrants.removeScope('computer', 'p1');
+    store.permissionGrants.removeProjectPolicy('computer', 'p1');
     assert.strictEqual(store.permissionGrants.effectivePolicy('computer', 'p1'), 'ask', 'ASK 应真正删除 saved grant');
   } finally { rm(dir); }
 });

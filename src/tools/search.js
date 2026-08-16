@@ -61,20 +61,21 @@ function runRgStreaming(argv, { timeoutMs, signal, onLine, maxBytes } = {}) {
     let bytes = 0;
     let truncated = false;
     let stoppedEarly = false;
+    let stopReason = 'NORMAL'; // NORMAL|LIMIT|OUTPUT_CAP|ABORT|TIMEOUT|ERROR
     let buf = '';
     const cap = maxBytes || RG_MAX_OUTPUT_BYTES;
     const kill = () => { try { p.kill(); } catch { /* noop */ } };
-    const finish = (code) => { if (done) return; done = true; clearTimeout(timer); resolve({ code, truncated, stoppedEarly }); };
-    const timer = setTimeout(() => { truncated = true; kill(); }, timeoutMs || RG_TIMEOUT_MS);
-    const onAbort = () => { stoppedEarly = true; kill(); };
-    if (signal && typeof signal.addEventListener === 'function') {
-      if (signal.aborted) onAbort(); else signal.addEventListener('abort', onAbort, { once: true });
-    }
-    p.on('error', () => finish(-1));
+    const hasSignal = signal && typeof signal.addEventListener === 'function' && typeof signal.removeEventListener === 'function';
+    const onAbort = () => { stoppedEarly = true; stopReason = 'ABORT'; kill(); };
+    const cleanup = () => { if (hasSignal) { try { signal.removeEventListener('abort', onAbort); } catch { /* noop */ } } };
+    const finish = (code) => { if (done) return; done = true; clearTimeout(timer); cleanup(); resolve({ code, truncated, stoppedEarly, stopReason, aborted: stopReason === 'ABORT' }); };
+    const timer = setTimeout(() => { truncated = true; if (stopReason === 'NORMAL') stopReason = 'TIMEOUT'; kill(); }, timeoutMs || RG_TIMEOUT_MS);
+    if (hasSignal) { if (signal.aborted) onAbort(); else signal.addEventListener('abort', onAbort, { once: true }); }
+    p.on('error', () => { if (stopReason === 'NORMAL') stopReason = 'ERROR'; finish(-1); });
     p.stderr.on('data', () => { /* drain */ });
     p.stdout.on('data', (d) => {
       bytes += d.length;
-      if (bytes > cap) { truncated = true; kill(); return; } // 硬上限背压
+      if (bytes > cap) { truncated = true; if (stopReason === 'NORMAL') stopReason = 'OUTPUT_CAP'; kill(); return; } // 硬上限背压
       buf += d;
       let nl;
       while ((nl = buf.indexOf('\n')) !== -1) {
@@ -82,7 +83,7 @@ function runRgStreaming(argv, { timeoutMs, signal, onLine, maxBytes } = {}) {
         if (!line) continue;
         let stop = false;
         try { stop = onLine(line) === 'stop'; } catch { /* ignore */ }
-        if (stop) { stoppedEarly = true; kill(); return; } // 早停：达到结果上限
+        if (stop) { stoppedEarly = true; if (stopReason === 'NORMAL') stopReason = 'LIMIT'; kill(); return; } // 早停
       }
     });
     // 必须等 close confirmed 才 resolve（RG_TIMEOUT_OVERLAP_FALLBACK=0）
@@ -107,8 +108,10 @@ async function rgSearch(root, pattern, opts = {}) {
       if (results.length >= max) return 'stop'; // 早停
     }
   });
-  if (!run || (run.code !== 0 && run.code !== 1 && !run.stoppedEarly && !run.truncated)) return null;
-  return { matches: results, truncated: !!run.truncated };
+  if (!run) return null;
+  if (run.aborted) return { matches: results, truncated: true, stopReason: 'ABORT', aborted: true }; // ABORT 不当 success
+  if (run.code !== 0 && run.code !== 1 && !run.stoppedEarly && !run.truncated) return null;
+  return { matches: results, truncated: !!run.truncated, stopReason: run.stopReason, aborted: false };
 }
 
 async function rgFindFiles(root, namePattern, opts = {}) {
@@ -123,8 +126,10 @@ async function rgFindFiles(root, namePattern, opts = {}) {
       if (re ? re.test(base) : base.includes(namePattern)) { results.push({ path: path.relative(root, line) }); if (results.length >= max) return 'stop'; }
     }
   });
-  if (!run || (run.code !== 0 && run.code !== 1 && !run.stoppedEarly && !run.truncated)) return null;
-  return { files: results, truncated: !!run.truncated };
+  if (!run) return null;
+  if (run.aborted) return { files: results, truncated: true, stopReason: 'ABORT', aborted: true };
+  if (run.code !== 0 && run.code !== 1 && !run.stoppedEarly && !run.truncated) return null;
+  return { files: results, truncated: !!run.truncated, stopReason: run.stopReason, aborted: false };
 }
 
 function looksBinary(buf) {
@@ -190,8 +195,8 @@ const tools = [
       try {
         const abs = guard(ctx.projectRoot, '.');
         let files = null;
-        if (await hasRipgrep()) { const r = await rgFindFiles(abs, args.pattern, { maxResults: args.max_results || 50, signal: ctx.abortSignal }); files = r ? r.files : null; }
-        if (files === null) files = await jsFindFiles(abs, args.pattern, args.max_results || 50); // 无 rg 无缝回退
+        if (await hasRipgrep()) { const r = await rgFindFiles(abs, args.pattern, { maxResults: args.max_results || 50, signal: ctx.abortSignal }); if (r && r.aborted) return fail('SEARCH_ABORTED', '搜索已取消'); files = r ? r.files : null; }
+        if (files === null) files = await jsFindFiles(abs, args.pattern, args.max_results || 50); // 无 rg 无缝回退（abort 不 fallback）
         return ok({ files });
       } catch (e) { return fail('SEARCH_FAILED', e.message); }
     }
@@ -203,8 +208,8 @@ const tools = [
       try {
         const abs = guard(ctx.projectRoot, '.');
         let res = null;
-        if (await hasRipgrep()) { const r = await rgSearch(abs, args.pattern, { maxResults: (args.max_results || 50) * 4, signal: ctx.abortSignal }); res = r ? r.matches : null; }
-        if (res === null) res = await jsGrep(abs, args.pattern, (args.max_results || 50) * 4); // 无 rg 无缝回退
+        if (await hasRipgrep()) { const r = await rgSearch(abs, args.pattern, { maxResults: (args.max_results || 50) * 4, signal: ctx.abortSignal }); if (r && r.aborted) return fail('SEARCH_ABORTED', '搜索已取消'); res = r ? r.matches : null; }
+        if (res === null) res = await jsGrep(abs, args.pattern, (args.max_results || 50) * 4); // 无 rg 无缝回退（abort 不 fallback）
         if (args.file_filter) res = res.filter(r => r.path.endsWith(args.file_filter));
         return ok({ matches: res.slice(0, args.max_results || 50) });
       } catch (e) { return fail('SEARCH_FAILED', e.message); }
@@ -219,8 +224,8 @@ const tools = [
         const escaped = args.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
         const pattern = `(function|class|def|interface|type|struct|enum|const|let|var|fn|pub\\s+fn|public\\s+class)\\s+${escaped}\\b`;
         let res = null;
-        if (await hasRipgrep()) { const r = await rgSearch(abs, pattern, { maxResults: (args.max_results || 30) * 3, signal: ctx.abortSignal }); res = r ? r.matches : null; }
-        if (res === null) res = await jsGrep(abs, pattern, (args.max_results || 30) * 3); // 复用同一 rg 路径
+        if (await hasRipgrep()) { const r = await rgSearch(abs, pattern, { maxResults: (args.max_results || 30) * 3, signal: ctx.abortSignal }); if (r && r.aborted) return fail('SEARCH_ABORTED', '搜索已取消'); res = r ? r.matches : null; }
+        if (res === null) res = await jsGrep(abs, pattern, (args.max_results || 30) * 3); // 复用同一 rg 路径（abort 不 fallback）
         return ok({ matches: res.slice(0, args.max_results || 30) });
       } catch (e) { return fail('SEARCH_FAILED', e.message); }
     }

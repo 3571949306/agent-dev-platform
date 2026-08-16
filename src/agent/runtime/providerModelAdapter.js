@@ -3,10 +3,65 @@
  * v2.6.0 Main Agent Runtime — Provider Model Adapter。
  *
  * 把现有 provider.streamResponse 包装成 Main Agent Loop 需要的 model 接口：
- *   { decide({ system, context, iteration, abortSignal }) -> { text } }
+ *   { decide({ system, context, iteration, abortSignal }) -> { text, action? } }
+ *
+ * v2.9.9 体验对标 Phase 1：原生 Tool Calling。
+ *   - 支持 tools 的 provider（anthropic / openai-chat / openai-responses）会收到
+ *     buildActionTools() 生成的 tool 定义，返回的 toolCalls 优先转成结构化 action；
+ *   - toolCalls 为空或 provider 不支持 tools 时，fallback 到现有纯文本 parseActionJson 路径，
+ *     保证 Ollama / 自定义兼容接口行为与现状完全一致（回归保护）。
  *
  * 生产环境用这个；测试 / E2E 用 FakeCodingModel（直接注入，不经网络）。
  */
+
+const { buildActionTools } = require('./actionToolSchema');
+const { validateAction, READ_ONLY_ACTIONS } = require('./actionSchema');
+
+const MAX_PARALLEL_READ = 8; // 一轮并发只读上限，防 context 爆
+
+/** 已知支持原生 tool calling 的 provider protocol。不在此列一律走纯文本路径，不盲发 tools。 */
+const TOOL_CAPABLE_PROTOCOLS = ['anthropic', 'openai-chat', 'openai-responses'];
+function providerSupportsTools(provider, agent) {
+  if (!provider) return false;
+  if (provider.supportsTools === false) return false;
+  // 允许 agent 配置显式关闭（自定义网关报错时的一键回退）
+  if (agent && agent.workspace && agent.workspace.toolCalling === false) return false;
+  return TOOL_CAPABLE_PROTOCOLS.includes(provider.protocol);
+}
+
+/**
+ * 把 provider 返回的 toolCalls（第一个）转成 {type, args}。
+ * arguments 为 JSON 字符串，解析失败返回 null（由调用方按 AGENT_RESPONSE_INVALID 语义回退文本路径）。
+ */
+function toolCallToAction(toolCalls) {
+  if (!Array.isArray(toolCalls) || !toolCalls.length) return null;
+  const tc = toolCalls[0];
+  if (!tc || !tc.name) return null;
+  let args = {};
+  try { args = JSON.parse(tc.arguments || '{}'); } catch { return null; }
+  const v = validateAction({ type: tc.name, args });
+  return v.ok ? v.action : null;
+}
+
+/**
+ * Phase 2：把全部 toolCalls 转成 action 数组。
+ * 仅当「≥2 个且全部为只读 action」时返回数组（一轮并发只读）；
+ * 否则返回 null（调用方回退单 action 语义，写类仍单轮单个）。
+ */
+function toolCallsToParallelReadActions(toolCalls) {
+  if (!Array.isArray(toolCalls) || toolCalls.length < 2) return null;
+  const actions = [];
+  for (const tc of toolCalls) {
+    if (!tc || !tc.name) return null;
+    let args = {};
+    try { args = JSON.parse(tc.arguments || '{}'); } catch { return null; }
+    const v = validateAction({ type: tc.name, args });
+    if (!v.ok) return null;
+    if (!READ_ONLY_ACTIONS.includes(v.action.type)) return null; // 含写类 → 不并发
+    actions.push(v.action);
+  }
+  return actions.length >= 2 ? actions.slice(0, MAX_PARALLEL_READ) : null;
+}
 
 /**
  * 创建一个 ProviderModelAdapter。
@@ -26,12 +81,20 @@ function createProviderModelAdapter(opts) {
 
   return {
     name: 'ProviderModelAdapter',
-    async decide({ system, context, iteration, abortSignal }) {
+    async decide({ system, context, iteration, abortSignal, history }) {
       const provider = await buildProvider(agent);
       const modelInfo = resolveModel ? resolveModel(agent) : { model: agent.model };
-      const messages = [{ role: 'user', content: context }];
+      const supportsTools = providerSupportsTools(provider, agent);
+      const tools = supportsTools ? buildActionTools() : null;
+      // v2.9.9 Phase 5：真实多轮历史（assistant tool_use → user tool_result）仅在 tools 路径启用；
+      // 纯文本 fallback provider 仍用单条 context 拼接（两条路径并存，supportsTools 区分）。
+      const messages = (supportsTools && Array.isArray(history) && history.length)
+        ? history
+        : [{ role: 'user', content: context }];
 
       let text = '';
+      let action = null;
+      let parallelActions = null;
       const buf = [];
       const t0 = Date.now();
       // v2.9.8 R5 — 内部 AbortController：合并 caller abort 与 adapter timeout，
@@ -48,21 +111,31 @@ function createProviderModelAdapter(opts) {
         }
       }
       try {
-        const streamPromise = provider.streamResponse({
+        const streamOpts = {
           model: modelInfo.model,
           system,
           messages,
           temperature: 0.2,        // coding agent 低温度，更确定
-          maxTokens: agent.max_tokens || 4096,
+          // v2.9.9 Phase 5：默认 8192（大 patch 不易被截断），可经 agent.max_tokens 覆盖
+          maxTokens: agent.max_tokens || 8192,
           timeoutMs,
           signal: internalSignal,
           onChunk: (t) => { buf.push(t); }
-        });
+        };
+        // 仅在确有 tools 时才附加该键：避免给不需要 tool calling 的调用方（如 Generator）
+        // 注入空 tools 键（hasOwnProperty 仍为 true），保持其纯文本语义（回归保护）。
+        if (tools) streamOpts.tools = tools;
+        const streamPromise = provider.streamResponse(streamOpts);
         // v2.9.8 R6-A — Model Hang Guard：configured timeout 必须在 adapter 层真兑现。
         // 守规矩的 provider（http 传输层）会自己按 timeoutMs/signal 结算；但若 provider
         // 永不 settle（挂死、忽略 abort），run 绝不能跟着挂死——用超时/abort 竞速强制结算。
         const result = await settleBounded(streamPromise, timeoutMs, internalController);
         text = buf.join('') || result.content || '';
+        // Phase 1：原生 tool calling 优先。toolCalls 非空且能解析出合法 action 时直接带出；
+        // 解析失败（非法 JSON / 未知 type）返回 action=null，Loop 会回退 parseAndValidate(text)。
+        action = supportsTools ? toolCallToAction(result.toolCalls) : null;
+        // Phase 2：一轮多个只读 action 时带出 actions 数组，Loop 并发执行。
+        parallelActions = supportsTools ? toolCallsToParallelReadActions(result.toolCalls) : null;
         // B16.3 — Wire Truth：provider 回报的真实上线模型（responseModel）与请求模型对照
         if (reportOutcome) {
           try {
@@ -87,7 +160,10 @@ function createProviderModelAdapter(opts) {
         // 尽最大努力清理内部 signal  listener，并尝试 final abort（幂等）
         try { internalController.abort(); } catch { /* noop */ }
       }
-      return { text };
+      // { text, action?, actions? }：action 存在时 Loop 直接用；actions 为一轮并发只读；
+      // 都缺失时 Loop 回退 parseAndValidate(text)
+      if (parallelActions) return { text, actions: parallelActions, action: parallelActions[0] };
+      return action ? { text, action } : { text };
     }
   };
 }

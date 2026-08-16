@@ -99,7 +99,9 @@ body { background: var(--bg); color: var(--text); font-family: var(--sans); font
 @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .3; } }
 
 /* ---------- layout ---------- */
-#body { flex: 1; display: flex; min-height: 0; }
+/* position:relative 使 .page-overlay 的 absolute 定位以 #body 为基准，
+   否则基准落到 #app 导致 overlay 左缘从 x=0 开始、被活动栏压住裁掉内容。 */
+#body { flex: 1; display: flex; min-height: 0; position: relative; }
 .layout-resizer { flex: none; background: transparent; position: relative; z-index: 70; }
 .layout-resizer:hover, .layout-resizer:active { background: var(--accent); }
 .layout-resizer.vertical { width: 4px; cursor: col-resize; margin: 0 -2px; }
@@ -406,7 +408,9 @@ pre.preview { max-height: 60vh; overflow: auto; }
 
 
 /* ---------- full-page overlay ---------- */
-.page-overlay { position: absolute; inset: 0; background: var(--bg); z-index: 50; display: flex; flex-direction: column; }
+/* left:46px = #activity-bar 宽度，让 overlay 从活动栏右侧开始，
+   不再被活动栏压住左缘（活动栏 z-index:60 仍保持可点）。 */
+.page-overlay { position: absolute; top: 0; right: 0; bottom: 0; left: 46px; background: var(--bg); z-index: 50; display: flex; flex-direction: column; }
 .page-head { display: flex; align-items: center; gap: 12px; padding: 14px 20px; border-bottom: 1px solid var(--border); background: var(--bg2); }
 .page-head h2 { margin: 0; font-size: 16px; flex: 1; }
 .page-body { flex: 1; overflow: auto; padding: 20px; }

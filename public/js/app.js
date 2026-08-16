@@ -403,11 +403,18 @@ function wireShell() {
   $('#agent-select').onchange = e => { state.agentId = e.target.value; renderModelSelect(); chat.renderComposerChips(); };
   $('#model-select').onchange = async e => {
     const a = state.agents.find(x => x.id === state.agentId);
-    if (a && e.target.value && a.type !== 'external') {
-      await api.agentUpdate(a.id, { model: e.target.value });
-      a.model = e.target.value;
-      toast('已切换模型：' + e.target.value, 'ok');
-    }
+    if (!a || !e.target.value || a.type === 'external') return;
+    // 值为 "connectionId::modelId"，允许跨 API 连接自由切换模型
+    const raw = e.target.value;
+    const sep = raw.indexOf('::');
+    const connId = sep > 0 ? raw.slice(0, sep) : null;
+    const model = sep > 0 ? raw.slice(sep + 2) : raw;
+    await api.agentUpdate(a.id, { model, ...(connId ? { api_connection_id: connId } : {}) });
+    a.model = model;
+    if (connId) a.api_connection_id = connId;
+    const c = (state.connections || []).find(x => x.id === connId);
+    toast('已切换模型：' + model + (c ? '（' + c.name + '）' : ''), 'ok');
+    renderModelSelect();
   };
 
   // clicking external links in rendered markdown
@@ -515,18 +522,34 @@ async function renderModelSelect() {
   const a = state.agents.find(x => x.id === state.agentId);
   if (!a || a.type === 'external') { sel.innerHTML = `<option>—</option>`; sel.disabled = true; return; }
   sel.disabled = false;
-  let models = [];
   let connName = '';
+  let groups = [];
   try {
     const conns = state.connections.length ? state.connections : (state.connections = await api.connections());
-    const c = conns.find(x => x.id === a.api_connection_id);
-    connName = c ? c.name : '';
-    // v2.3.1: models 统一为对象数组 [{id,...}]，归一化为 id
-    models = ((c && c.models) || []).map(m => (typeof m === 'string' ? m : (m && m.id) || '')).filter(Boolean);
+    const cur = conns.find(x => x.id === a.api_connection_id);
+    connName = cur ? cur.name : '';
+    // 聚合所有 API 连接的模型，按连接分组（optgroup），支持跨连接自由切换
+    groups = conns.map(c => ({
+      conn: c,
+      models: ((c.models || []).map(m => (typeof m === 'string' ? m : (m && m.id) || '')).filter(Boolean))
+    })).filter(g => g.models.length);
   } catch {}
-  if (a.model && !models.includes(a.model)) models = [a.model, ...models];
-  if (!models.length) models = [a.model || '未设置模型'];
-  sel.innerHTML = models.map(m => `<option value="${esc(m)}" ${m === a.model ? 'selected' : ''}>${esc(m)}</option>`).join('');
+  const curValue = (a.api_connection_id && a.model) ? `${a.api_connection_id}::${a.model}` : '';
+  // 保证当前模型始终可选
+  let found = groups.some(g => g.models.some(m => `${g.conn.id}::${m}` === curValue));
+  if (curValue && !found) {
+    const target = groups.find(g => g.conn.id === a.api_connection_id) || groups[0];
+    if (target) target.models = [a.model, ...target.models];
+    else groups = [{ conn: { id: a.api_connection_id, name: connName || '当前连接' }, models: [a.model] }];
+  }
+  if (!groups.length) groups = [{ conn: { id: a.api_connection_id || '', name: connName || '未连接' }, models: [a.model || '未设置模型'] }];
+  sel.innerHTML = groups.map(g =>
+    `<optgroup label="${esc(g.conn.name || g.conn.id)}">` +
+    g.models.map(m => {
+      const v = `${g.conn.id}::${m}`;
+      return `<option value="${esc(v)}" ${v === curValue ? 'selected' : ''}>${esc(m)}</option>`;
+    }).join('') + `</optgroup>`
+  ).join('');
   if ($('#topbar-model')) $('#topbar-model').textContent = a.model || '';
   try { chat.renderComposerChips(); } catch { /* chips 更新失败不阻塞 */ }
   // 更新 composer-hint 显示当前模型信息

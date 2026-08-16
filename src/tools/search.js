@@ -44,60 +44,87 @@ function rgExcludeArgs() {
   return args;
 }
 
-/** spawn rg 并收集 stdout；超时/错误 kill 并 resolve(null)（触发 JS fallback）。 */
-function runRg(argv, timeoutMs) {
+const RG_MAX_OUTPUT_BYTES = 4 * 1024 * 1024; // 4MB 硬上限（背压）
+
+/**
+ * v2.9.9 CU2-A §47/§48 — 流式 rg 传输（背压 + 早停 + abort + 确认退出）。
+ * 边读 stdout 边按行回调 onLine；onLine 返回 'stop' 立即 kill rg（达到 maxResults）；
+ * 累计输出超 RG_MAX_OUTPUT_BYTES 立即 kill 并标 truncated；signal abort 立即 kill。
+ * 关键：kill/timeout 后必须等待 close/exit confirmed 才 resolve，避免 rg 仍活着就 fallback。
+ * @returns {Promise<null | {code:number, truncated:boolean, stoppedEarly:boolean}>}
+ */
+function runRgStreaming(argv, { timeoutMs, signal, onLine, maxBytes } = {}) {
   return new Promise((resolve) => {
-    let out = '';
-    let done = false;
     let p;
     try { p = spawn('rg', argv); } catch { return resolve(null); }
-    const finish = (v) => { if (done) return; done = true; clearTimeout(t); resolve(v); };
-    const t = setTimeout(() => { try { p.kill(); } catch { /* noop */ } finish(null); }, timeoutMs || RG_TIMEOUT_MS);
-    p.on('error', () => finish(null));
-    p.stdout.on('data', (d) => { out += d; });
+    let done = false;
+    let bytes = 0;
+    let truncated = false;
+    let stoppedEarly = false;
+    let buf = '';
+    const cap = maxBytes || RG_MAX_OUTPUT_BYTES;
+    const kill = () => { try { p.kill(); } catch { /* noop */ } };
+    const finish = (code) => { if (done) return; done = true; clearTimeout(timer); resolve({ code, truncated, stoppedEarly }); };
+    const timer = setTimeout(() => { truncated = true; kill(); }, timeoutMs || RG_TIMEOUT_MS);
+    const onAbort = () => { stoppedEarly = true; kill(); };
+    if (signal && typeof signal.addEventListener === 'function') {
+      if (signal.aborted) onAbort(); else signal.addEventListener('abort', onAbort, { once: true });
+    }
+    p.on('error', () => finish(-1));
     p.stderr.on('data', () => { /* drain */ });
-    p.on('close', (code) => { if (code !== 0 && code !== 1) return finish(null); finish(out); }); // rg: 0=match,1=no match
+    p.stdout.on('data', (d) => {
+      bytes += d.length;
+      if (bytes > cap) { truncated = true; kill(); return; } // 硬上限背压
+      buf += d;
+      let nl;
+      while ((nl = buf.indexOf('\n')) !== -1) {
+        const line = buf.slice(0, nl); buf = buf.slice(nl + 1);
+        if (!line) continue;
+        let stop = false;
+        try { stop = onLine(line) === 'stop'; } catch { /* ignore */ }
+        if (stop) { stoppedEarly = true; kill(); return; } // 早停：达到结果上限
+      }
+    });
+    // 必须等 close confirmed 才 resolve（RG_TIMEOUT_OVERLAP_FALLBACK=0）
+    p.on('close', (code) => finish(code));
   });
 }
 
 async function rgSearch(root, pattern, opts = {}) {
   const max = opts.maxResults || 200;
-  const argv = ['--json', '--max-count', String(Math.max(1, opts.perFileMax || 20)), ...rgExcludeArgs(), '--', pattern, root];
-  const out = await runRg(argv, opts.timeoutMs);
-  if (out === null) return null;
   const results = [];
-  for (const line of out.split('\n')) {
-    if (!line) continue;
-    let ev; try { ev = JSON.parse(line); } catch { continue; }
-    if (ev.type !== 'match' || !ev.data) continue;
-    const d = ev.data;
-    const abs = (d.path && d.path.text) || '';
-    if (!abs) continue;
-    const col = (d.submatches && d.submatches[0]) ? d.submatches[0].start + 1 : 1;
-    results.push({
-      path: path.relative(root, abs),
-      line: d.line_number || 0,
-      column: col,
-      preview: String((d.lines && d.lines.text) || '').trim().slice(0, 200)
-    });
-    if (results.length >= max) break;
-  }
-  return results;
+  const argv = ['--json', '--max-count', String(Math.max(1, opts.perFileMax || 20)), ...rgExcludeArgs(), '--', pattern, root];
+  const run = await runRgStreaming(argv, {
+    timeoutMs: opts.timeoutMs, signal: opts.signal,
+    onLine: (line) => {
+      let ev; try { ev = JSON.parse(line); } catch { return; }
+      if (ev.type !== 'match' || !ev.data) return;
+      const d = ev.data;
+      const abs = (d.path && d.path.text) || '';
+      if (!abs) return;
+      const col = (d.submatches && d.submatches[0]) ? d.submatches[0].start + 1 : 1;
+      results.push({ path: path.relative(root, abs), line: d.line_number || 0, column: col, preview: String((d.lines && d.lines.text) || '').trim().slice(0, 200) });
+      if (results.length >= max) return 'stop'; // 早停
+    }
+  });
+  if (!run || (run.code !== 0 && run.code !== 1 && !run.stoppedEarly && !run.truncated)) return null;
+  return { matches: results, truncated: !!run.truncated };
 }
 
 async function rgFindFiles(root, namePattern, opts = {}) {
   const max = opts.maxResults || 50;
-  const argv = ['--files', ...rgExcludeArgs(), root];
-  const out = await runRg(argv, opts.timeoutMs);
-  if (out === null) return null;
-  const re = namePattern.includes('*') ? new RegExp('^' + namePattern.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*') + '$') : null;
   const results = [];
-  for (const line of out.split('\n')) {
-    if (!line) continue;
-    const base = path.basename(line);
-    if (re ? re.test(base) : base.includes(namePattern)) { results.push({ path: path.relative(root, line) }); if (results.length >= max) break; }
-  }
-  return results;
+  const re = namePattern.includes('*') ? new RegExp('^' + namePattern.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*') + '$') : null;
+  const argv = ['--files', ...rgExcludeArgs(), root];
+  const run = await runRgStreaming(argv, {
+    timeoutMs: opts.timeoutMs, signal: opts.signal,
+    onLine: (line) => {
+      const base = path.basename(line);
+      if (re ? re.test(base) : base.includes(namePattern)) { results.push({ path: path.relative(root, line) }); if (results.length >= max) return 'stop'; }
+    }
+  });
+  if (!run || (run.code !== 0 && run.code !== 1 && !run.stoppedEarly && !run.truncated)) return null;
+  return { files: results, truncated: !!run.truncated };
 }
 
 function looksBinary(buf) {
@@ -163,7 +190,7 @@ const tools = [
       try {
         const abs = guard(ctx.projectRoot, '.');
         let files = null;
-        if (await hasRipgrep()) files = await rgFindFiles(abs, args.pattern, { maxResults: args.max_results || 50 });
+        if (await hasRipgrep()) { const r = await rgFindFiles(abs, args.pattern, { maxResults: args.max_results || 50, signal: ctx.abortSignal }); files = r ? r.files : null; }
         if (files === null) files = await jsFindFiles(abs, args.pattern, args.max_results || 50); // 无 rg 无缝回退
         return ok({ files });
       } catch (e) { return fail('SEARCH_FAILED', e.message); }
@@ -176,7 +203,7 @@ const tools = [
       try {
         const abs = guard(ctx.projectRoot, '.');
         let res = null;
-        if (await hasRipgrep()) res = await rgSearch(abs, args.pattern, { maxResults: (args.max_results || 50) * 4 });
+        if (await hasRipgrep()) { const r = await rgSearch(abs, args.pattern, { maxResults: (args.max_results || 50) * 4, signal: ctx.abortSignal }); res = r ? r.matches : null; }
         if (res === null) res = await jsGrep(abs, args.pattern, (args.max_results || 50) * 4); // 无 rg 无缝回退
         if (args.file_filter) res = res.filter(r => r.path.endsWith(args.file_filter));
         return ok({ matches: res.slice(0, args.max_results || 50) });
@@ -192,7 +219,7 @@ const tools = [
         const escaped = args.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
         const pattern = `(function|class|def|interface|type|struct|enum|const|let|var|fn|pub\\s+fn|public\\s+class)\\s+${escaped}\\b`;
         let res = null;
-        if (await hasRipgrep()) res = await rgSearch(abs, pattern, { maxResults: (args.max_results || 30) * 3 });
+        if (await hasRipgrep()) { const r = await rgSearch(abs, pattern, { maxResults: (args.max_results || 30) * 3, signal: ctx.abortSignal }); res = r ? r.matches : null; }
         if (res === null) res = await jsGrep(abs, pattern, (args.max_results || 30) * 3); // 复用同一 rg 路径
         return ok({ matches: res.slice(0, args.max_results || 30) });
       } catch (e) { return fail('SEARCH_FAILED', e.message); }
@@ -200,4 +227,4 @@ const tools = [
   }
 ];
 
-module.exports = { tools, jsGrep, jsFindFiles, hasRipgrep, rgSearch, rgFindFiles, DEFAULT_EXCLUDES };
+module.exports = { tools, jsGrep, jsFindFiles, hasRipgrep, rgSearch, rgFindFiles, runRgStreaming, RG_MAX_OUTPUT_BYTES, DEFAULT_EXCLUDES };

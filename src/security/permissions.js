@@ -74,10 +74,13 @@ class PermissionEngine {
     /** @type {Map<string, string>} scope -> range */
     this.grants = new Map();
     this.projectGrants = new Map();
+    // v2.9.9 CU2-A：task grant 绑定真实 taskPermissionId（taskId||runId），新 Run 不继承。
+    this.taskGrants = new Map();
     this.taskId = null;
     this.store = opts.store || null;
     this.projectId = opts.projectId || null;
     this.parent = opts.parent || null;
+    this._persistedRevision = null;
     if (this.store) this.loadPersisted();
   }
 
@@ -98,6 +101,31 @@ class PermissionEngine {
   }
 
   setTask(taskId) { this.taskId = taskId; }
+
+  /**
+   * v2.9.9 CU2-A：live policy refresh。evaluate 前若 store revision 变化则重建持久层
+   * （global/project），保留 in-memory 的 task/once。避免每次 evaluate 全表查询。
+   */
+  syncPersisted() {
+    if (!this.store || !this.store.permissionGrants || typeof this.store.permissionGrants.revision !== 'function') return;
+    let rev = null;
+    try { rev = this.store.permissionGrants.revision(); } catch { return; }
+    if (rev === this._persistedRevision) return;
+    this._persistedRevision = rev;
+    // 清除持久类别（project/always/deny），保留 ephemeral（task/once）
+    for (const [scope, range] of Array.from(this.grants.entries())) {
+      if (range === 'project' || range === 'always' || range === 'deny') this.grants.delete(scope);
+    }
+    this.projectGrants.clear();
+    this.loadPersisted();
+  }
+
+  /** 绑定真实身份的 task grant（in-memory，不持久化）。 */
+  grantTask(scope, taskPermissionId) {
+    if (!SCOPES.includes(scope) || !taskPermissionId) return;
+    this.grants.set(scope, 'task');
+    this.taskGrants.set(scope, taskPermissionId);
+  }
   /**
    * P5-A.1 §3：切换 project 时必须清除旧 project-scoped grants，
    * 保留真正 global 的 always/deny（及 in-memory task/once），再加载新项目持久化 grants。
@@ -117,6 +145,7 @@ class PermissionEngine {
 
   /** Verdict from this engine alone, ignoring any parent. */
   evaluateLocal(scope, ctx = {}) {
+    this.syncPersisted();
     if (!SCOPES.includes(scope)) {
       // Unknown scope → ask by default (fail safe)
       return 'ask';
@@ -132,7 +161,13 @@ class PermissionEngine {
       }
       return 'ask';
     }
-    if (grant === 'task' && ctx.taskId && ctx.taskId === this.taskId) return 'allow';
+    if (grant === 'task') {
+      // CU2-A：task grant 绑定具体 taskPermissionId；新 Run（不同 id）不继承。
+      const bound = this.taskGrants.get(scope);
+      if (bound) { return (ctx.taskId && bound === ctx.taskId) ? 'allow' : 'ask'; }
+      if (ctx.taskId && ctx.taskId === this.taskId) return 'allow'; // 兼容旧 setTask 用法
+      return 'ask';
+    }
     if (grant === 'once') {
       // once grant is consumed after this evaluation
       this.grants.delete(scope);

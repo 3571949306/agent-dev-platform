@@ -41,8 +41,9 @@ test('search_text：rg 与 js 结果结构一致 / 无 rg 时 fallback', async (
     assert.ok(jsRes.some(r => r.path === 'a.js'), 'js 路径应命中 a.js');
     assert.ok(!jsRes.some(r => r.path.startsWith('node_modules')), 'js 路径应排除 node_modules');
     if (useRg) {
-      const rgRes = await rgSearch(dir, 'hello', { maxResults: 50 });
-      assert.ok(Array.isArray(rgRes), 'rg 应返回数组');
+      const rgOut = await rgSearch(dir, 'hello', { maxResults: 50 });
+      const rgRes = rgOut.matches;
+      assert.ok(Array.isArray(rgRes), 'rg 应返回 matches 数组');
       assert.ok(rgRes.some(r => r.path === 'a.js'), 'rg 应命中 a.js');
       assert.ok(!rgRes.some(r => r.path.startsWith('node_modules')), 'rg 应排除 node_modules');
       for (const r of rgRes) {
@@ -64,7 +65,8 @@ test('search_files：rg 与 js 通配语义一致 / 无 rg 时 fallback', async 
     const jsRes = await jsFindFiles(dir, '*.js', 50);
     assert.ok(jsRes.some(r => r.path === 'a.js'));
     if (useRg) {
-      const rgRes = await rgFindFiles(dir, '*.js', { maxResults: 50 });
+      const rgOut = await rgFindFiles(dir, '*.js', { maxResults: 50 });
+      const rgRes = rgOut.files;
       assert.ok(Array.isArray(rgRes));
       assert.ok(rgRes.some(r => r.path === 'a.js'));
       assert.ok(!rgRes.some(r => r.path.startsWith('node_modules')), 'rg 应排除 node_modules');

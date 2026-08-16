@@ -13,6 +13,7 @@
 const { isHighRisk } = require('../../tools/terminal');
 const { getAgentHub } = require('../../agents/hub/agentHub');
 const { dispatchRuntimeHook } = require('../../hooks/runtimeDispatch');
+const { authorize } = require('../../security/permissionRuntime');
 
 const MAX_OUTPUT = 20000;   // 单条 stdout/stderr 摘要上限
 const MAX_ERRORS = 20;      // errors 列表上限
@@ -214,14 +215,20 @@ async function executeDelegateCore(ctx, action, args) {
   }
   if (required.includes('research')) requestedScopes.add('network');
   if (required.includes('mcp')) requestedScopes.add('mcp');
-  const permissionContext = { taskId: ctx.taskId, projectId: ctx.projectId };
-  const allowedScopes = [...requestedScopes].filter(scope =>
-    !ctx.permissionEngine || ctx.permissionEngine.evaluate(scope, permissionContext) === 'allow'
-  );
+  if (required.includes('computer')) requestedScopes.add('computer');
+  const permissionContext = { taskId: ctx.taskId, runId: ctx.runId, projectId: ctx.projectId };
+  // v2.9.9 CU2-A §22：ASK != DENY 且 ASK != ALLOW。
+  //   parent deny  → scope 不可委派；
+  //   parent ask   → Child 可进入 permission gate（实际动作仍须向用户询问）；
+  //   parent allow → Child 可执行。
+  const verdictOf = (s) => (ctx.permissionEngine ? ctx.permissionEngine.evaluate(s, permissionContext) : 'allow');
+  const allowedScopes = [...requestedScopes].filter(s => verdictOf(s) !== 'deny');
+  const promptScopes = [...requestedScopes].filter(s => verdictOf(s) === 'ask');
   const hubTask = {
     goal: typeof delegateTask === 'string' ? delegateTask : ((delegateTask && delegateTask.goal) || String(delegateTask || '')),
     required,
     allowedScopes,
+    promptScopes,
     projectRoot: ctx.projectRoot,
     projectId: ctx.projectId,
     conversationId: ctx.conversationId,
@@ -303,22 +310,18 @@ async function runTool(ctx, toolName, args, getTool, action, meta = {}) {
   if (ctx && ctx.permissionEngine) {
     const scope = tool.permissionFor ? tool.permissionFor(args) : tool.permission;
     if (scope) {
-      const verdict = ctx.permissionEngine.evaluate(scope, { taskId: ctx.taskId, projectId: ctx.projectId });
-      if (verdict === 'deny') {
-        return { ok: false, tool: toolName, action, error: { code: 'PERMISSION_DENIED', message: `权限被拒绝: ${scope}` } };
-      }
-      if (verdict === 'ask') {
-        let allowed = false;
-        if (typeof ctx.requestPermission === 'function') {
-          try {
-            // B10.6 — 权限请求携带真实 Run 身份（Permission Card 可跳到 Run Detail）
-            const d = await ctx.requestPermission({ scope, tool: toolName, args, conversationId: ctx.conversationId, runId: ctx.runId || null, agentId: ctx.agentId || null });
-            allowed = !!(d && d.decision === 'allow');
-          } catch { allowed = false; }
-        }
-        if (!allowed) {
-          return { ok: false, tool: toolName, action, error: { code: 'PERMISSION_DENIED', message: `权限未批准（ask）: ${scope}` } };
-        }
+      // v2.9.9 CU2-A：统一经 permissionRuntime.authorize 完整消费 range
+      // （once/task/project/always/deny），不再只看 decision==='allow'。
+      const auth = await authorize({
+        engine: ctx.permissionEngine,
+        scope,
+        context: { taskId: ctx.taskId, runId: ctx.runId, projectId: ctx.projectId },
+        requestPermission: ctx.requestPermission,
+        requestMeta: { tool: toolName, args, conversationId: ctx.conversationId, runId: ctx.runId || null, agentId: ctx.agentId || null }
+      });
+      if (!auth.allowed) {
+        const code = auth.code === 'PERMISSION_RANGE_INVALID' ? 'PERMISSION_RANGE_INVALID' : 'PERMISSION_DENIED';
+        return { ok: false, tool: toolName, action, error: { code, message: `权限未批准: ${scope} (${auth.decision}${auth.range ? '/' + auth.range : ''})` } };
       }
     }
   }

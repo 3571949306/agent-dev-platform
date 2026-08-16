@@ -78,7 +78,8 @@ test('agentLoop：一轮 3 个 read_file 并发执行且结果全保留', async 
   };
   await runAgentLoop(deps);
   assert.strictEqual(execCount, 3, 'executeAction 应被调用 3 次');
-  assert.strictEqual(maxInFlight, 3, '3 个只读应真正并发');
+  // v2.9.9 CU2-A §46：实际执行 maxInFlight=2（背压），不再全部同时启动
+  assert.ok(maxInFlight >= 1 && maxInFlight <= 2, `maxInFlight 应<=2 (got ${maxInFlight})`);
   assert.strictEqual(toolResultCount, 3, 'onToolResult 应记录 3 条');
 });
 

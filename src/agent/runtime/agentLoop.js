@@ -42,6 +42,26 @@ const { composeSystemPromptWithHookContext } = require('./prompts/mainCodingAgen
 const { dispatchRuntimeHook } = require('../../hooks/runtimeDispatch');
 const mt = require('./multiturn');
 
+/**
+ * v2.9.9 CU2-A §46：保序限并发执行。adapter 可接受最多 8 个只读 tool call，
+ * 但实际执行 maxInFlight=2（不要 Promise.all 全部同时启动），结果保持原顺序。
+ */
+async function mapLimit(items, limit, fn) {
+  const results = new Array(items.length);
+  let next = 0;
+  async function worker() {
+    while (next < items.length) {
+      const i = next++;
+      results[i] = await fn(items[i], i);
+    }
+  }
+  const pool = [];
+  for (let k = 0; k < Math.min(limit, items.length); k++) pool.push(worker());
+  await Promise.all(pool);
+  return results;
+}
+const READ_ONLY_MAX_INFLIGHT = 2;
+
 /** 多轮历史结果摘要（tool_result content）。 */
 function mtResultText(r) {
   if (!r) return '';
@@ -241,9 +261,10 @@ async function runAgentLoop(deps) {
         for (const a of acts) safeEmit(emit, EVENTS.ACTION, { runId, action: a, thought: a.thought });
         setState('READING_CONTEXT');
         safeEmit(emit, EVENTS.TIMELINE, { runId, entry: timelineEntry('read', `并发执行 ${acts.length} 个只读操作`) });
-        const results = await Promise.all(acts.map(a =>
+        // CU2-A §46：maxInFlight=2 保序执行（背压），不全部同时启动。
+        const results = await mapLimit(acts, READ_ONLY_MAX_INFLIGHT, a =>
           executeAction(ctx, a, getTool).catch(e => ({ ok: false, tool: a.type, action: a, error: { code: 'EXEC_ERROR', message: e.message, retryable: true } }))
-        ));
+        );
         counters.toolCalls += acts.length;
         acts.forEach((a, i) => {
           const r = results[i];

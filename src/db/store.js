@@ -608,6 +608,11 @@ const modelCalls = {
 };
 
 // ---------- permission_grants (persisted project/always decisions) ----------
+// v2.9.9 Computer Use 2.0-A — 权限持久化 revision：每次 save/remove/clear 递增，
+// PermissionEngine 在 evaluate 前发现 revision 变化即重新同步（live policy refresh，无需重启）。
+let permissionRevision = 0;
+const bumpPermissionRevision = () => { permissionRevision++; };
+
 const permissionGrants = {
   list(projectId) {
     const rows = projectId
@@ -615,17 +620,46 @@ const permissionGrants = {
       : db().prepare('SELECT * FROM permission_grants ORDER BY created_at').all();
     return rows.map(r => ({ id: r.id, scope: r.scope, range: r.grant_range, project_id: r.project_id, created_at: r.created_at }));
   },
+  revision() { return permissionRevision; },
   save({ scope, range, projectId }) {
     if (range !== 'project' && range !== 'always' && range !== 'deny') return null;
     const pid = range === 'project' ? (projectId || null) : null;
     const ex = db().prepare('SELECT id FROM permission_grants WHERE scope=? AND (project_id IS ? OR project_id=?)').get(scope, pid, pid);
-    if (ex) { db().prepare('UPDATE permission_grants SET grant_range=?,created_at=? WHERE id=?').run(range, now(), ex.id); return ex.id; }
+    if (ex) { db().prepare('UPDATE permission_grants SET grant_range=?,created_at=? WHERE id=?').run(range, now(), ex.id); bumpPermissionRevision(); return ex.id; }
     const id = uuid();
     db().prepare('INSERT INTO permission_grants (id,scope,grant_range,project_id,created_at) VALUES (?,?,?,?,?)').run(id, scope, range, pid, now());
+    bumpPermissionRevision();
     return id;
   },
-  remove(id) { db().prepare('DELETE FROM permission_grants WHERE id=?').run(id); return true; },
-  clear() { db().prepare('DELETE FROM permission_grants').run(); return true; }
+  remove(id) { db().prepare('DELETE FROM permission_grants WHERE id=?').run(id); bumpPermissionRevision(); return true; },
+  clear() { db().prepare('DELETE FROM permission_grants').run(); bumpPermissionRevision(); return true; },
+  // v2.9.9 CU2-A：Settings 将 scope 设为 ASK 时必须真正删除对应 saved grant。
+  removeScope(scope, projectId) {
+    const pid = projectId || null;
+    const rows = db().prepare('SELECT id FROM permission_grants WHERE scope=? AND (project_id IS ? OR project_id=?)').all(scope, pid, pid);
+    for (const r of rows) db().prepare('DELETE FROM permission_grants WHERE id=?').run(r.id);
+    // 全局行与项目行同时存在时一并清理（不依赖 ORDER BY 覆盖）
+    const globalRows = db().prepare('SELECT id FROM permission_grants WHERE scope=? AND project_id IS NULL').all(scope);
+    for (const r of globalRows) db().prepare('DELETE FROM permission_grants WHERE id=?').run(r.id);
+    bumpPermissionRevision();
+    return rows.length + globalRows.length;
+  },
+  // 用单一持久策略替换某 scope（先删旧行再写新行；ASK 等价于删除）。
+  replacePolicy(scope, range, projectId) {
+    this.removeScope(scope, projectId);
+    if (range === 'always' || range === 'deny') return this.save({ scope, range, projectId: null });
+    if (range === 'project') return this.save({ scope, range, projectId });
+    return null; // ask → 无持久 grant
+  },
+  // 当前对某 scope 的生效持久策略（global deny > global always > matching project）。
+  effectivePolicy(scope, projectId) {
+    const rows = this.list(projectId || null);
+    const rel = rows.filter(r => r.scope === scope);
+    const g = rel.find(r => !r.project_id && r.range === 'deny'); if (g) return 'deny';
+    const a = rel.find(r => !r.project_id && r.range === 'always'); if (a) return 'always';
+    const p = rel.find(r => r.project_id && r.range === 'project'); if (p) return 'project';
+    return 'ask';
+  }
 };
 const audit = {
   record({ agent, task, tool, target, permission, result }) {

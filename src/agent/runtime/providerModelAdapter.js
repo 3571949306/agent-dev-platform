@@ -33,13 +33,13 @@ function providerSupportsTools(provider, agent) {
  * 把 provider 返回的 toolCalls（第一个）转成 {type, args}。
  * arguments 为 JSON 字符串，解析失败返回 null（由调用方按 AGENT_RESPONSE_INVALID 语义回退文本路径）。
  */
-function toolCallToAction(toolCalls) {
+function toolCallToAction(toolCalls, validateFn) {
   if (!Array.isArray(toolCalls) || !toolCalls.length) return null;
   const tc = toolCalls[0];
   if (!tc || !tc.name) return null;
   let args = {};
   try { args = JSON.parse(tc.arguments || '{}'); } catch { return null; }
-  const v = validateAction({ type: tc.name, args });
+  const v = (validateFn || ((n, a) => validateAction({ type: n, args: a })))(tc.name, args);
   return v.ok ? v.action : null;
 }
 
@@ -48,16 +48,18 @@ function toolCallToAction(toolCalls) {
  * 仅当「≥2 个且全部为只读 action」时返回数组（一轮并发只读）；
  * 否则返回 null（调用方回退单 action 语义，写类仍单轮单个）。
  */
-function toolCallsToParallelReadActions(toolCalls) {
+function toolCallsToParallelReadActions(toolCalls, validateFn, readOnlySet) {
   if (!Array.isArray(toolCalls) || toolCalls.length < 2) return null;
+  const ro = readOnlySet || READ_ONLY_ACTIONS;
+  const vf = validateFn || ((n, a) => validateAction({ type: n, args: a }));
   const actions = [];
   for (const tc of toolCalls) {
     if (!tc || !tc.name) return null;
     let args = {};
     try { args = JSON.parse(tc.arguments || '{}'); } catch { return null; }
-    const v = validateAction({ type: tc.name, args });
+    const v = vf(tc.name, args);
     if (!v.ok) return null;
-    if (!READ_ONLY_ACTIONS.includes(v.action.type)) return null; // 含写类 → 不并发
+    if (!ro.includes(v.action.type)) return null; // 含非只读 → 不并发
     actions.push(v.action);
   }
   return actions.length >= 2 ? actions.slice(0, MAX_PARALLEL_READ) : null;
@@ -75,9 +77,16 @@ function toolCallsToParallelReadActions(toolCalls) {
  * }
  */
 function createProviderModelAdapter(opts) {
-  const { buildProvider, agent, resolveModel, timeoutMs = 120000, onModelOutcome } = opts;
+  const { buildProvider, agent, resolveModel, timeoutMs = 120000, onModelOutcome, toolProfile } = opts;
   if (typeof buildProvider !== 'function') throw new Error('buildProvider 必填');
   const reportOutcome = typeof onModelOutcome === 'function' ? onModelOutcome : null;
+  // v2.9.9 CU2-A §17：可选 toolProfile（{buildTools, validateToolCall, readOnlyActions,
+  // multipleToolCallPolicy}）。默认 undefined → 完全保持 Coding Agent 现有行为
+  // （buildActionTools / validateAction / 并行只读）。Computer Agent 注入 Computer profile。
+  const profile = toolProfile || null;
+  const profileValidate = profile && typeof profile.validateToolCall === 'function' ? profile.validateToolCall : null;
+  const profileReadOnly = profile && Array.isArray(profile.readOnlyActions) ? profile.readOnlyActions : null;
+  const profileSingle = !!(profile && profile.multipleToolCallPolicy === 'single');
 
   return {
     name: 'ProviderModelAdapter',
@@ -85,7 +94,7 @@ function createProviderModelAdapter(opts) {
       const provider = await buildProvider(agent);
       const modelInfo = resolveModel ? resolveModel(agent) : { model: agent.model };
       const supportsTools = providerSupportsTools(provider, agent);
-      const tools = supportsTools ? buildActionTools() : null;
+      const tools = supportsTools ? (profile && typeof profile.buildTools === 'function' ? profile.buildTools() : buildActionTools()) : null;
       // v2.9.9 Phase 5：真实多轮历史（assistant tool_use → user tool_result）仅在 tools 路径启用；
       // 纯文本 fallback provider 仍用单条 context 拼接（两条路径并存，supportsTools 区分）。
       const messages = (supportsTools && Array.isArray(history) && history.length)
@@ -133,9 +142,10 @@ function createProviderModelAdapter(opts) {
         text = buf.join('') || result.content || '';
         // Phase 1：原生 tool calling 优先。toolCalls 非空且能解析出合法 action 时直接带出；
         // 解析失败（非法 JSON / 未知 type）返回 action=null，Loop 会回退 parseAndValidate(text)。
-        action = supportsTools ? toolCallToAction(result.toolCalls) : null;
+        action = supportsTools ? toolCallToAction(result.toolCalls, profileValidate) : null;
         // Phase 2：一轮多个只读 action 时带出 actions 数组，Loop 并发执行。
-        parallelActions = supportsTools ? toolCallsToParallelReadActions(result.toolCalls) : null;
+        // CU2-A：single 策略（Computer）不并发；默认 Coding 保持并行只读。
+        parallelActions = (supportsTools && !profileSingle) ? toolCallsToParallelReadActions(result.toolCalls, profileValidate, profileReadOnly) : null;
         // B16.3 — Wire Truth：provider 回报的真实上线模型（responseModel）与请求模型对照
         if (reportOutcome) {
           try {
